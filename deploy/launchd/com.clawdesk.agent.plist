@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ClawDesk — macOS LaunchAgent
+  
+  Install:
+    cp deploy/launchd/com.clawdesk.agent.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.clawdesk.agent.plist
+  
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.clawdesk.agent.plist
+    rm ~/Library/LaunchAgents/com.clawdesk.agent.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.clawdesk.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/clawdesk</string>
+        <string>gateway</string>
+        <string>run</string>
+        <string>--port</string>
+        <string>18789</string>
+        <string>--bind</string>
+        <string>loopback</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+        <key>CLAWDESK_DATA_DIR</key>
+        <string>/Users/Shared/clawdesk/data</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/clawdesk.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/clawdesk.err</string>
+
+    <key>WorkingDirectory</key>
+    <string>/tmp</string>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

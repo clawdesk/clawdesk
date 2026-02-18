@@ -1,0 +1,36 @@
+# Build artifacts
+target/
+*.swp
+*.swo
+*~
+
+# Version control
+.git/
+.gitignore
+
+# IDE / editor
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation (not needed in container)
+*.md
+docs/
+LICENSE
+
+# Test artifacts
+*.profraw
+lcov.info
+
+# Local configuration
+.env
+.env.*
+*.local
+
+# Debug symbols
+*.dSYM/
+*.pdb

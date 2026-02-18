@@ -1,0 +1,22 @@
+[package]
+name = "clawdesk-autoreply"
+description = "Auto-reply engine — trigger classification, reply pipeline, send policy, delivery"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clawdesk-types = { workspace = true }
+clawdesk-domain = { workspace = true }
+clawdesk-agents = { workspace = true }
+clawdesk-channel = { workspace = true }
+clawdesk-storage = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

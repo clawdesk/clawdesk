@@ -1,0 +1,39 @@
+[package]
+name = "clawdesk-cli"
+description = "CLI binary for ClawDesk — the multi-channel AI agent gateway"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "clawdesk"
+path = "src/main.rs"
+
+[dependencies]
+clawdesk-types = { workspace = true }
+clawdesk-storage = { workspace = true }
+clawdesk-domain = { workspace = true }
+clawdesk-sochdb = { workspace = true }
+clawdesk-channel = { workspace = true }
+clawdesk-channels = { workspace = true }
+clawdesk-providers = { workspace = true }
+clawdesk-agents = { workspace = true }
+clawdesk-gateway = { workspace = true }
+clawdesk-plugin = { workspace = true }
+clawdesk-skills = { workspace = true }
+clawdesk-cron = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+clap_complete = "4"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+toml = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

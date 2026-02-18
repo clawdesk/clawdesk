@@ -1,0 +1,47 @@
+[package]
+name = "clawdesk-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Durable agent execution runtime for ClawDesk — checkpoint-and-resume with SochDB journaling"
+
+[lib]
+doctest = false
+
+[dependencies]
+# --- Internal crates ---
+clawdesk-types = { workspace = true }
+clawdesk-storage = { workspace = true }
+clawdesk-agents = { workspace = true }
+clawdesk-providers = { workspace = true }
+clawdesk-domain = { workspace = true }
+clawdesk-sochdb = { workspace = true }
+clawdesk-acp = { workspace = true }
+
+# --- SochDB ---
+sochdb = { workspace = true }
+
+# --- Async runtime ---
+tokio = { workspace = true }
+
+# --- Serialization ---
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# --- Error handling ---
+thiserror = { workspace = true }
+
+# --- Observability ---
+tracing = { workspace = true }
+
+# --- Time ---
+chrono = { workspace = true }
+
+# --- Utilities ---
+uuid = { workspace = true }
+async-trait = { workspace = true }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

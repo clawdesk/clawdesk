@@ -1,0 +1,102 @@
+# =============================================================================
+# ClawDesk — Docker Compose
+# =============================================================================
+#
+# Profiles:
+#   default          — ClawDesk gateway only
+#   ollama           — ClawDesk + local Ollama for offline LLM
+#   full             — ClawDesk + Ollama + monitoring
+#
+# Usage:
+#   docker compose up                          # gateway only
+#   docker compose --profile ollama up         # with Ollama
+#   docker compose --profile full up           # with Ollama + Prometheus
+#
+# Environment (.env file or shell):
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   OPENAI_API_KEY=sk-...
+#   GEMINI_API_KEY=AI...
+# =============================================================================
+
+services:
+  # ── ClawDesk Gateway ─────────────────────────────────────────
+  clawdesk:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: clawdesk
+    restart: unless-stopped
+    ports:
+      - "18789:18789"
+    volumes:
+      - clawdesk-data:/data
+    environment:
+      - CLAWDESK_DATA_DIR=/data
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
+      - RUST_LOG=${RUST_LOG:-info}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18789/api/v1/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      ollama:
+        condition: service_started
+        required: false
+    networks:
+      - clawdesk-net
+
+  # ── Ollama (local LLM) ──────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: clawdesk-ollama
+    profiles: ["ollama", "full"]
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - clawdesk-net
+
+  # ── Prometheus (metrics) ─────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: clawdesk-prometheus
+    profiles: ["full"]
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - clawdesk-net
+
+volumes:
+  clawdesk-data:
+    driver: local
+  ollama-models:
+    driver: local
+  prometheus-data:
+    driver: local
+
+networks:
+  clawdesk-net:
+    driver: bridge

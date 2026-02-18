@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "clawdesk.fullname" . }}-config
+  labels:
+    {{- include "clawdesk.labels" . | nindent 4 }}
+data:
+  CLAWDESK_LOG_LEVEL: {{ .Values.clawdesk.logLevel | quote }}
+  CLAWDESK_GATEWAY_HOST: {{ .Values.clawdesk.gateway.host | quote }}
+  CLAWDESK_GATEWAY_PORT: {{ .Values.clawdesk.gateway.port | quote }}
+  CLAWDESK_SOCHDB_URL: {{ .Values.clawdesk.sochdb.url | quote }}
+  CLAWDESK_SOCHDB_POOL_SIZE: {{ .Values.clawdesk.sochdb.pool_size | quote }}
+  CLAWDESK_MEMORY_EMBEDDING_PROVIDER: {{ .Values.clawdesk.memory.embeddingProvider | quote }}
+  CLAWDESK_MEMORY_EMBEDDING_MODEL: {{ .Values.clawdesk.memory.embeddingModel | quote }}
+  CLAWDESK_MEMORY_VECTOR_DIMENSIONS: {{ .Values.clawdesk.memory.vectorDimensions | quote }}
+  {{- if .Values.clawdesk.metrics.enabled }}
+  CLAWDESK_METRICS_ENABLED: "true"
+  CLAWDESK_METRICS_PORT: {{ .Values.clawdesk.metrics.port | quote }}
+  {{- end }}
+  {{- if .Values.clawdesk.tracing.enabled }}
+  CLAWDESK_TRACING_ENABLED: "true"
+  CLAWDESK_TRACING_ENDPOINT: {{ .Values.clawdesk.tracing.endpoint | quote }}
+  {{- end }}

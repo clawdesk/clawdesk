@@ -1,0 +1,156 @@
+# Default values for ClawDesk Helm chart.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/clawdesk/clawdesk
+  pullPolicy: IfNotPresent
+  tag: ""  # Defaults to chart appVersion
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 9090
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: clawdesk.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# ClawDesk-specific configuration
+clawdesk:
+  # Logging level (trace, debug, info, warn, error)
+  logLevel: info
+
+  # Gateway configuration
+  gateway:
+    host: "0.0.0.0"
+    port: 8080
+
+  # SochDB connection
+  sochdb:
+    url: "sochdb://sochdb:5432"
+    pool_size: 10
+
+  # Channel configurations (secrets should use Kubernetes Secrets)
+  channels:
+    telegram:
+      enabled: false
+      # tokenSecretName: clawdesk-telegram-token
+    discord:
+      enabled: false
+      # tokenSecretName: clawdesk-discord-token
+    slack:
+      enabled: false
+      # tokenSecretName: clawdesk-slack-token
+    webchat:
+      enabled: true
+
+  # LLM provider configuration
+  providers:
+    openai:
+      enabled: true
+      model: "gpt-4o-mini"
+      # apiKeySecretName: clawdesk-openai-key
+    anthropic:
+      enabled: false
+      # apiKeySecretName: clawdesk-anthropic-key
+
+  # Memory / embedding configuration
+  memory:
+    embeddingProvider: "openai"
+    embeddingModel: "text-embedding-3-small"
+    vectorDimensions: 1536
+
+  # Observability
+  metrics:
+    enabled: true
+    port: 9090
+  tracing:
+    enabled: false
+    endpoint: ""
+
+# Probes
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+startupProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Persistent volume for local storage
+persistence:
+  enabled: false
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi

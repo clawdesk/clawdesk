@@ -1,0 +1,50 @@
+[package]
+name = "clawdesk-tauri"
+description = "Tauri 2.0 desktop application shell for ClawDesk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "clawdesk_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+clawdesk-types = { workspace = true }
+clawdesk-storage = { workspace = true }
+clawdesk-sochdb = { workspace = true }
+sochdb = { workspace = true }
+clawdesk-channel = { workspace = true }
+clawdesk-providers = { workspace = true }
+clawdesk-agents = { workspace = true }
+clawdesk-gateway = { workspace = true }
+clawdesk-security = { workspace = true }
+clawdesk-tunnel = { workspace = true }
+clawdesk-domain = { workspace = true }
+clawdesk-skills = { workspace = true }
+clawdesk-runtime = { workspace = true }
+clawdesk-media = { workspace = true }
+clawdesk-plugin = { workspace = true }
+clawdesk-acp = { workspace = true }
+clawdesk-discovery = { workspace = true }
+clawdesk-observability = { workspace = true }
+clawdesk-infra = { workspace = true }
+clawdesk-memory = { workspace = true }
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"

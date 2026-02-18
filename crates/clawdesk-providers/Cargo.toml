@@ -1,0 +1,21 @@
+[package]
+name = "clawdesk-providers"
+description = "LLM provider adapters for ClawDesk (Anthropic, OpenAI, Google, Ollama)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clawdesk-types = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+rustc-hash = { workspace = true }

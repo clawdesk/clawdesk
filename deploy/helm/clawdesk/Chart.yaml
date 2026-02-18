@@ -1,0 +1,17 @@
+apiVersion: v2
+name: clawdesk
+description: ClawDesk — AI-native, multi-channel desktop agent platform
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ai
+  - agent
+  - multi-channel
+  - chatbot
+  - llm
+maintainers:
+  - name: ClawDesk Team
+home: https://github.com/clawdesk/clawdesk
+sources:
+  - https://github.com/clawdesk/clawdesk

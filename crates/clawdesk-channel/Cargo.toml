@@ -1,0 +1,15 @@
+[package]
+name = "clawdesk-channel"
+description = "Channel plugin trait hierarchy with layered capabilities for ClawDesk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clawdesk-types = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

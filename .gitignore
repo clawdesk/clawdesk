@@ -1,0 +1,21 @@
+# Build artifacts
+/target/
+**/node_modules/
+**/dist/
+
+# Generated
+clawdesk_rust.txt
+c-code.py
+*.pyc
+__pycache__/
+_write_*.py
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Tauri
+/crates/clawdesk-tauri/gen/

@@ -1,0 +1,15 @@
+[package]
+name = "clawdesk-storage"
+description = "Storage port (trait definitions) for ClawDesk — no implementation, just contracts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clawdesk-types = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

@@ -1,0 +1,40 @@
+[Unit]
+Description=ClawDesk AI Agent Gateway
+Documentation=https://github.com/clawdesk/clawdesk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clawdesk
+Group=clawdesk
+
+ExecStart=/usr/local/bin/clawdesk gateway run --port 18789 --bind loopback
+Restart=on-failure
+RestartSec=5
+
+# Environment
+Environment=RUST_LOG=info
+Environment=CLAWDESK_DATA_DIR=/var/lib/clawdesk
+EnvironmentFile=-/etc/clawdesk/env
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/clawdesk
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+# Resource limits
+LimitNOFILE=65536
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

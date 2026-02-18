@@ -1,0 +1,17 @@
+[package]
+name = "clawdesk-tui"
+description = "Terminal UI — ratatui-based interactive chat, status dashboard, and model picker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clawdesk-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+ratatui = "0.29"
+crossterm = "0.28"

@@ -1,0 +1,41 @@
+[package]
+name = "clawdesk-gateway"
+description = "Axum-based HTTP/WebSocket gateway for ClawDesk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+clawdesk-types = { workspace = true }
+clawdesk-storage = { workspace = true }
+clawdesk-domain = { workspace = true }
+clawdesk-channel = { workspace = true }
+clawdesk-providers = { workspace = true }
+clawdesk-agents = { workspace = true }
+clawdesk-sochdb = { workspace = true }
+clawdesk-plugin = { workspace = true }
+clawdesk-cron = { workspace = true }
+async-trait = { workspace = true }
+arc-swap = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+async-stream = "0.3"
+clawdesk-skills = { workspace = true }
+clawdesk-channels = { workspace = true }
+clawdesk-security = { workspace = true }
+clawdesk-runtime = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
