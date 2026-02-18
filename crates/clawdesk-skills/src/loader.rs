@@ -1,7 +1,8 @@
 //! Skill loader — discovers and loads skills from the filesystem.
 //!
-//! Scans `~/.clawdesk/skills/` for skill directories containing a
-//! `skill.toml` manifest and `prompt.md` file.
+//! Scans `~/.clawdesk/skills/` for skill directories containing either:
+//! - `skill.toml` + `prompt.md` (native ClawDesk format), or
+//! - `SKILL.md` (OpenClaw format — auto-adapted via `openclaw_adapter`)
 //!
 //! Directory structure:
 //! ```text
@@ -9,14 +10,14 @@
 //! ├── core-web-search/
 //! │   ├── skill.toml        # Manifest
 //! │   └── prompt.md         # Prompt fragment (Markdown)
-//! ├── community-code-review/
-//! │   ├── skill.toml
-//! │   └── prompt.md
+//! ├── openclaw-weather/
+//! │   └── SKILL.md          # OpenClaw format (auto-adapted)
 //! ```
 
 use crate::definition::{
     Skill, SkillId, SkillManifest, SkillSource,
 };
+use crate::openclaw_adapter::{self, AdapterConfig};
 use crate::registry::SkillRegistry;
 use crate::verification::{SkillVerifier, TrustLevel, VerificationResult};
 use sha2::{Sha256, Digest};
@@ -159,8 +160,29 @@ impl SkillLoader {
     }
 
     /// Load a single skill from a directory.
+    ///
+    /// Supports two formats:
+    /// 1. Native ClawDesk: `skill.toml` + `prompt.md`
+    /// 2. OpenClaw compat: `SKILL.md` (YAML frontmatter + Markdown body)
     async fn load_skill(&self, dir: &Path) -> Result<Skill, String> {
         let manifest_path = dir.join("skill.toml");
+        let openclaw_path = dir.join("SKILL.md");
+
+        // ── OpenClaw format fallback ──────────────────────────
+        // If no skill.toml but SKILL.md exists, use the adapter.
+        if !manifest_path.exists() && openclaw_path.exists() {
+            let adapter_config = AdapterConfig::default();
+            let adapted = openclaw_adapter::load_openclaw_skill(dir, &adapter_config)
+                .await
+                .map_err(|e| format!("OpenClaw adapter: {}", e))?;
+            info!(
+                skill = %adapted.skill.manifest.id,
+                tier = %adapted.tier,
+                "loaded OpenClaw-format skill via adapter"
+            );
+            return Ok(adapted.skill);
+        }
+
         let prompt_path = dir.join("prompt.md");
 
         // Read manifest

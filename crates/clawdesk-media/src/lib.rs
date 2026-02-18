@@ -15,7 +15,11 @@
 
 pub mod audio;
 pub mod cache;
+pub mod cache_pro;
+pub mod dag;
 pub mod document;
+pub mod error;
+pub mod format;
 pub mod image;
 pub mod pipeline;
 pub mod processor;

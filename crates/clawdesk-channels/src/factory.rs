@@ -534,6 +534,51 @@ impl ChannelFactory {
             )))
         });
 
+        // --- BlueBubbles ---
+        // Required: server_url, password
+        // Optional: allowed_chats, enable_groups, use_private_api
+        let bluebubbles_schema = ConfigSchema::new("bluebubbles")
+            .required("server_url", ConfigFieldType::String, "BlueBubbles server URL")
+            .required("password", ConfigFieldType::String, "BlueBubbles server password")
+            .optional("enable_groups", ConfigFieldType::Bool, "Allow group chats")
+            .optional("use_private_api", ConfigFieldType::Bool, "Use private API mode");
+        f.register_with_schema("bluebubbles", bluebubbles_schema, |config| {
+            let server_url = config.require_string("server_url")?;
+            let password = config.require_string("password")?;
+            let enable_groups = config.bool_or("enable_groups", true);
+            let use_private_api = config.bool_or("use_private_api", true);
+            Ok(Arc::new(crate::bluebubbles::BlueBubblesChannel::new(
+                crate::bluebubbles::BlueBubblesConfig {
+                    server_url,
+                    password,
+                    allowed_chats: vec![],
+                    enable_groups,
+                    use_private_api,
+                },
+            )))
+        });
+
+        // --- Zalo User (Personal) ---
+        // Optional: profile_name, zca_binary, enable_groups
+        let zalouser_schema = ConfigSchema::new("zalouser")
+            .optional("profile_name", ConfigFieldType::String, "zca CLI profile name")
+            .optional("zca_binary", ConfigFieldType::String, "Path to zca binary")
+            .optional("enable_groups", ConfigFieldType::Bool, "Allow group chats");
+        f.register_with_schema("zalouser", zalouser_schema, |config| {
+            let profile_name = config.string_or("profile_name", "default");
+            let zca_binary = config.string_or("zca_binary", "zca");
+            let enable_groups = config.bool_or("enable_groups", true);
+            Ok(Arc::new(crate::zalouser::ZaloUserChannel::new(
+                crate::zalouser::ZaloUserConfig {
+                    profile_name,
+                    zca_binary,
+                    enable_groups,
+                    allowed_users: vec![],
+                    allowed_groups: vec![],
+                },
+            )))
+        });
+
         f
     }
 }

@@ -1,7 +1,7 @@
 import { useCallback, type CSSProperties } from "react";
 import { Icon } from "../components/Icon";
 
-export type ShellNavKey = "now" | "ask" | "routines" | "accounts" | "library";
+export type ShellNavKey = "chat" | "skills" | "automations" | "settings";
 
 interface ShellNavItem {
   key: ShellNavKey;

@@ -741,6 +741,92 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
   },
 ];
 
+// ══════════════════════════════════════════════════════════════
+// Additional types from integration map (real.js)
+// ══════════════════════════════════════════════════════════════
+
+export interface AuditEntry {
+  timestamp: string;
+  category: string;
+  event: string;
+  actor: string;
+  detail: string;
+  outcome: string;
+}
+
+export interface ToolCallEntry {
+  tool_name: string;
+  args_preview: string;
+  result_preview: string;
+}
+
+export interface RuntimeStatus {
+  active_runs: number;
+  completed_runs: number;
+  failed_runs: number;
+}
+
+export interface CacheEntry {
+  key: string;
+  value: string;
+  source?: string;
+  ttl_secs?: number;
+}
+
+export interface CreatePipelineRequest {
+  name: string;
+  description: string;
+  steps: PipelineNodeDescriptor[];
+  edges: [number, number][];
+}
+
+export interface PipelineRunResult {
+  pipeline_id: string;
+  pipeline_name: string;
+  success: boolean;
+  steps: PipelineStepResult[];
+  total_duration_ms: number;
+}
+
+export interface PipelineStepResult {
+  step_index: number;
+  label: string;
+  node_type: string;
+  success: boolean;
+  duration_ms: number;
+  output_preview?: string;
+  error?: string;
+}
+
+// ── Typed event payloads ───────────────────────────────────
+
+export type AgentEventPayload =
+  | { type: "StreamChunk"; text: string }
+  | { type: "ToolStart"; tool: string; args_preview: string }
+  | { type: "ToolEnd"; tool: string; success: boolean; duration_ms: number }
+  | { type: "RoundComplete"; round: number; input_tokens: number; output_tokens: number }
+  | { type: "Finished"; total_tokens: number; cost_usd: number }
+  | { type: "Error"; message: string };
+
+export interface AgentEventEnvelope {
+  agent_id: string;
+  event: AgentEventPayload;
+}
+
+export interface IncomingMessageEvent {
+  channel: string;
+  sender: string;
+  content: string;
+  timestamp: string;
+}
+
+export interface ApprovalPendingEvent {
+  request_id: string;
+  agent_id: string;
+  action: string;
+  detail: string;
+}
+
 // ── View Identifiers ─────────────────────────────────────────
 
 export type ViewId =

@@ -46,12 +46,19 @@
 //! where w(c) is the importance weight of capability c.
 
 pub mod agent_card;
+pub mod capability;
+pub mod content_router;
+pub mod discovery;
+pub mod error;
 pub mod message;
 pub mod router;
 pub mod server;
+pub mod streaming;
 pub mod task;
 
 pub use agent_card::{AgentCard, AgentCapability, AgentEndpoint, AgentSkill};
+pub use capability::{CapSet, CapabilityId};
+pub use error::{AcpError, AcpErrorKind, AcpResult, Retryability, Severity};
 pub use message::{A2AMessage, A2AMessageKind, Artifact};
 pub use router::{AgentDirectory, AgentRouter, RoutingDecision};
 pub use server::A2AHandler;

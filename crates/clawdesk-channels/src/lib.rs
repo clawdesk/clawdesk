@@ -47,6 +47,8 @@ pub mod telegram;
 pub mod tlon;
 pub mod twitch;
 pub mod markdown;
+pub mod bluebubbles;
 pub mod webchat;
 pub mod whatsapp;
 pub mod zalo;
+pub mod zalouser;

@@ -36,6 +36,7 @@ pub mod executor;
 pub mod journal;
 pub mod life_os;
 pub mod loader;
+pub mod openclaw_adapter;
 pub mod promotion;
 pub mod registry;
 pub mod resolver;

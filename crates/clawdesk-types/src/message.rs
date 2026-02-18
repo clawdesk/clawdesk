@@ -364,7 +364,9 @@ pub enum MessageOrigin {
     Twitch { channel_name: String, message_id: String },
     NextcloudTalk { base_url: String, room_token: String, message_id: i64 },
     Zalo { user_id: String, message_id: String },
+    ZaloUser { user_id: String, message_id: String },
     Tlon { ship: String, channel_name: String },
+    BlueBubbles { chat_guid: String, message_guid: String, handle: String },
     Internal { source: String },
 }
 
@@ -391,7 +393,9 @@ impl MessageOrigin {
             Self::Twitch { .. } => ChannelId::Twitch,
             Self::NextcloudTalk { .. } => ChannelId::NextcloudTalk,
             Self::Zalo { .. } => ChannelId::Zalo,
+            Self::ZaloUser { .. } => ChannelId::ZaloUser,
             Self::Tlon { .. } => ChannelId::Tlon,
+            Self::BlueBubbles { .. } => ChannelId::BlueBubbles,
             Self::Internal { .. } => ChannelId::Internal,
         }
     }
@@ -418,7 +422,9 @@ impl MessageOrigin {
             Self::Twitch { message_id, .. } => message_id.clone(),
             Self::NextcloudTalk { message_id, .. } => message_id.to_string(),
             Self::Zalo { message_id, .. } => message_id.clone(),
+            Self::ZaloUser { message_id, .. } => message_id.clone(),
             Self::Tlon { channel_name, .. } => channel_name.clone(),
+            Self::BlueBubbles { message_guid, .. } => message_guid.clone(),
             Self::Internal { source, .. } => source.clone(),
         }
     }

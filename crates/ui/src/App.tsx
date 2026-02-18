@@ -8,6 +8,9 @@ import type {
   HealthResponse,
   SessionSummary,
   ChatMessage as BackendChatMessage,
+  ChannelInfo,
+  PipelineDescriptor,
+  PipelineNodeDescriptor,
   AuthProfileInfo,
   ApprovalRequestInfo,
   PluginSummary,
@@ -30,8 +33,12 @@ import { classifyError } from "./lib/error-recovery";
 import { subscribeAppEvents } from "./stores/event-bus";
 import { translateRisk } from "./lib/risk-translator";
 import { AppShell } from "./shell/AppShell";
+import { ChatPage } from "./pages/ChatPage";
+import { SkillsPage } from "./pages/SkillsPage";
+import { AutomationsPage } from "./pages/AutomationsPage";
+import { SettingsPage } from "./pages/SettingsPage";
 
-type NavKey = "now" | "ask" | "routines" | "accounts" | "library";
+type NavKey = "chat" | "skills" | "automations" | "settings";
 type RiskLevel = "low" | "medium" | "high";
 type StatusLevel = "ok" | "warn" | "error";
 type InspectorTab = "plan" | "approvals" | "proof" | "undo" | "trace" | "memory" | "graph";
@@ -130,6 +137,7 @@ interface TimelineItem {
 interface RoutineItem {
   id: string;
   name: string;
+  pipelineId?: string;
   type: RoutineType;
   scheduleLabel: string;
   nextRun: string;
@@ -212,12 +220,33 @@ interface FrontendAgentEventPayload {
   event: { type: AgentEventType; [key: string]: unknown };
 }
 
+interface ApprovalPendingPayload {
+  id: string;
+  tool_name: string;
+  command: string;
+  risk: string;
+}
+
+interface RoutineExecutedPayload {
+  pipeline_id?: string;
+  pipeline_name?: string;
+  success?: boolean;
+  duration_ms?: number;
+  total_duration_ms?: number;
+  timestamp?: string;
+}
+
+interface IncomingMessagePayload {
+  agent_id?: string;
+  preview?: string;
+  timestamp?: string;
+}
+
 const NAV_ITEMS: { key: NavKey; label: string; shortcut: string; icon: string }[] = [
-  { key: "now", label: "Now", shortcut: "1", icon: "now" },
-  { key: "ask", label: "Ask", shortcut: "2", icon: "ask" },
-  { key: "routines", label: "Routines", shortcut: "3", icon: "routines" },
-  { key: "accounts", label: "Accounts", shortcut: "4", icon: "accounts" },
-  { key: "library", label: "Library", shortcut: "5", icon: "library" },
+  { key: "chat", label: "Chat", shortcut: "1", icon: "ask" },
+  { key: "skills", label: "Skills", shortcut: "2", icon: "library" },
+  { key: "automations", label: "Automations", shortcut: "3", icon: "routines" },
+  { key: "settings", label: "Settings", shortcut: "4", icon: "settings" },
 ];
 
 const INITIAL_THREADS: ThreadItem[] = [];
@@ -292,6 +321,79 @@ function toThreadFromSession(session: SessionSummary): ThreadItem {
   };
 }
 
+function createThreadForAgent(agentId: string, agent: DesktopAgent | null, patch?: Partial<ThreadItem>): ThreadItem {
+  const base: ThreadItem = {
+    id: agentId,
+    agentId,
+    title: agent ? `${agent.name} session` : "Conversation",
+    lastActivity: "No messages yet",
+    pendingApprovals: 0,
+    routineGenerated: false,
+    hasProofOutputs: false,
+    messages: [],
+  };
+  return { ...base, ...patch };
+}
+
+function mapChannelStatusToAccountStatus(status: string): AccountStatus {
+  const lowered = status.toLowerCase();
+  if (lowered.includes("connected") || lowered === "healthy" || lowered === "active") {
+    return "connected";
+  }
+  if (lowered.includes("permission")) return "permissions_changed";
+  if (lowered.includes("disabled")) return "disabled";
+  return "needs_sign_in";
+}
+
+function accountFromChannel(channel: ChannelInfo): AccountItem {
+  return {
+    id: channel.id,
+    name: channel.name,
+    status: mapChannelStatusToAccountStatus(channel.status),
+    summary: `${channel.channel_type} • ${channel.status}`,
+    capabilities: {
+      read: true,
+      search: true,
+      draft: true,
+      sendWrite: true,
+      delete: false,
+      execute: false,
+    },
+    boundaries: {
+      folders: "N/A",
+      recipients: "N/A",
+      channels: channel.name,
+    },
+    lastUsed: "Unknown",
+  };
+}
+
+function routineFromPipeline(pipeline: PipelineDescriptor): RoutineItem {
+  return {
+    id: pipeline.id,
+    pipelineId: pipeline.id,
+    name: pipeline.name,
+    type: "at_time",
+    scheduleLabel: "Manual run",
+    nextRun: "On demand",
+    destination: "Pipeline output",
+    enabled: true,
+    quietHours: "Not configured",
+    lastResult: "skipped",
+    lastReason: pipeline.description || "No runs yet",
+    history: [],
+    recipeId: pipeline.id,
+  };
+}
+
+function mergeApprovals(existing: ApprovalItem[], incoming: ApprovalItem[]): ApprovalItem[] {
+  const byId = new Map(existing.map((item) => [item.id, item]));
+  for (const item of incoming) {
+    byId.set(item.id, item);
+  }
+  return Array.from(byId.values());
+}
+
 function accountStatusLabel(status: AccountStatus): string {
   if (status === "connected") return "Connected";
   if (status === "needs_sign_in") return "Needs sign-in";
@@ -306,48 +408,48 @@ function getRiskFromText(input: string): RiskLevel {
   return "low";
 }
 
-function buildPlanFromRequest(input: string): PlanCard {
+function buildPlanFromRequest(input: string, targetLabel: string): PlanCard {
   const risk = getRiskFromText(input);
   const goal = input.trim().length > 0 ? input.trim() : "Handle your request";
-  const needsSend = risk === "high";
+  const requiresApproval = risk === "high";
 
   return {
     planId: makeId("plan"),
     goal,
     risk,
     touches: [
-      { account: "Messages", type: needsSend ? "send message" : "draft message" },
-      { account: "Files", type: "read notes" },
+      { account: targetLabel, type: "process request" },
+      ...(requiresApproval ? [{ account: "Approvals", type: "high-risk review" }] : []),
     ],
     steps: [
       {
-        stepId: "step_draft",
-        title: "Create a clean draft",
-        details: "Use your recent context to build the first version.",
-        inputs: "Thread context + latest request",
-        expectedOutput: "Draft text",
+        stepId: "step_submit",
+        title: "Send request to backend agent",
+        details: `Submit your prompt to ${targetLabel} for execution.`,
+        inputs: "User request",
+        expectedOutput: "Accepted request",
         requiresApproval: false,
-        preview: `Draft preview for: ${goal}`,
+        preview: goal,
       },
       {
-        stepId: "step_preview",
-        title: "Show exact preview",
-        details: "Present what will be sent or changed before execution.",
-        inputs: "Draft text",
-        expectedOutput: "Preview card",
+        stepId: "step_execute",
+        title: "Execute tools if needed",
+        details: "Run backend tools/policies based on agent capabilities.",
+        inputs: "Agent runtime context",
+        expectedOutput: "Tool outputs + model response",
         requiresApproval: false,
-        preview: "Preview includes destination and final content.",
+        preview: "Tool activity will appear in result metadata.",
       },
       {
-        stepId: "step_action",
-        title: needsSend ? "Send approved result" : "Save approved draft",
-        details: needsSend
-          ? "Send to selected destination once approved."
-          : "Save draft to selected location once approved.",
-        inputs: "Approved preview",
-        expectedOutput: needsSend ? "Sent confirmation" : "Saved output",
-        requiresApproval: true,
-        preview: needsSend ? "Destination: #team-updates" : "Output: ~/Documents/draft.txt",
+        stepId: "step_finalize",
+        title: "Return response and receipt",
+        details: "Show final answer with trace/usage metadata.",
+        inputs: "Model output",
+        expectedOutput: "Assistant response",
+        requiresApproval,
+        preview: requiresApproval
+          ? "High-risk request detected; approval needed before finalization."
+          : "No extra approval required.",
       },
     ],
   };
@@ -356,7 +458,7 @@ function buildPlanFromRequest(input: string): PlanCard {
 export default function App() {
   const initialRouteRef = useRef(parseRouteHash(window.location.hash));
   const [activeNav, setActiveNavState] = useState<NavKey>(
-    (initialRouteRef.current.nav as NavKey) ?? "now"
+    (initialRouteRef.current.nav as NavKey) ?? "chat"
   );
   const [threads, setThreads] = useState<ThreadItem[]>(INITIAL_THREADS);
   const [activeThreadId, setActiveThreadIdState] = useState<string>(
@@ -439,6 +541,8 @@ export default function App() {
   const [backendApprovals, setBackendApprovals] = useState<ApprovalRequestInfo[]>([]);
   const [backendPlugins, setBackendPlugins] = useState<PluginSummary[]>([]);
   const [backendPeers, setBackendPeers] = useState<PeerInfo[]>([]);
+  const [backendChannels, setBackendChannels] = useState<ChannelInfo[]>([]);
+  const [backendPipelines, setBackendPipelines] = useState<PipelineDescriptor[]>([]);
   const [backendMemoryStats, setBackendMemoryStats] = useState<MemoryStatsResponse | null>(null);
   const [backendMemoryHits, setBackendMemoryHits] = useState<MemoryHit[]>([]);
   const [backendNotifications, setBackendNotifications] = useState<NotificationInfo[]>([]);
@@ -528,6 +632,14 @@ export default function App() {
     }
   }, [recipes, selectedRecipeId]);
 
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    if (activeNav !== "chat") return;
+    if (!threads.some((thread) => thread.id === selectedAgentId)) return;
+    if (activeThreadId === selectedAgentId) return;
+    setActiveThreadIdState(selectedAgentId);
+  }, [selectedAgentId, threads, activeNav, activeThreadId]);
+
   const pendingApprovals = approvals.filter((approval) => approval.status === "pending");
 
   const filteredRecipes = useMemo(
@@ -550,7 +662,7 @@ export default function App() {
   const navigate = useCallback(
     (nextNav: NavKey, options?: { threadId?: string; replace?: boolean }) => {
       const nextThreadId =
-        options?.threadId ?? (nextNav === "ask" ? activeThreadId : undefined);
+        options?.threadId ?? (nextNav === "chat" ? activeThreadId : undefined);
       const hash = buildRouteHash({
         nav: nextNav,
         threadId: nextThreadId,
@@ -568,7 +680,7 @@ export default function App() {
 
   const selectThread = useCallback(
     (threadId: string, options?: { replace?: boolean }) => {
-      navigate("ask", { threadId, replace: options?.replace });
+      navigate("chat", { threadId, replace: options?.replace });
     },
     [navigate]
   );
@@ -600,7 +712,7 @@ export default function App() {
       }
       window.localStorage.setItem("clawdesk.onboarding.complete", "1");
       setOnboardingOpen(false);
-      navigate("ask");
+      navigate("chat");
       setMessageInput(result.firstPrompt);
       pushToast("ClawDesk setup completed.");
     } catch (error) {
@@ -610,8 +722,10 @@ export default function App() {
   }
 
   const runQuickCheck = useCallback(async () => {
-    const needsSignIn = accounts.some((account) => account.status === "needs_sign_in");
-    const permissionsChanged = accounts.some((account) => account.status === "permissions_changed");
+    // Only flag account problems when accounts have actually been loaded from backend
+    const hasLoadedAccounts = accounts.length > 0;
+    const needsSignIn = hasLoadedAccounts && accounts.some((account) => account.status === "needs_sign_in");
+    const permissionsChanged = hasLoadedAccounts && accounts.some((account) => account.status === "permissions_changed");
 
     try {
       const health = await api.getHealth();
@@ -619,6 +733,11 @@ export default function App() {
       // Refresh all backend data on quick check
       api.listSkills().then((s) => setBackendSkills(s)).catch(() => {});
       api.listAgents().then((a) => setBackendAgents(a)).catch(() => {});
+      api.listChannels().then((c) => setBackendChannels(c)).catch(() => {});
+      api.listPipelines().then((p) => {
+        setBackendPipelines(p);
+        setRoutines(p.map(routineFromPipeline));
+      }).catch(() => {});
       api.getMetrics().then((m) => setBackendMetrics(m)).catch(() => {});
       api.getSecurityStatus().then((s) => setBackendSecurity(s)).catch(() => {});
       api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => {});
@@ -626,8 +745,20 @@ export default function App() {
       api.getMemoryStats().then((s) => setBackendMemoryStats(s)).catch(() => {});
       api.listNotifications().then((n) => setBackendNotifications(n)).catch(() => {});
       api.listCanvases().then((c) => setBackendCanvases(c)).catch(() => {});
-      api.listAuthProfiles().then((p) => setBackendAuthProfiles(p)).catch(() => {});
-      if (needsSignIn || permissionsChanged) {
+
+      // Fetch fresh auth profiles and determine actual account health
+      let freshNeedsSignIn = needsSignIn;
+      let freshPermissionsChanged = permissionsChanged;
+      try {
+        const freshProfiles = await api.listAuthProfiles();
+        setBackendAuthProfiles(freshProfiles);
+        freshNeedsSignIn = freshProfiles.some((p) => p.is_expired);
+        freshPermissionsChanged = freshProfiles.some((p) => p.failure_count > 0 && !p.is_expired);
+      } catch {
+        // fall back to local accounts state
+      }
+
+      if (freshNeedsSignIn || freshPermissionsChanged) {
         setStatus({
           level: "warn",
           summary: "One account needs attention.",
@@ -689,7 +820,7 @@ export default function App() {
       window.history.replaceState(
         null,
         "",
-        buildRouteHash({ nav: activeNav, threadId: activeNav === "ask" ? activeThreadId : undefined })
+        buildRouteHash({ nav: activeNav, threadId: activeNav === "chat" ? activeThreadId : undefined })
       );
     } else {
       applyRoute();
@@ -710,13 +841,15 @@ export default function App() {
     async function loadBackendData() {
       try {
         // Phase 1: Core data
-        const [health, agents, skills, security, metrics, sessions] = await Promise.allSettled([
+        const [health, agents, skills, security, metrics, sessions, channels, pipelines] = await Promise.allSettled([
           api.getHealth(),
           api.listAgents(),
           api.listSkills(),
           api.getSecurityStatus(),
           api.getMetrics(),
           api.listSessions(),
+          api.listChannels(),
+          api.listPipelines(),
         ]);
 
         if (health.status === "fulfilled") setBackendHealth(health.value);
@@ -745,6 +878,21 @@ export default function App() {
         }
         if (security.status === "fulfilled") setBackendSecurity(security.value);
         if (metrics.status === "fulfilled") setBackendMetrics(metrics.value);
+        if (channels.status === "fulfilled") {
+          setBackendChannels(channels.value);
+          setAccounts(channels.value.map(accountFromChannel));
+          if (channels.value.length > 0) {
+            setSelectedAccountId((current) => current || channels.value[0].id);
+          }
+        }
+        if (pipelines.status === "fulfilled") {
+          setBackendPipelines(pipelines.value);
+          const mappedRoutines = pipelines.value.map(routineFromPipeline);
+          setRoutines(mappedRoutines);
+          if (mappedRoutines.length > 0) {
+            setSelectedRoutineId((current) => current || mappedRoutines[0].id);
+          }
+        }
         if (sessions.status === "fulfilled" && sessions.value.length > 0) {
           const sessionThreads = await Promise.all(
             sessions.value.map(async (session) => {
@@ -773,6 +921,15 @@ export default function App() {
               ? current
               : sessionThreads[0].id
           );
+        } else if (agents.status === "fulfilled" && agents.value.length > 0) {
+          // Session model is agent-scoped. Seed thread list from real agents when no prior messages exist.
+          const agentThreads = agents.value.map((agent) =>
+            createThreadForAgent(agent.id, agent)
+          );
+          setThreads(agentThreads);
+          setActiveThreadIdState((current) =>
+            agentThreads.some((thread) => thread.id === current) ? current : agentThreads[0].id
+          );
         }
 
         // Phase 2: Extended backend data — auth, plugins, peers, memory, canvas, observability
@@ -791,31 +948,52 @@ export default function App() {
 
         if (authProfiles.status === "fulfilled") {
           setBackendAuthProfiles(authProfiles.value);
-          // Map auth profiles to account items for the Accounts view
-          const profileAccounts: AccountItem[] = authProfiles.value.map((p) => ({
-            id: p.id,
-            name: p.provider,
-            status: p.is_expired ? "needs_sign_in" as AccountStatus : p.failure_count > 0 ? "permissions_changed" as AccountStatus : "connected" as AccountStatus,
-            summary: `Provider: ${p.provider} — failures: ${p.failure_count}`,
-            capabilities: {
-              read: true,
-              search: true,
-              draft: true,
-              sendWrite: false,
-              delete: false,
-              execute: false,
-            },
-            boundaries: {
-              folders: "N/A",
-              recipients: "N/A",
-              channels: "N/A",
-            },
-            lastUsed: p.last_used ?? "Never",
-          }));
-          if (profileAccounts.length > 0) {
-            setAccounts(profileAccounts);
-            setSelectedAccountId((prev) => prev || profileAccounts[0].id);
-          }
+          const profileByProvider = new Map(
+            authProfiles.value.map((profile) => [profile.provider.toLowerCase(), profile])
+          );
+          setAccounts((prev) => {
+            if (prev.length === 0) {
+              return authProfiles.value.map((profile) => ({
+                id: profile.id,
+                name: profile.provider,
+                status: profile.is_expired
+                  ? "needs_sign_in"
+                  : profile.failure_count > 0
+                    ? "permissions_changed"
+                    : "connected",
+                summary: `Provider: ${profile.provider} • failures: ${profile.failure_count}`,
+                capabilities: {
+                  read: true,
+                  search: true,
+                  draft: true,
+                  sendWrite: true,
+                  delete: false,
+                  execute: false,
+                },
+                boundaries: {
+                  folders: "N/A",
+                  recipients: "N/A",
+                  channels: profile.provider,
+                },
+                lastUsed: profile.last_used ?? "Never",
+              }));
+            }
+            return prev.map((account) => {
+              const profile = profileByProvider.get(account.name.toLowerCase());
+              if (!profile) return account;
+              return {
+                ...account,
+                status: profile.is_expired
+                  ? "needs_sign_in"
+                  : profile.failure_count > 0
+                    ? "permissions_changed"
+                    : account.status,
+                summary: `${account.summary} • profile failures: ${profile.failure_count}`,
+                lastUsed: profile.last_used ?? account.lastUsed,
+              };
+            });
+          });
+          setSelectedAccountId((prev) => prev || authProfiles.value[0]?.id || "");
         }
         if (plugins.status === "fulfilled") setBackendPlugins(plugins.value);
         if (peers.status === "fulfilled") setBackendPeers(peers.value);
@@ -852,16 +1030,42 @@ export default function App() {
   useEffect(() => {
     pollRef.current = setInterval(async () => {
       try {
-        const [metrics, security, notifications, memStats] = await Promise.allSettled([
+        const [metrics, security, notifications, memStats, channels, pipelines] = await Promise.allSettled([
           api.getMetrics(),
           api.getSecurityStatus(),
           api.listNotifications(),
           api.getMemoryStats(),
+          api.listChannels(),
+          api.listPipelines(),
         ]);
         if (metrics.status === "fulfilled") setBackendMetrics(metrics.value);
         if (security.status === "fulfilled") setBackendSecurity(security.value);
         if (notifications.status === "fulfilled") setBackendNotifications(notifications.value);
         if (memStats.status === "fulfilled") setBackendMemoryStats(memStats.value);
+        if (channels.status === "fulfilled") {
+          setBackendChannels(channels.value);
+          setAccounts((prev) => {
+            const byId = new Map(prev.map((account) => [account.id, account]));
+            return channels.value.map((channel) => {
+              const mapped = accountFromChannel(channel);
+              const existing = byId.get(channel.id);
+              return existing
+                ? { ...mapped, boundaries: existing.boundaries, capabilities: existing.capabilities, lastUsed: existing.lastUsed }
+                : mapped;
+            });
+          });
+        }
+        if (pipelines.status === "fulfilled") {
+          setBackendPipelines(pipelines.value);
+          setRoutines((prev) => {
+            const existingById = new Map(prev.map((routine) => [routine.id, routine]));
+            return pipelines.value.map((pipeline) => {
+              const mapped = routineFromPipeline(pipeline);
+              const existing = existingById.get(mapped.id);
+              return existing ? { ...mapped, enabled: existing.enabled, history: existing.history, lastResult: existing.lastResult, lastReason: existing.lastReason } : mapped;
+            });
+          });
+        }
       } catch { /* silent */ }
     }, 30_000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
@@ -872,10 +1076,112 @@ export default function App() {
     subscribeAppEvents({
       onMetricsUpdated: (metrics) => setBackendMetrics(metrics),
       onSecurityChanged: (security) => setBackendSecurity(security),
-      onRoutineExecuted: () => pushToast("Routine run completed."),
-      onIncomingMessage: () => pushToast("New channel message received."),
+      onRoutineExecuted: (payload) => {
+        const data = payload as RoutineExecutedPayload | null;
+        const pipelineId = data && typeof data.pipeline_id === "string" ? data.pipeline_id : "";
+        const pipelineName =
+          data && typeof data.pipeline_name === "string"
+            ? data.pipeline_name
+            : "Routine";
+        const success = data?.success !== false;
+        const durationMs =
+          typeof data?.duration_ms === "number"
+            ? data.duration_ms
+            : typeof data?.total_duration_ms === "number"
+              ? data.total_duration_ms
+              : 0;
+        const timestamp =
+          data && typeof data.timestamp === "string"
+            ? data.timestamp
+            : new Date().toISOString();
+        if (pipelineId) {
+          const historyEntry = {
+            at: formatLastActivity(timestamp),
+            result: (success ? "ok" : "failed") as RoutineResult,
+            reason: success
+              ? `Pipeline run completed${durationMs > 0 ? ` in ${Math.max(1, Math.round(durationMs / 1000))}s` : ""}`
+              : "Pipeline run failed",
+          };
+          setRoutines((prev) =>
+            prev.map((routine) =>
+              routine.id === pipelineId
+                ? {
+                    ...routine,
+                    lastResult: historyEntry.result,
+                    lastReason: historyEntry.reason,
+                    history: [historyEntry, ...routine.history],
+                  }
+                : routine
+            )
+          );
+        }
+        api.listPipelines().then((pipelines) => {
+          setBackendPipelines(pipelines);
+          setRoutines((prev) => {
+            const existingById = new Map(prev.map((routine) => [routine.id, routine]));
+            return pipelines.map((pipeline) => {
+              const mapped = routineFromPipeline(pipeline);
+              const existing = existingById.get(mapped.id);
+              return existing
+                ? {
+                    ...mapped,
+                    enabled: existing.enabled,
+                    history: existing.history,
+                    lastResult: existing.lastResult,
+                    lastReason: existing.lastReason,
+                  }
+                : mapped;
+            });
+          });
+        }).catch(() => {});
+        pushToast(`${pipelineName} ${success ? "completed" : "failed"}.`);
+      },
+      onIncomingMessage: (payload) => {
+        const data = payload as IncomingMessagePayload | null;
+        const agentId = data && typeof data.agent_id === "string" ? data.agent_id : "";
+        const preview =
+          data && typeof data.preview === "string" && data.preview.length > 0
+            ? data.preview
+            : "New channel message received.";
+        const timestamp =
+          data && typeof data.timestamp === "string"
+            ? data.timestamp
+            : new Date().toISOString();
+        if (!agentId) {
+          pushToast(preview);
+          return;
+        }
+        upsertThreadForAgent(agentId, {
+          title: preview.length > 44 ? `${preview.slice(0, 44)}...` : preview,
+          lastActivity: formatLastActivity(timestamp),
+        });
+        hydrateThreadMessages(agentId, preview, timestamp).catch(() => {
+          // Best-effort thread refresh for incoming messages.
+        });
+        pushToast(preview);
+      },
       onSystemAlert: (alert) => {
         if (alert?.message) pushToast(alert.message);
+      },
+      onApprovalPending: (payload) => {
+        const data = payload as Partial<ApprovalPendingPayload> | null;
+        if (!data || typeof data.id !== "string") return;
+        const risk: RiskLevel =
+          data.risk === "high" || data.risk === "low" || data.risk === "medium"
+            ? data.risk
+            : "medium";
+        const nextApproval: ApprovalItem = {
+          id: data.id,
+          planId: currentPlan.planId || "plan_backend",
+          stepId: `approval_${data.id}`,
+          summary: data.tool_name ?? "Approval request",
+          where: "Backend policy gate",
+          impact: data.command ?? "Command execution requires approval.",
+          risk,
+          status: "pending",
+        };
+        setApprovals((prev) => mergeApprovals(prev, [nextApproval]));
+        pushToast(`Approval needed: ${nextApproval.summary}`);
       },
       onAgentEvent: (payload) => {
         const data = payload as FrontendAgentEventPayload | null;
@@ -990,7 +1296,13 @@ export default function App() {
     return () => {
       if (cleanup) cleanup();
     };
-  }, [pushToast, streamingAgentId, streamingThreadId, streamingMessageId]);
+  }, [
+    currentPlan.planId,
+    pushToast,
+    streamingAgentId,
+    streamingMessageId,
+    streamingThreadId,
+  ]);
 
   useEffect(() => {
     const onResize = () => setViewportWidth(window.innerWidth);
@@ -1008,18 +1320,14 @@ export default function App() {
       }
       if (meta && event.key.toLowerCase() === "n") {
         event.preventDefault();
-        const newThread: ThreadItem = {
-          id: makeId("thread"),
-          title: "New request",
-          lastActivity: "Just now",
-          pendingApprovals: 0,
-          routineGenerated: false,
-          hasProofOutputs: false,
-          messages: [],
-        };
-        setThreads((prev) => [newThread, ...prev]);
-        selectThread(newThread.id);
-        pushToast("Created a new Ask thread.");
+        navigate("chat");
+        if (selectedAgentId) {
+          selectThread(selectedAgentId, { replace: true });
+          setMessageInput("");
+          pushToast("Ready for a new request.");
+        } else {
+          pushToast("Create or select an agent first.");
+        }
       }
       if (meta && event.key.toLowerCase() === "r") {
         event.preventDefault();
@@ -1046,7 +1354,7 @@ export default function App() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [navigate, pushToast, runQuickCheck, selectThread]);
+  }, [navigate, pushToast, runQuickCheck, selectThread, selectedAgentId]);
 
   function markThreadActivity(threadId: string, patch: Partial<ThreadItem>) {
     setThreads((prev) =>
@@ -1054,16 +1362,87 @@ export default function App() {
     );
   }
 
+  function upsertThreadForAgent(agentId: string, patch?: Partial<ThreadItem>) {
+    const agent = backendAgents.find((item) => item.id === agentId) ?? null;
+    setThreads((prev) => {
+      if (prev.some((thread) => thread.id === agentId)) {
+        if (!patch) return prev;
+        return prev.map((thread) =>
+          thread.id === agentId ? { ...thread, ...patch } : thread
+        );
+      }
+      return [createThreadForAgent(agentId, agent, patch), ...prev];
+    });
+  }
+
+  async function hydrateThreadMessages(agentId: string, fallbackPreview?: string, fallbackTimestamp?: string) {
+    if (!agentId) return;
+    try {
+      const backendMessages = await api.getSessionMessages(agentId);
+      const mappedMessages = toThreadMessages(backendMessages);
+      const lastMessage = mappedMessages[mappedMessages.length - 1];
+      setThreads((prev) =>
+        prev.map((thread) =>
+          thread.id === agentId
+            ? {
+                ...thread,
+                lastActivity: lastMessage?.time ?? thread.lastActivity,
+                messages: mappedMessages,
+              }
+            : thread
+        )
+      );
+    } catch {
+      if (!fallbackPreview) return;
+      const timeLabel = fallbackTimestamp ? formatLastActivity(fallbackTimestamp) : nowLabel();
+      setThreads((prev) =>
+        prev.map((thread) => {
+          if (thread.id !== agentId) return thread;
+          const tail = thread.messages[thread.messages.length - 1];
+          if (tail?.role === "assistant" && tail.text === fallbackPreview) {
+            return { ...thread, lastActivity: timeLabel };
+          }
+          return {
+            ...thread,
+            lastActivity: timeLabel,
+            messages: [
+              ...thread.messages,
+              {
+                id: makeId("message"),
+                role: "assistant",
+                text: fallbackPreview,
+                time: timeLabel,
+              },
+            ],
+          };
+        })
+      );
+    }
+  }
+
+  useEffect(() => {
+    if (!activeThreadId) return;
+    hydrateThreadMessages(activeThreadId).catch(() => {
+      // Thread hydration is best-effort.
+    });
+  }, [activeThreadId, hydrateThreadMessages]);
+
   async function requestToAssistant(text: string) {
     if (isSending) return;
 
-    const plan = buildPlanFromRequest(text);
+    const agentId = selectedAgentId;
+    if (!agentId) {
+      pushToast("Select or create an agent first.");
+      return;
+    }
+
+    const selectedAgent = backendAgents.find((agent) => agent.id === agentId) ?? null;
+    const targetLabel = selectedAgent?.name ?? "selected agent";
+    const plan = buildPlanFromRequest(text, targetLabel);
     setCurrentPlan(plan);
 
-    if (!activeThread) return;
-    const threadId = activeThread.id;
-    const agentId = selectedAgentId;
-    const usingBackendAgent = Boolean(agentId);
+    const threadId = agentId;
+    const cacheNamespace = `agent:${agentId}`;
     const userMessage: ThreadMessage = {
       id: makeId("message"),
       role: "user",
@@ -1071,167 +1450,273 @@ export default function App() {
       time: nowLabel(),
     };
 
-    // Add user message immediately
+    setThreads((prev) => {
+      const index = prev.findIndex((thread) => thread.id === threadId);
+      if (index === -1) {
+        return [
+          {
+            id: threadId,
+            agentId,
+            title: text.length > 44 ? `${text.slice(0, 44)}...` : text,
+            lastActivity: "Just now",
+            pendingApprovals: 0,
+            routineGenerated: false,
+            hasProofOutputs: false,
+            messages: [userMessage],
+          },
+          ...prev,
+        ];
+      }
+      return prev.map((thread) =>
+        thread.id === threadId
+          ? {
+              ...thread,
+              title: text.length > 44 ? `${text.slice(0, 44)}...` : text,
+              lastActivity: "Just now",
+              messages: [...thread.messages, userMessage],
+            }
+          : thread
+      );
+    });
+    if (activeThreadId !== threadId) {
+      selectThread(threadId, { replace: true });
+    }
+
+    let assistantText = "";
+    let resultLabel = "Response received";
+    const streamedMessageId = makeId("message");
+    const placeholderMessage: ThreadMessage = {
+      id: streamedMessageId,
+      role: "assistant",
+      text: "",
+      time: nowLabel(),
+      result: "Thinking...",
+    };
+
+    setIsSending(true);
     setThreads((prev) =>
       prev.map((thread) => {
         if (thread.id !== threadId) return thread;
         return {
           ...thread,
-          title: text.length > 44 ? `${text.slice(0, 44)}...` : text,
           lastActivity: "Just now",
-          messages: [...thread.messages, userMessage],
+          messages: [...thread.messages, placeholderMessage],
         };
       })
     );
+    setStreamingAgentId(agentId);
+    setStreamingThreadId(threadId);
+    setStreamingMessageId(streamedMessageId);
 
-    // Try to send message to backend agent
-    let assistantText = "I mapped this into a clear plan. You can preview first, run step-by-step, or run all.";
-    let resultLabel = `Plan ready: ${plan.steps.length} steps`;
-    let streamedMessageId: string | null = null;
+    let matchedSkills: string[] = [];
+    let routeSummary = "";
+    try {
+      const [triggerInfo, routingInfo, cacheInfo] = await Promise.all([
+        api.evaluateSkillTriggers(text).catch(() => []),
+        selectedAgent
+          ? api.getProviderRouting(selectedAgent.model, ["text_completion", "system_prompt", "streaming"]).catch(() => null)
+          : Promise.resolve(null),
+        api.cacheLookup(text, cacheNamespace).catch(() => null),
+      ]);
 
-    if (agentId) {
-      setIsSending(true);
-      streamedMessageId = makeId("message");
-      const placeholderMessage: ThreadMessage = {
-        id: streamedMessageId,
-        role: "assistant",
-        text: "",
-        time: nowLabel(),
-        result: "Thinking...",
-      };
-      setThreads((prev) =>
-        prev.map((thread) => {
-          if (thread.id !== threadId) return thread;
-          return {
-            ...thread,
-            lastActivity: "Just now",
-            messages: [...thread.messages, placeholderMessage],
-          };
-        })
-      );
-      setStreamingAgentId(agentId);
-      setStreamingThreadId(threadId);
-      setStreamingMessageId(streamedMessageId);
-      try {
-        const response = await api.sendMessage(agentId, text);
-        assistantText = response.message.content;
-        const meta = response.message.metadata;
-        if (meta) {
-          resultLabel = `${meta.model} · ${meta.token_cost} tokens · $${meta.cost_usd.toFixed(4)} · ${meta.duration_ms}ms`;
-          if (meta.skills_activated.length > 0) {
-            resultLabel += ` · skills: ${meta.skills_activated.join(", ")}`;
-          }
-        }
-        // Refresh metrics after sending a message
-        api.getMetrics().then((m) => setBackendMetrics(m)).catch(() => {});
-        api.listAgents().then((a) => setBackendAgents(a)).catch(() => {});
+      if (Array.isArray(triggerInfo)) {
+        matchedSkills = triggerInfo
+          .filter((item) => item.matched)
+          .map((item) => item.skill_id);
+      }
 
-        // Auto-remember this exchange in memory
-        api.rememberMemory({
-          content: `User: ${text}\nAssistant: ${assistantText}`,
-          source: `chat:${agentId}:${threadId}`,
-        }).catch(() => {});
+      if (routingInfo?.selected_provider) {
+        routeSummary = `${routingInfo.selected_provider}${routingInfo.selected_model ? `/${routingInfo.selected_model}` : ""}`;
+      }
 
-        // Recall related context and store for inspector
-        api.recallMemories({
-          query: text,
-          max_results: 5,
-        }).then((hits) => setBackendMemoryHits(hits)).catch(() => {});
-
-        // Refresh memory stats
-        api.getMemoryStats().then((s) => setBackendMemoryStats(s)).catch(() => {});
-
-        // Fetch SochDB trace data for this response (created by send_message backend)
-        const rawMeta = response.message.metadata as Record<string, unknown> | null;
-        if (rawMeta?.trace_id) {
-          const traceId = rawMeta.trace_id as string;
-          api.traceGetRun(traceId).then((run) => setBackendTraceRun(run)).catch(() => {});
-          api.traceGetSpans(traceId).then((spans) => setBackendTraceSpans(spans)).catch(() => {});
-        }
-        // Fetch knowledge graph data related to the agent
-        api.graphGetNodesByType("agent", 10).then((nodes) => setBackendGraphNodes(nodes)).catch(() => {});
-
-        if (streamedMessageId) {
-          setThreads((prev) =>
-            prev.map((thread) => {
-              if (thread.id !== threadId) return thread;
-              return {
-                ...thread,
-                lastActivity: "Just now",
-                messages: thread.messages.map((message) =>
-                  message.id === streamedMessageId
-                    ? { ...message, text: assistantText, result: resultLabel }
-                    : message
-                ),
-              };
-            })
-          );
-        }
-      } catch (err) {
-        const mapped = classifyError(err);
-        assistantText = mapped.userMessage;
-        resultLabel = "Error";
-        if (streamedMessageId) {
-          setThreads((prev) =>
-            prev.map((thread) => {
-              if (thread.id !== threadId) return thread;
-              return {
-                ...thread,
-                lastActivity: "Just now",
-                messages: thread.messages.map((message) =>
-                  message.id === streamedMessageId
-                    ? { ...message, text: assistantText, result: resultLabel }
-                    : message
-                ),
-              };
-            })
-          );
-        }
-      } finally {
+      if (cacheInfo?.hit && cacheInfo.result) {
+        const cacheResult = cacheInfo.result;
+        const cachedLabelParts = [
+          `Cache hit (${cacheInfo.match_type})`,
+          routeSummary ? `route: ${routeSummary}` : "",
+          matchedSkills.length > 0 ? `skills: ${matchedSkills.join(", ")}` : "",
+        ].filter(Boolean);
+        setThreads((prev) =>
+          prev.map((thread) => {
+            if (thread.id !== threadId) return thread;
+            return {
+              ...thread,
+              lastActivity: "Just now",
+              messages: thread.messages.map((message) =>
+                message.id === streamedMessageId
+                  ? { ...message, text: cacheResult, result: cachedLabelParts.join(" · ") }
+                  : message
+              ),
+            };
+          })
+        );
         setIsSending(false);
         setStreamingAgentId(null);
         setStreamingThreadId(null);
         setStreamingMessageId(null);
+        setTimeline([
+          {
+            id: makeId("timeline"),
+            label: "Request received",
+            detail: text,
+            time: nowLabel(),
+            undoable: false,
+          },
+          {
+            id: makeId("timeline"),
+            label: "Cache response served",
+            detail: cachedLabelParts.join(" · ") || "Served from semantic cache.",
+            time: nowLabel(),
+            undoable: false,
+          },
+        ]);
+        setStepStatus({});
+        setInspectorTab("plan");
+        pushToast("Response served from cache.");
+        return;
       }
+    } catch {
+      // Preflight should never block the core send flow.
     }
-    if (!agentId) {
-      const assistantMessage: ThreadMessage = {
-        id: makeId("message"),
-        role: "assistant",
-        text: assistantText,
-        time: nowLabel(),
-        result: resultLabel,
-      };
+
+    try {
+      const response = await api.sendMessage(agentId, text);
+      assistantText = response.message.content;
+      const meta = response.message.metadata;
+      if (meta) {
+        resultLabel = `${meta.model} · ${meta.token_cost} tokens · $${meta.cost_usd.toFixed(4)} · ${meta.duration_ms}ms`;
+        if (meta.skills_activated.length > 0) {
+          resultLabel += ` · skills: ${meta.skills_activated.join(", ")}`;
+        }
+      } else {
+        const preflightBits = [
+          routeSummary ? `route: ${routeSummary}` : "",
+          matchedSkills.length > 0 ? `skills: ${matchedSkills.join(", ")}` : "",
+        ].filter(Boolean);
+        if (preflightBits.length > 0) {
+          resultLabel = preflightBits.join(" · ");
+        }
+      }
+
+      api.getMetrics().then((m) => setBackendMetrics(m)).catch(() => {});
+      api.listAgents().then((a) => setBackendAgents(a)).catch(() => {});
+      api.listSessions().then(async (sessions) => {
+        const session = sessions.find((s) => s.agent_id === agentId);
+        if (!session) return;
+        try {
+          const messages = await api.getSessionMessages(session.agent_id);
+          setThreads((prev) =>
+            prev.map((thread) =>
+              thread.id === session.agent_id
+                ? { ...toThreadFromSession(session), messages: toThreadMessages(messages) }
+                : thread
+            )
+          );
+        } catch {
+          // Ignore refresh failures.
+        }
+      }).catch(() => {});
+
+      api.rememberMemory({
+        content: `User: ${text}\nAssistant: ${assistantText}`,
+        source: `chat:${agentId}:${threadId}`,
+      }).catch(() => {});
+      api.recallMemories({ query: text, max_results: 5 }).then((hits) => setBackendMemoryHits(hits)).catch(() => {});
+      api.getMemoryStats().then((s) => setBackendMemoryStats(s)).catch(() => {});
+
+      const rawMeta = response.message.metadata as Record<string, unknown> | null;
+      if (rawMeta?.trace_id) {
+        const traceId = rawMeta.trace_id as string;
+        api.traceGetRun(traceId).then((run) => setBackendTraceRun(run)).catch(() => {});
+        api.traceGetSpans(traceId).then((spans) => setBackendTraceSpans(spans)).catch(() => {});
+      }
+      api.graphGetNodesByType("agent", 10).then((nodes) => setBackendGraphNodes(nodes)).catch(() => {});
+
+      api.cacheStore(
+        text,
+        cacheNamespace,
+        assistantText,
+        undefined,
+        [`session:${threadId}`],
+        3600
+      ).catch(() => {});
+
       setThreads((prev) =>
         prev.map((thread) => {
           if (thread.id !== threadId) return thread;
           return {
             ...thread,
             lastActivity: "Just now",
-            messages: [...thread.messages, assistantMessage],
+            messages: thread.messages.map((message) =>
+              message.id === streamedMessageId
+                ? { ...message, text: assistantText, result: resultLabel }
+                : message
+            ),
           };
         })
       );
+    } catch (err) {
+      const mapped = classifyError(err);
+      assistantText = mapped.userMessage;
+      resultLabel = "Error";
+      setThreads((prev) =>
+        prev.map((thread) => {
+          if (thread.id !== threadId) return thread;
+          return {
+            ...thread,
+            lastActivity: "Just now",
+            messages: thread.messages.map((message) =>
+              message.id === streamedMessageId
+                ? { ...message, text: assistantText, result: resultLabel }
+                : message
+            ),
+          };
+        })
+      );
+    } finally {
+      setIsSending(false);
+      setStreamingAgentId(null);
+      setStreamingThreadId(null);
+      setStreamingMessageId(null);
     }
 
-    const generatedApprovals = plan.steps
-      .filter((step) => step.requiresApproval)
-      .map((step) => ({
-        id: makeId("approval"),
-        planId: plan.planId,
-        stepId: step.stepId,
-        summary: step.title,
-        where: "Messages / #team-updates",
-        impact: step.expectedOutput,
-        risk: plan.risk,
-        status: "pending" as const,
-      }));
-
-    setApprovals((prev) => [...generatedApprovals, ...prev]);
-    markThreadActivity(threadId, {
-      pendingApprovals: generatedApprovals.length,
-      lastActivity: "Just now",
-    });
+    const approvalSteps = plan.steps.filter((step) => step.requiresApproval);
+    if (approvalSteps.length > 0) {
+      const createdApprovals = await Promise.all(
+        approvalSteps.map(async (step) => {
+          try {
+            const backendApproval = await api.createApprovalRequest({
+              tool_name: step.title,
+              command: step.preview,
+              risk_level: plan.risk,
+              context: `${plan.goal} • agent=${targetLabel}`,
+            });
+            setBackendApprovals((prev) => [backendApproval, ...prev]);
+            return {
+              id: backendApproval.id,
+              planId: plan.planId,
+              stepId: step.stepId,
+              summary: step.title,
+              where: targetLabel,
+              impact: step.expectedOutput,
+              risk: plan.risk,
+              status: "pending" as const,
+            };
+          } catch {
+            pushToast(`Approval gate unavailable for "${step.title}".`);
+            return null;
+          }
+        })
+      );
+      const persistedApprovals = createdApprovals.filter(Boolean) as ApprovalItem[];
+      if (persistedApprovals.length > 0) {
+        setApprovals((prev) => mergeApprovals(prev, persistedApprovals));
+        markThreadActivity(threadId, {
+          pendingApprovals: persistedApprovals.length,
+          lastActivity: "Just now",
+        });
+      }
+    }
 
     setTimeline([
       {
@@ -1243,18 +1728,22 @@ export default function App() {
       },
       {
         id: makeId("timeline"),
-        label: usingBackendAgent ? "Agent responded" : "Plan drafted",
-        detail: usingBackendAgent ? "Response from backend agent" : `${plan.steps.length} steps generated`,
+        label: "Agent responded",
+        detail: selectedAgent ? `${selectedAgent.name} completed the request.` : "Response from backend agent",
         time: nowLabel(),
         undoable: false,
       },
     ]);
     setStepStatus({});
     setInspectorTab("plan");
-    pushToast(usingBackendAgent ? "Agent response received." : "Plan ready in inspector.");
+    pushToast("Agent response received.");
   }
 
   function initializeExecution() {
+    if (currentPlan.steps.length === 0) {
+      pushToast("No plan available yet.");
+      return;
+    }
     const initialState: Record<string, StepStatus> = {};
     currentPlan.steps.forEach((step, idx) => {
       initialState[step.stepId] = idx === 0 ? "running" : "idle";
@@ -1267,131 +1756,39 @@ export default function App() {
   }
 
   function runStepByStep() {
+    if (safeMode && currentPlan.steps.some((step) => step.requiresApproval)) {
+      setApprovalsInboxOpen(true);
+    }
     initializeExecution();
-    pushToast("Step-by-step mode started.");
+    setTimeline((prev) => [
+      ...prev,
+      {
+        id: makeId("timeline"),
+        label: "Execution preview",
+        detail: "Review each step and approvals before backend actions.",
+        time: nowLabel(),
+        undoable: false,
+      },
+    ]);
+    pushToast("Step-by-step review started.");
   }
 
   function runAll() {
+    if (!selectedAgentId) {
+      pushToast("Select an agent first.");
+      return;
+    }
     if (safeMode && currentPlan.steps.some((step) => step.requiresApproval)) {
       setApprovalsInboxOpen(true);
       pushToast("Safe Mode blocked Run all. Review approvals first.");
       return;
     }
-
-    const runStart = Date.now();
-    const updates: Record<string, StepStatus> = {};
-    currentPlan.steps.forEach((step) => {
-      updates[step.stepId] = "ok";
-    });
-    setStepStatus(updates);
-    setIsExecuting(false);
-    setActiveStepIndex(currentPlan.steps.length - 1);
-
-    const duration = `${Math.max(1, Math.round((Date.now() - runStart) / 1000))}s`;
-    const proof: ProofRecord = {
-      proofId: makeId("proof"),
-      requestId: activeThread?.id ?? "",
-      summary: `Completed plan: ${currentPlan.goal}`,
-      startedAt: new Date(runStart).toISOString(),
-      endedAt: new Date().toISOString(),
-      duration,
-      steps: currentPlan.steps.map((step) => ({ stepId: step.stepId, title: step.title, status: "ok" })),
-      outputs: [
-        {
-          type: "summary",
-          label: "Execution receipt",
-          link: `local://proof/${Date.now()}`,
-        },
-      ],
-      undo: ["Create follow-up correction"],
-    };
-
-    setProofs((prev) => [proof, ...prev]);
-    if (activeThread) markThreadActivity(activeThread.id, {
-      hasProofOutputs: true,
-      pendingApprovals: 0,
-      lastActivity: "Just now",
-    });
-
-    setTimeline((prev) => [
-      ...prev,
-      {
-        id: makeId("timeline"),
-        label: "Run all completed",
-        detail: "All steps executed successfully.",
-        time: nowLabel(),
-        undoable: true,
-      },
-    ]);
-
-    setInspectorTab("proof");
-    pushToast("Plan completed and proof generated.");
-  }
-
-  function moveToNextStep(currentStepId: string, finalStatus: StepStatus) {
-    const index = currentPlan.steps.findIndex((step) => step.stepId === currentStepId);
-    const next = currentPlan.steps[index + 1];
-
-    setStepStatus((prev) => {
-      const nextState = { ...prev, [currentStepId]: finalStatus };
-      if (next) {
-        nextState[next.stepId] = "running";
-      }
-      return nextState;
-    });
-
-    setTimeline((prev) => [
-      ...prev,
-      {
-        id: makeId("timeline"),
-        label: currentPlan.steps[index].title,
-        detail: finalStatus === "ok" ? "Completed" : "Skipped",
-        time: nowLabel(),
-        undoable: finalStatus === "ok",
-      },
-    ]);
-
-    if (next) {
-      setActiveStepIndex(index + 1);
+    if (messageInput.trim()) {
+      requestToAssistant(messageInput.trim());
+      setMessageInput("");
       return;
     }
-
-    const start = runStartedAt ?? Date.now();
-    const finishedProof: ProofRecord = {
-      proofId: makeId("proof"),
-      requestId: activeThread?.id ?? "",
-      summary: `Finished plan step-by-step: ${currentPlan.goal}`,
-      startedAt: new Date(start).toISOString(),
-      endedAt: new Date().toISOString(),
-      duration: `${Math.max(1, Math.round((Date.now() - start) / 1000))}s`,
-      steps: currentPlan.steps.map((step) => {
-        const status = stepStatus[step.stepId];
-        if (step.stepId === currentStepId) {
-          return { stepId: step.stepId, title: step.title, status: finalStatus === "skipped" ? "skipped" : "ok" as const };
-        }
-        if (status === "skipped") return { stepId: step.stepId, title: step.title, status: "skipped" as const };
-        if (status === "stopped") return { stepId: step.stepId, title: step.title, status: "stopped" as const };
-        return { stepId: step.stepId, title: step.title, status: "ok" as const };
-      }),
-      outputs: [
-        {
-          type: "proof",
-          label: "Receipt generated",
-          link: `local://proof/${Date.now()}`,
-        },
-      ],
-      undo: ["Undo last step", "Create compensating follow-up"],
-    };
-
-    setProofs((prev) => [finishedProof, ...prev]);
-    setIsExecuting(false);
-    setInspectorTab("proof");
-    if (activeThread) markThreadActivity(activeThread.id, {
-      hasProofOutputs: true,
-      pendingApprovals: 0,
-      lastActivity: "Just now",
-    });
-    pushToast("Step-by-step run finished.");
+    pushToast("Send a request from chat to execute on backend.");
   }
 
   function approveAndRunCurrentStep() {
@@ -1407,56 +1804,49 @@ export default function App() {
         )
       );
     }
-
-    moveToNextStep(step.stepId, "ok");
+    setStepStatus((prev) => ({ ...prev, [step.stepId]: "ok" }));
+    if (activeStepIndex < currentPlan.steps.length - 1) {
+      const next = currentPlan.steps[activeStepIndex + 1];
+      setStepStatus((prev) => ({ ...prev, [next.stepId]: "running" }));
+      setActiveStepIndex((prev) => prev + 1);
+    } else {
+      setIsExecuting(false);
+      setInspectorTab("proof");
+      pushToast("Step review completed.");
+    }
   }
 
   function skipCurrentStep() {
     const step = currentPlan.steps[activeStepIndex];
     if (!step) return;
-    moveToNextStep(step.stepId, "skipped");
+    setStepStatus((prev) => ({ ...prev, [step.stepId]: "skipped" }));
+    if (activeStepIndex < currentPlan.steps.length - 1) {
+      const next = currentPlan.steps[activeStepIndex + 1];
+      setStepStatus((prev) => ({ ...prev, [next.stepId]: "running" }));
+      setActiveStepIndex((prev) => prev + 1);
+    } else {
+      setIsExecuting(false);
+      pushToast("All steps reviewed.");
+    }
   }
 
   function stopExecution() {
-    if (!isExecuting) return;
-
+    if (!isExecuting && !isSending) return;
     const step = currentPlan.steps[activeStepIndex];
     if (step) {
       setStepStatus((prev) => ({ ...prev, [step.stepId]: "stopped" }));
-      setTimeline((prev) => [
-        ...prev,
-        {
-          id: makeId("timeline"),
-          label: "Stopped by user",
-          detail: `Stopped during: ${step.title}`,
-          time: nowLabel(),
-          undoable: false,
-        },
-      ]);
     }
-
-    const start = runStartedAt ?? Date.now();
-    const stoppedProof: ProofRecord = {
-      proofId: makeId("proof"),
-      requestId: activeThread?.id ?? "",
-      summary: "Execution stopped by user",
-      startedAt: new Date(start).toISOString(),
-      endedAt: new Date().toISOString(),
-      duration: `${Math.max(1, Math.round((Date.now() - start) / 1000))}s`,
-      steps: currentPlan.steps.map((planStep) => {
-        const status = stepStatus[planStep.stepId];
-        if (status === "ok") return { stepId: planStep.stepId, title: planStep.title, status: "ok" as const };
-        if (status === "skipped") return { stepId: planStep.stepId, title: planStep.title, status: "skipped" as const };
-        return { stepId: planStep.stepId, title: planStep.title, status: "stopped" as const };
-      }),
-      outputs: [],
-      undo: [],
-    };
-
-    setProofs((prev) => [stoppedProof, ...prev]);
     setIsExecuting(false);
-    setInspectorTab("proof");
-    pushToast("Execution stopped.");
+    setRunStartedAt(null);
+    if (isSending) {
+      setIsSending(false);
+      setStreamingAgentId(null);
+      setStreamingThreadId(null);
+      setStreamingMessageId(null);
+      pushToast("Stopped live updates. Backend may still complete this run.");
+      return;
+    }
+    pushToast("Execution review stopped.");
   }
 
   function editCurrentStepPreview() {
@@ -1486,71 +1876,137 @@ export default function App() {
       pushToast("Approval denied. No action taken.");
     }
 
-    if (item.planId === currentPlan.planId && nextStatus === "approved" && !isExecuting && activeNav === "ask") {
+    if (item.planId === currentPlan.planId && nextStatus === "approved" && !isExecuting && activeNav === "chat") {
       setInspectorTab("plan");
     }
   }
 
-  function createRoutineFromWizard() {
-    const routine: RoutineItem = {
-      id: makeId("routine"),
-      name: routineDraft.template,
-      type: routineDraft.type,
-      scheduleLabel: routineDraft.type === "at_time" ? routineDraft.when : routineDraft.watchInterval,
-      nextRun: routineDraft.type === "at_time" ? "Tomorrow, 8:30 AM" : "In 30 minutes",
-      destination: routineDraft.destination,
-      enabled: true,
-      quietHours: routineDraft.quietHours,
-      lastResult: "ok",
-      lastReason: "Created and ready",
-      history: [],
-      recipeId: routineDraft.recipeId,
-    };
+  async function createRoutineFromWizard() {
+    const agentId = selectedAgentId ?? backendAgents[0]?.id ?? null;
+    if (!agentId) {
+      pushToast("Create an agent before creating a routine.");
+      return;
+    }
+    const agent = backendAgents.find((item) => item.id === agentId) ?? null;
+    const routineName = routineDraft.template || "New routine";
+    const scheduleLabel = routineDraft.type === "at_time" ? routineDraft.when : routineDraft.watchInterval;
+    const description = `${scheduleLabel} • ${routineDraft.destination} • quiet hours ${routineDraft.quietHours}`;
+    const steps: PipelineNodeDescriptor[] = [
+      {
+        label: "Input",
+        node_type: "input",
+        model: null,
+        agent_id: null,
+        x: 30,
+        y: 80,
+      },
+      {
+        label: `${agent?.name ?? "Agent"} run`,
+        node_type: "agent",
+        model: agent?.model ?? "sonnet",
+        agent_id: agentId,
+        x: 180,
+        y: 80,
+      },
+      {
+        label: "Output",
+        node_type: "output",
+        model: null,
+        agent_id: null,
+        x: 340,
+        y: 80,
+      },
+    ];
 
-    setRoutines((prev) => [routine, ...prev]);
-    setRoutineWizardOpen(false);
-    setRoutineWizardStep(1);
-    setSelectedRoutineId(routine.id);
-    pushToast("Routine created.");
+    try {
+      const created = await api.createPipeline(
+        routineName,
+        description,
+        steps,
+        [[0, 1], [1, 2]]
+      );
+      const pipelines = await api.listPipelines();
+      const mappedRoutines = pipelines.map(routineFromPipeline);
+      setBackendPipelines(pipelines);
+      setRoutines(mappedRoutines);
+      setSelectedRoutineId(created.id);
+      setRoutineWizardOpen(false);
+      setRoutineWizardStep(1);
+      pushToast("Routine created from backend pipeline.");
+    } catch (err) {
+      const mapped = classifyError(err);
+      pushToast(mapped.userMessage);
+    }
   }
 
-  function runRoutineTest() {
-    const selected = routines.find((routine) => routine.id === selectedRoutineId);
+  async function runRoutineTest(routineId?: string) {
+    const targetRoutineId = routineId ?? selectedRoutineId;
+    const selected = routines.find((routine) => routine.id === targetRoutineId);
     if (!selected) return;
 
-    const historyEntry = {
-      at: new Date().toLocaleString(),
-      result: "ok" as const,
-      reason: "Test run succeeded",
-    };
+    const startedAt = Date.now();
+    const pipelineId = selected.pipelineId ?? selected.id;
+    try {
+      const runResult = await api.runPipeline(pipelineId);
+      const durationMs = Date.now() - startedAt;
+      const resultText =
+        typeof runResult === "string"
+          ? runResult
+          : JSON.stringify(runResult).slice(0, 220);
 
-    setRoutines((prev) =>
-      prev.map((routine) =>
-        routine.id === selected.id
-          ? {
-              ...routine,
-              lastResult: "ok",
-              lastReason: "Test run succeeded",
-              history: [historyEntry, ...routine.history],
-            }
-          : routine
-      )
-    );
+      const historyEntry = {
+        at: new Date().toLocaleString(),
+        result: "ok" as const,
+        reason: "Pipeline run succeeded",
+      };
 
-    const proof: ProofRecord = {
-      proofId: makeId("proof"),
-      requestId: selected.id,
-      summary: `Test run completed for routine: ${selected.name}`,
-      startedAt: new Date().toISOString(),
-      endedAt: new Date().toISOString(),
-      duration: "2s",
-      steps: [{ stepId: "test", title: "Routine test run", status: "ok" }],
-      outputs: [{ type: "result", label: "Routine receipt", link: "local://proof/routine-test" }],
-      undo: [],
-    };
+      setRoutines((prev) =>
+        prev.map((routine) =>
+          routine.id === selected.id
+            ? {
+                ...routine,
+                lastResult: "ok",
+                lastReason: "Pipeline run succeeded",
+                history: [historyEntry, ...routine.history],
+              }
+            : routine
+        )
+      );
 
-    setProofs((prev) => [proof, ...prev]);
-    pushToast("Routine test run complete.");
+      const proof: ProofRecord = {
+        proofId: makeId("proof"),
+        requestId: selected.id,
+        summary: `Pipeline run completed: ${selected.name}`,
+        startedAt: new Date(startedAt).toISOString(),
+        endedAt: new Date().toISOString(),
+        duration: `${Math.max(1, Math.round(durationMs / 1000))}s`,
+        steps: [{ stepId: "pipeline_run", title: "Run backend pipeline", status: "ok" }],
+        outputs: [{ type: "result", label: "Run result", link: resultText || "Pipeline completed." }],
+        undo: [],
+      };
+      setProofs((prev) => [proof, ...prev]);
+      pushToast("Pipeline run completed.");
+    } catch (err) {
+      const mapped = classifyError(err);
+      const historyEntry = {
+        at: new Date().toLocaleString(),
+        result: "failed" as const,
+        reason: mapped.userMessage,
+      };
+      setRoutines((prev) =>
+        prev.map((routine) =>
+          routine.id === selected.id
+            ? {
+                ...routine,
+                lastResult: "failed",
+                lastReason: mapped.userMessage,
+                history: [historyEntry, ...routine.history],
+              }
+            : routine
+        )
+      );
+      pushToast(mapped.userMessage);
+    }
   }
 
   function reconnectAccount(id: string) {
@@ -1640,6 +2096,22 @@ export default function App() {
       });
       setBackendAgents((prev) => [...prev, agent]);
       setSelectedAgentId(agent.id);
+      setThreads((prev) => {
+        if (prev.some((thread) => thread.id === agent.id)) return prev;
+        return [
+          {
+            id: agent.id,
+            agentId: agent.id,
+            title: `${agent.name} session`,
+            lastActivity: "No messages yet",
+            pendingApprovals: 0,
+            routineGenerated: false,
+            hasProofOutputs: false,
+            messages: [],
+          },
+          ...prev,
+        ];
+      });
       pushToast(`Agent "${agent.name}" created.`);
     } catch (err) {
       const mapped = classifyError(err);
@@ -1651,6 +2123,7 @@ export default function App() {
     try {
       await api.deleteAgent(agentId);
       setBackendAgents((prev) => prev.filter((a) => a.id !== agentId));
+      setThreads((prev) => prev.filter((thread) => thread.id !== agentId));
       if (selectedAgentId === agentId) setSelectedAgentId(null);
       pushToast("Agent deleted.");
     } catch (err) {
@@ -1733,7 +2206,7 @@ export default function App() {
         label: "Create Routine",
         group: "Commands",
         run: () => {
-          navigate("routines");
+          navigate("automations");
           setRoutineWizardOpen(true);
         },
       },
@@ -1822,19 +2295,19 @@ export default function App() {
         selectThread(thread.id);
       } })),
       ...proofs.slice(0, 12).map((proof) => ({ id: proof.proofId, label: proof.summary, group: "Proof", run: () => {
-        navigate("now");
+        navigate("chat");
         setProofArchiveOpen(true);
       } })),
       ...routines.map((routine) => ({ id: routine.id, label: routine.name, group: "Routines", run: () => {
-        navigate("routines");
+        navigate("automations");
         setSelectedRoutineId(routine.id);
       } })),
       ...accounts.map((account) => ({ id: account.id, label: account.name, group: "Accounts", run: () => {
-        navigate("accounts");
+        navigate("settings");
         setSelectedAccountId(account.id);
       } })),
       ...recipes.map((recipe) => ({ id: recipe.id, label: recipe.name, group: "Library", run: () => {
-        navigate("library");
+        navigate("skills");
         setSelectedRecipeId(recipe.id);
       } })),
     ];
@@ -1877,7 +2350,7 @@ export default function App() {
                     </div>
                   </div>
                   <div className="row-actions">
-                    <button className="btn subtle" onClick={() => runRoutineTest()}>
+                    <button className="btn subtle" onClick={() => runRoutineTest(routine.id)}>
                       {safeMode ? "Preview run" : "Run now"}
                     </button>
                   </div>
@@ -2141,17 +2614,13 @@ export default function App() {
           <div className="thread-list-head">
             <h2>Threads</h2>
             <button className="btn subtle" onClick={() => {
-              const newThread: ThreadItem = {
-                id: makeId("thread"),
-                title: "New request",
-                lastActivity: "Just now",
-                pendingApprovals: 0,
-                routineGenerated: false,
-                hasProofOutputs: false,
-                messages: [],
-              };
-              setThreads((prev) => [newThread, ...prev]);
-              selectThread(newThread.id);
+              if (selectedAgentId) {
+                selectThread(selectedAgentId, { replace: true });
+                setMessageInput("");
+                pushToast("Ready for a new request.");
+              } else {
+                pushToast("Create or select an agent first.");
+              }
             }}>
               New
             </button>
@@ -2183,7 +2652,7 @@ export default function App() {
               <p>
                 {selectedAgentId
                   ? `Agent: ${backendAgents.find((a) => a.id === selectedAgentId)?.name ?? "Unknown"} • ${backendAgents.find((a) => a.id === selectedAgentId)?.model ?? ""}`
-                  : "Request → Plan → Approvals → Proof"}
+                  : "No backend agent selected"}
                 {isSending && " • Sending..."}
               </p>
             </div>
@@ -2192,13 +2661,17 @@ export default function App() {
                 <select
                   value={selectedAgentId ?? ""}
                   onChange={(e) => setSelectedAgentId(e.target.value || null)}
-                  style={{ fontSize: "0.8rem", padding: "4px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-card)" }}
+                  style={{ fontSize: "0.8rem", padding: "4px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--panel-strong)" }}
                 >
-                  <option value="">No agent (local plan)</option>
                   {backendAgents.map((a) => (
                     <option key={a.id} value={a.id}>{a.icon} {a.name} ({a.model})</option>
                   ))}
                 </select>
+              )}
+              {backendAgents.length === 0 && (
+                <button className="btn subtle" onClick={() => createBackendAgent(AGENT_TEMPLATES[0])}>
+                  Create agent
+                </button>
               )}
               <button className="btn subtle" onClick={() => setInspectorTab("plan")}>Plan</button>
               <button className="btn subtle" onClick={() => setInspectorTab("proof")}>Proof</button>
@@ -2234,7 +2707,7 @@ export default function App() {
 
           <div className="chat-composer">
             <textarea
-              placeholder="Type your request..."
+              placeholder={selectedAgentId ? "Type your request..." : "Create or select an agent to send a request."}
               value={messageInput}
               onChange={(event) => setMessageInput(event.target.value)}
               onKeyDown={(event) => {
@@ -2249,7 +2722,7 @@ export default function App() {
             <div className="composer-actions">
               <button
                 className="btn primary"
-                disabled={isSending}
+                disabled={isSending || !selectedAgentId}
                 onClick={() => {
                   if (!messageInput.trim()) return;
                   requestToAssistant(messageInput.trim());
@@ -2326,7 +2799,7 @@ export default function App() {
             <>
               <div className="section-head">
                 <h2>{selectedRoutine.name}</h2>
-                <button className="btn subtle" onClick={runRoutineTest}>Run once now</button>
+                <button className="btn subtle" onClick={() => runRoutineTest()}>Run once now</button>
               </div>
               <div className="details-grid">
                 <div>
@@ -2668,8 +3141,8 @@ export default function App() {
   }
 
   function renderInspectorContent() {
-    if (activeNav !== "ask") {
-      if (activeNav === "routines") {
+    if (activeNav !== "chat") {
+      if (activeNav === "automations") {
         if (!selectedRoutine) {
           return (
             <div className="inspector-content">
@@ -2688,7 +3161,7 @@ export default function App() {
         );
       }
 
-      if (activeNav === "accounts") {
+      if (activeNav === "settings") {
         if (!selectedAccount) {
           return (
             <div className="inspector-content">
@@ -2707,7 +3180,7 @@ export default function App() {
         );
       }
 
-      if (activeNav === "library") {
+      if (activeNav === "skills") {
         if (!selectedRecipe) {
           return (
             <div className="inspector-content">
@@ -3081,17 +3554,55 @@ export default function App() {
         onToggleSafeMode={() => setSafeMode((prev) => !prev)}
         onOpenApprovals={() => setApprovalsInboxOpen(true)}
         approvalCount={pendingApprovals.length}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => navigate("settings")}
         showSafeModeBanner={!safeMode}
         inspector={renderInspectorContent()}
         drawerAsModal={drawerAsModal}
         onOpenInspectorModal={() => setInspectorModalOpen(true)}
       >
-        {activeNav === "now" && renderNowView()}
-        {activeNav === "ask" && renderAskView()}
-        {activeNav === "routines" && renderRoutinesView()}
-        {activeNav === "accounts" && renderAccountsView()}
-        {activeNav === "library" && renderLibraryView()}
+        {activeNav === "chat" && (
+          <ChatPage
+            agents={backendAgents}
+            skills={backendSkills}
+            selectedAgentId={selectedAgentId}
+            onSelectAgent={setSelectedAgentId}
+            onCreateAgent={(t) => createBackendAgent(t)}
+            pushToast={pushToast}
+          />
+        )}
+        {activeNav === "skills" && (
+          <SkillsPage
+            skills={backendSkills}
+            onRefreshSkills={() => api.listSkills().then((s) => setBackendSkills(s)).catch(() => {})}
+            pushToast={pushToast}
+          />
+        )}
+        {activeNav === "automations" && (
+          <AutomationsPage
+            pipelines={backendPipelines}
+            onRefreshPipelines={() => api.listPipelines().then((p) => setBackendPipelines(p)).catch(() => {})}
+            pushToast={pushToast}
+          />
+        )}
+        {activeNav === "settings" && (
+          <SettingsPage
+            agents={backendAgents}
+            channels={backendChannels}
+            security={backendSecurity}
+            metrics={backendMetrics}
+            health={backendHealth}
+            observability={backendObservability}
+            plugins={backendPlugins}
+            peers={backendPeers}
+            authProfiles={backendAuthProfiles}
+            onCreateAgent={(t) => createBackendAgent(t)}
+            onDeleteAgent={(id) => deleteBackendAgent(id)}
+            onRefreshChannels={() => api.listChannels().then((c) => setBackendChannels(c)).catch(() => {})}
+            onRefreshPlugins={() => api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => {})}
+            onRefreshPeers={() => api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => {})}
+            pushToast={pushToast}
+          />
+        )}
       </AppShell>
 
       {drawerAsModal && inspectorModalOpen && (
@@ -3209,56 +3720,6 @@ export default function App() {
                 </div>
               </div>
             ))}
-          </div>
-        </Modal>
-      )}
-
-      {settingsOpen && (
-        <Modal title="Settings" onClose={() => setSettingsOpen(false)}>
-          <div className="modal-stack">
-            <h3>General</h3>
-            <label className="toggle-row">
-              <input type="checkbox" checked readOnly />
-              <span>Start on login</span>
-            </label>
-            <label className="toggle-row">
-              <input type="checkbox" checked={safeMode} onChange={() => setSafeMode((prev) => !prev)} />
-              <span>Safe Mode default</span>
-            </label>
-            <label className="toggle-row">
-              <input type="checkbox" checked readOnly />
-              <span>Require approvals for Send/Write/Execute</span>
-            </label>
-            <h3>Advanced</h3>
-            <button className="btn subtle block" onClick={() => {
-              api.getObservabilityConfig().then((o) => {
-                setBackendObservability(o);
-                pushToast(`Observability: enabled=${o.enabled}, service=${o.service_name}`);
-              }).catch(() => pushToast("Observability config unavailable."));
-            }}>Observability config</button>
-            <button className="btn subtle block" onClick={() => {
-              api.configureObservability({ enabled: true, environment: "desktop" }).then((o) => {
-                setBackendObservability(o);
-                pushToast("Observability enabled.");
-              }).catch(() => pushToast("Failed to configure observability."));
-            }}>Enable full observability</button>
-            <button className="btn subtle block" onClick={() => {
-              api.getVoiceWakeStatus().then((v) => {
-                pushToast(`Voice wake: ${v.enabled ? "On" : "Off"} — phrases: ${v.wake_phrases.join(", ") || "none"}`);
-              }).catch(() => pushToast("Voice wake unavailable."));
-            }}>Voice wake status</button>
-            <button className="btn subtle block" onClick={() => {
-              api.getIdleStatus().then((i) => {
-                pushToast(`Idle: ${i.is_idle ? "Yes" : "No"} — ${i.idle_duration_secs}s`);
-              }).catch(() => pushToast("Idle status unavailable."));
-            }}>Idle status</button>
-            <button className="btn subtle block" onClick={() => {
-              api.sochdbCheckpoint().then((n) => pushToast(`SochDB checkpoint: ${n} entries persisted.`))
-                .catch(() => pushToast("Checkpoint failed."));
-            }}>SochDB checkpoint</button>
-            <button className="btn subtle block" onClick={() => pushToast("Diagnostics report prepared.")}>Diagnostics export</button>
-            <button className="btn subtle block" onClick={() => pushToast("Developer console opened.")}>Developer console</button>
-            <button className="btn subtle block" onClick={() => pushToast("Local cache reset queued.")}>Reset local cache</button>
           </div>
         </Modal>
       )}
@@ -3381,7 +3842,7 @@ export default function App() {
             {routineWizardStep === 5 && (
               <div className="modal-stack">
                 <p>Run once now to validate account access, permissions, and output path.</p>
-                <button className="btn primary" onClick={runRoutineTest}>Run once now</button>
+                <button className="btn primary" onClick={() => runRoutineTest()}>Run once now</button>
               </div>
             )}
 

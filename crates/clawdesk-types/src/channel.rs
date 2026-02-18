@@ -32,7 +32,11 @@ pub enum ChannelId {
     Twitch,
     NextcloudTalk,
     Zalo,
+    /// Zalo personal account via zca CLI (vs official account `Zalo`).
+    ZaloUser,
     Tlon,
+    /// iMessage via BlueBubbles REST API (full-featured alternative to `IMessage`).
+    BlueBubbles,
     /// CLI / gateway internal message
     Internal,
 }
@@ -59,7 +63,9 @@ impl fmt::Display for ChannelId {
             Self::Twitch => write!(f, "twitch"),
             Self::NextcloudTalk => write!(f, "nextcloud_talk"),
             Self::Zalo => write!(f, "zalo"),
+            Self::ZaloUser => write!(f, "zalouser"),
             Self::Tlon => write!(f, "tlon"),
+            Self::BlueBubbles => write!(f, "bluebubbles"),
             Self::Internal => write!(f, "internal"),
         }
     }

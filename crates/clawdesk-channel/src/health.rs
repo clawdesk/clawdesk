@@ -70,7 +70,7 @@ impl Default for HealthThresholds {
 }
 
 /// Number of `ChannelId` variants. Must be kept in sync with the enum.
-const NUM_CHANNELS: usize = 21;
+const NUM_CHANNELS: usize = 23;
 
 /// Map a `ChannelId` to a fixed array index (0..12).
 fn channel_index(id: ChannelId) -> usize {
@@ -94,8 +94,10 @@ fn channel_index(id: ChannelId) -> usize {
         ChannelId::Twitch => 16,
         ChannelId::NextcloudTalk => 17,
         ChannelId::Zalo => 18,
-        ChannelId::Tlon => 19,
-        ChannelId::Internal => 20,
+        ChannelId::ZaloUser => 19,
+        ChannelId::Tlon => 20,
+        ChannelId::BlueBubbles => 21,
+        ChannelId::Internal => 22,
     }
 }
 
@@ -120,7 +122,9 @@ const ALL_CHANNELS: [ChannelId; NUM_CHANNELS] = [
     ChannelId::Twitch,
     ChannelId::NextcloudTalk,
     ChannelId::Zalo,
+    ChannelId::ZaloUser,
     ChannelId::Tlon,
+    ChannelId::BlueBubbles,
     ChannelId::Internal,
 ];
 

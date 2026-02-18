@@ -1380,7 +1380,11 @@ pub async fn create_pipeline(request: CreatePipelineRequest, state: State<'_, Ap
 /// Non-agent steps (input, gate, output) pass data through.
 /// Agent steps invoke the real LLM provider and accumulate results.
 #[tauri::command]
-pub async fn run_pipeline(pipeline_id: String, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn run_pipeline(
+    pipeline_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<serde_json::Value, String> {
     let pipeline = {
         let pipelines = state.pipelines.read().map_err(|e| e.to_string())?;
         pipelines.iter().find(|p| p.id == pipeline_id)
@@ -1543,6 +1547,18 @@ pub async fn run_pipeline(pipeline_id: String, state: State<'_, AppState>) -> Re
             if all_success { AuditOutcome::Success } else { AuditOutcome::Failed },
         )
         .await;
+
+    let pipeline_name = pipeline.name.clone();
+    emit_metrics_updated(&app, &state);
+    let _ = app.emit(
+        "routine:executed",
+        serde_json::json!({
+            "pipeline_id": pipeline_id,
+            "pipeline_name": pipeline_name,
+            "success": all_success,
+            "total_duration_ms": total_ms,
+        }),
+    );
 
     Ok(serde_json::json!({
         "pipeline_id": pipeline_id, "pipeline_name": pipeline.name,

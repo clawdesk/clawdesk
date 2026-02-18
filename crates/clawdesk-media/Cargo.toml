@@ -19,3 +19,6 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 fastrand = "2"
+
+[dev-dependencies]
+proptest = "1"
