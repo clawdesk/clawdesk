@@ -33,6 +33,8 @@ pub mod bundled;
 pub mod bundled_design;
 pub mod definition;
 pub mod executor;
+pub mod journal;
+pub mod life_os;
 pub mod loader;
 pub mod promotion;
 pub mod registry;

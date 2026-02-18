@@ -12,10 +12,19 @@
 //! - **Send policy**: Token-bucket rate limiter with priority queuing and backpressure
 //! - **System prompt**: Token-budgeted system prompt construction (greedy knapsack)
 
+//! - **Contact graph**: Hawkes-process relationship health with entity resolution
+//! - **Identity model**: Bayesian personality evolution with channel conditioning
+//! - **Digest compiler**: Tumbling window event aggregation with Kahan summation
+//! - **Approval queue**: Item-level human gates with quorum policies
+
+pub mod approval;
 pub mod auth;
 pub mod compaction;
+pub mod contacts;
 pub mod context_guard;
+pub mod digest;
 pub mod fallback;
+pub mod identity;
 pub mod migration;
 pub mod model_catalog;
 pub mod prompt_builder;

@@ -116,6 +116,7 @@ export function AppShell({
               className={`nav-item ${activeNav === item.key ? "active" : ""}`}
               onClick={() => onNavigate(item.key)}
               title={item.label}
+              data-nav-label={item.label}
               aria-current={activeNav === item.key ? "page" : undefined}
             >
               <span className="nav-icon-wrap">

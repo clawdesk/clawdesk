@@ -18,7 +18,9 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
 rustc-hash = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 toml = { workspace = true }
+aho-corasick = { workspace = true }

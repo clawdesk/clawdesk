@@ -57,6 +57,7 @@ pub mod types;
 pub mod supervisor;
 pub mod kill_tree;
 pub mod pty;
+pub mod session_mux;
 pub mod writer;
 
 // Re-exports for ergonomic use.
@@ -68,6 +69,10 @@ pub use journal::ActivityJournal;
 pub use kill_tree::{kill_tree, kill_process_group, KillSignal, KillTreeResult};
 pub use lease::LeaseManager;
 pub use pty::{PtySession, PtyConfig, PtyEvent, PtyPool};
+pub use session_mux::{
+    SessionEvent, SessionEventKind, SessionMode, SessionMux, SessionMuxConfig, SessionMuxError,
+    SessionPriority, SessionSnapshot, SessionSpawnRequest, SessionStatus,
+};
 pub use recovery::RecoveryManager;
 pub use types::*;
 pub use supervisor::{ProcessSupervisor, ProcessInfo, SpawnConfig, ProcessState};

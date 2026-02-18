@@ -847,9 +847,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawdesk-adapters"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clawdesk-types",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "clawdesk-agents"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "async-trait",
  "chrono",
  "clawdesk-domain",
@@ -859,6 +875,7 @@ dependencies = [
  "rustc-hash 2.1.1",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "toml 0.8.2",
@@ -896,6 +913,21 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+]
+
+[[package]]
+name = "clawdesk-bus"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clawdesk-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

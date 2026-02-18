@@ -1,6 +1,6 @@
 [package]
-name = "clawdesk-domain"
-description = "Pure business logic for ClawDesk — routing, fallback FSM, compaction, auth ring (no I/O)"
+name = "clawdesk-adapters"
+description = "External service adapter trait with OAuth token ring, rate limiting, and circuit breaking"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -13,7 +13,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true }
-
-[dev-dependencies]
-uuid = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }

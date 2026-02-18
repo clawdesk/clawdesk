@@ -12,8 +12,10 @@ pub mod executor;
 pub mod heartbeat;
 pub mod parser;
 pub mod manager;
+pub mod proactive;
 
 pub use executor::CronExecutor;
 pub use heartbeat::{Heartbeat, HeartbeatConfig, HeartbeatDecision, HEARTBEAT_SKIP};
 pub use parser::{parse_cron_expression, matches_cron};
 pub use manager::CronManager;
+pub use proactive::{ProactiveOrchestrator, NotificationType, SelectedNotification, SystemContext};

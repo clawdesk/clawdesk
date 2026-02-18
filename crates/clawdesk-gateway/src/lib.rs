@@ -50,6 +50,7 @@ pub mod skills_admin;
 pub mod state;
 pub mod subagent_manager;
 pub mod thread_ownership;
+pub mod wake;
 pub mod watcher;
 pub mod ws;
 

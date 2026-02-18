@@ -27,6 +27,8 @@ members = [
     "crates/clawdesk-tui",
     "crates/clawdesk-browser",
     "crates/clawdesk-discovery",
+    "crates/clawdesk-bus",
+    "crates/clawdesk-adapters",
 ]
 resolver = "2"
 
@@ -95,6 +97,8 @@ clawdesk-runtime = { path = "crates/clawdesk-runtime" }
 clawdesk-tui = { path = "crates/clawdesk-tui" }
 clawdesk-browser = { path = "crates/clawdesk-browser" }
 clawdesk-discovery = { path = "crates/clawdesk-discovery" }
+clawdesk-bus = { path = "crates/clawdesk-bus" }
+clawdesk-adapters = { path = "crates/clawdesk-adapters" }
 
 # --- SochDB (embedded ACID vector database) ---
 sochdb = { path = "../sochdb/sochdb-client" }

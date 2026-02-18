@@ -136,6 +136,22 @@ pub enum MergeStrategy {
         /// Field name in the result to use as score.
         score_field: String,
     },
+    /// Advisory council — Dempster-Shafer evidence synthesis.
+    ///
+    /// Each parallel branch is an "expert" with a domain weight.
+    /// Results are combined via Dempster's rule of combination,
+    /// conflict is measured, and a synthesis agent produces the
+    /// final ranked recommendation list.
+    Council {
+        /// Prior importance weight per expert (same order as parallel branches)
+        expert_weights: Vec<f64>,
+        /// Alert user if inter-expert conflict exceeds this threshold (0.0-1.0)
+        conflict_threshold: f64,
+        /// Agent ID for the final synthesis step
+        synthesis_agent_id: String,
+        /// Maximum recommendations in the output
+        max_recommendations: usize,
+    },
 }
 
 /// Condition for routing decisions.

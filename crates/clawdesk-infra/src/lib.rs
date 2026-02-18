@@ -1,8 +1,11 @@
-//! Infrastructure crate — outbound dispatch queue, TLS, update checker, voice wake, metrics, idle detection, log rotation.
+//! Infrastructure crate — outbound dispatch queue, TLS, update checker, voice wake, metrics,
+//! idle detection, log rotation, encrypted backup, and git sync.
 
+pub mod backup;
 pub mod clipboard;
 pub mod daemon;
 pub mod dispatch;
+pub mod git_sync;
 pub mod idle;
 pub mod log_rotation;
 pub mod metrics;
@@ -12,7 +15,9 @@ pub mod tls;
 pub mod updater;
 pub mod voice_wake;
 
+pub use backup::{BackupConfig, BackupManager, BackupRecord, BackupType, BackupStatus, RetentionPolicy};
 pub use dispatch::{DispatchQueue, OutboundItem, OutboundPriority};
+pub use git_sync::{GitSyncConfig, GitSyncManager, SyncState, SyncRecord, SyncOperation, ConflictStrategy};
 pub use idle::{IdleConfig, IdleDetector};
 pub use log_rotation::{LogRotationConfig, RotatingFileWriter};
 pub use metrics::{MetricsCollector, MetricsSnapshot};

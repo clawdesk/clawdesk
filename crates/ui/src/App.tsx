@@ -450,7 +450,15 @@ export default function App() {
   const [backendGraphEdges, setBackendGraphEdges] = useState<GraphEdgeInfo[]>([]);
 
   const [viewportWidth, setViewportWidth] = useState<number>(window.innerWidth);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      const stored = window.localStorage.getItem("clawdesk.sidebar.collapsed");
+      if (stored === null) return true;
+      return stored === "1";
+    } catch {
+      return true;
+    }
+  });
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => {
     try {
@@ -460,25 +468,65 @@ export default function App() {
     }
   });
 
-  const activeThread = useMemo(
-    () => threads.find((thread) => thread.id === activeThreadId) ?? threads[0] ?? undefined,
+  const activeThread = useMemo<ThreadItem | null>(
+    () => threads.find((thread) => thread.id === activeThreadId) ?? threads[0] ?? null,
     [threads, activeThreadId]
   );
 
-  const selectedRoutine = useMemo(
-    () => routines.find((routine) => routine.id === selectedRoutineId) ?? routines[0],
+  const selectedRoutine = useMemo<RoutineItem | null>(
+    () => routines.find((routine) => routine.id === selectedRoutineId) ?? routines[0] ?? null,
     [routines, selectedRoutineId]
   );
 
-  const selectedAccount = useMemo(
-    () => accounts.find((account) => account.id === selectedAccountId) ?? accounts[0],
+  const selectedAccount = useMemo<AccountItem | null>(
+    () => accounts.find((account) => account.id === selectedAccountId) ?? accounts[0] ?? null,
     [accounts, selectedAccountId]
   );
 
-  const selectedRecipe = useMemo(
-    () => recipes.find((recipe) => recipe.id === selectedRecipeId) ?? recipes[0],
+  const selectedRecipe = useMemo<RecipeItem | null>(
+    () => recipes.find((recipe) => recipe.id === selectedRecipeId) ?? recipes[0] ?? null,
     [recipes, selectedRecipeId]
   );
+
+  useEffect(() => {
+    if (threads.length === 0) {
+      if (activeThreadId !== "") setActiveThreadIdState("");
+      return;
+    }
+    if (!threads.some((thread) => thread.id === activeThreadId)) {
+      setActiveThreadIdState(threads[0].id);
+    }
+  }, [threads, activeThreadId]);
+
+  useEffect(() => {
+    if (routines.length === 0) {
+      if (selectedRoutineId !== "") setSelectedRoutineId("");
+      return;
+    }
+    if (!routines.some((routine) => routine.id === selectedRoutineId)) {
+      setSelectedRoutineId(routines[0].id);
+    }
+  }, [routines, selectedRoutineId]);
+
+  useEffect(() => {
+    if (accounts.length === 0) {
+      if (selectedAccountId !== "") setSelectedAccountId("");
+      return;
+    }
+    if (!accounts.some((account) => account.id === selectedAccountId)) {
+      setSelectedAccountId(accounts[0].id);
+    }
+  }, [accounts, selectedAccountId]);
+
+  useEffect(() => {
+    if (recipes.length === 0) {
+      if (selectedRecipeId !== "") setSelectedRecipeId("");
+      return;
+    }
+    if (!recipes.some((recipe) => recipe.id === selectedRecipeId)) {
+      setSelectedRecipeId(recipes[0].id);
+    }
+  }, [recipes, selectedRecipeId]);
 
   const pendingApprovals = approvals.filter((approval) => approval.status === "pending");
 
@@ -490,6 +538,14 @@ export default function App() {
   const compactSidebar = viewportWidth < 680;
   const sidebarCollapsed = compactSidebar || isSidebarCollapsed;
   const drawerAsModal = viewportWidth < 1000;
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("clawdesk.sidebar.collapsed", isSidebarCollapsed ? "1" : "0");
+    } catch {
+      // Ignore persistence failures.
+    }
+  }, [isSidebarCollapsed]);
 
   const navigate = useCallback(
     (nextNav: NavKey, options?: { threadId?: string; replace?: boolean }) => {
@@ -2224,7 +2280,7 @@ export default function App() {
             {routines.map((routine) => (
               <button
                 key={routine.id}
-                className={`row-card row-button ${selectedRoutine.id === routine.id ? "selected" : ""}`}
+                className={`row-card row-button ${selectedRoutine?.id === routine.id ? "selected" : ""}`}
                 onClick={() => setSelectedRoutineId(routine.id)}
               >
                 <div>
@@ -2259,49 +2315,60 @@ export default function App() {
         </section>
 
         <section className="section-card">
-          <div className="section-head">
-            <h2>{selectedRoutine.name}</h2>
-            <button className="btn subtle" onClick={runRoutineTest}>Run once now</button>
-          </div>
-          <div className="details-grid">
-            <div>
-              <h3>Overview</h3>
-              <p>{selectedRoutine.scheduleLabel}</p>
-              <p>Destination: {selectedRoutine.destination}</p>
-              <p>Quiet hours: {selectedRoutine.quietHours}</p>
+          {!selectedRoutine ? (
+            <div className="empty-state">
+              <p>No routines yet.</p>
+              <button className="btn primary" onClick={() => setRoutineWizardOpen(true)}>
+                Create Routine
+              </button>
             </div>
-            <div>
-              <h3>Recipe</h3>
-              <p>{recipes.find((recipe) => recipe.id === selectedRoutine.recipeId)?.name ?? "Custom"}</p>
-              <p>Read-only by default. Edit requires confirm.</p>
-            </div>
-            <div>
-              <h3>Alerts</h3>
-              <p>Notify on failure: Enabled</p>
-              <p>Last result: {selectedRoutine.lastReason}</p>
-            </div>
-          </div>
-
-          <div className="history-block">
-            <h3>Run history</h3>
-            {selectedRoutine.history.length === 0 ? (
-              <p>No history yet.</p>
-            ) : (
-              <div className="list-rows">
-                {selectedRoutine.history.map((item, index) => (
-                  <div key={`${selectedRoutine.id}_${index}`} className="row-card">
-                    <div>
-                      <div className="row-title">{item.at}</div>
-                      <div className="row-sub">{item.reason}</div>
-                    </div>
-                    <span className={`chip ${item.result === "failed" ? "chip-risk" : ""}`}>
-                      {item.result === "ok" ? "OK" : item.result === "skipped" ? "Skipped" : "Failed"}
-                    </span>
-                  </div>
-                ))}
+          ) : (
+            <>
+              <div className="section-head">
+                <h2>{selectedRoutine.name}</h2>
+                <button className="btn subtle" onClick={runRoutineTest}>Run once now</button>
               </div>
-            )}
-          </div>
+              <div className="details-grid">
+                <div>
+                  <h3>Overview</h3>
+                  <p>{selectedRoutine.scheduleLabel}</p>
+                  <p>Destination: {selectedRoutine.destination}</p>
+                  <p>Quiet hours: {selectedRoutine.quietHours}</p>
+                </div>
+                <div>
+                  <h3>Recipe</h3>
+                  <p>{recipes.find((recipe) => recipe.id === selectedRoutine.recipeId)?.name ?? "Custom"}</p>
+                  <p>Read-only by default. Edit requires confirm.</p>
+                </div>
+                <div>
+                  <h3>Alerts</h3>
+                  <p>Notify on failure: Enabled</p>
+                  <p>Last result: {selectedRoutine.lastReason}</p>
+                </div>
+              </div>
+
+              <div className="history-block">
+                <h3>Run history</h3>
+                {selectedRoutine.history.length === 0 ? (
+                  <p>No history yet.</p>
+                ) : (
+                  <div className="list-rows">
+                    {selectedRoutine.history.map((item, index) => (
+                      <div key={`${selectedRoutine.id}_${index}`} className="row-card">
+                        <div>
+                          <div className="row-title">{item.at}</div>
+                          <div className="row-sub">{item.reason}</div>
+                        </div>
+                        <span className={`chip ${item.result === "failed" ? "chip-risk" : ""}`}>
+                          {item.result === "ok" ? "OK" : item.result === "skipped" ? "Skipped" : "Failed"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </section>
       </div>
     );
@@ -2316,7 +2383,7 @@ export default function App() {
           </div>
           <div className="account-grid">
             {accounts.map((account) => (
-              <div key={account.id} className={`account-card ${selectedAccount.id === account.id ? "selected" : ""}`}>
+              <div key={account.id} className={`account-card ${selectedAccount?.id === account.id ? "selected" : ""}`}>
                 <div className="account-head">
                   <div>
                     <h3>{account.name}</h3>
@@ -2355,118 +2422,127 @@ export default function App() {
         </section>
 
         <section className="section-card">
-          <div className="section-head">
-            <h2>{selectedAccount.name} permissions</h2>
-            <button className="btn subtle" onClick={() => runAccountTest(selectedAccount.id)}>
-              Test connection
-            </button>
-          </div>
-
-          <div className="details-grid">
-            <div>
-              <h3>Capabilities</h3>
-              {(
-                [
-                  ["Read", "read"],
-                  ["Search", "search"],
-                  ["Draft", "draft"],
-                  ["Send / Write", "sendWrite"],
-                  ["Delete", "delete"],
-                  ["Execute", "execute"],
-                ] as const
-              ).map(([label, key]) => (
-                <label key={key} className="toggle-row">
-                  <input
-                    type="checkbox"
-                    checked={selectedAccount.capabilities[key]}
-                    onChange={() =>
-                      setAccounts((prev) =>
-                        prev.map((account) =>
-                          account.id === selectedAccount.id
-                            ? {
-                                ...account,
-                                capabilities: {
-                                  ...account.capabilities,
-                                  [key]: !account.capabilities[key],
-                                },
-                              }
-                            : account
-                        )
-                      )
-                    }
-                  />
-                  <span>{label}</span>
-                </label>
-              ))}
+          {!selectedAccount ? (
+            <div className="empty-state">
+              <p>No accounts connected yet.</p>
+              <span>Connect an account to manage permissions.</span>
             </div>
-
-            <div>
-              <h3>Data boundaries</h3>
-              <label className="field-label">
-                Folders/projects
-                <input
-                  value={selectedAccount.boundaries.folders}
-                  onChange={(event) =>
-                    setAccounts((prev) =>
-                      prev.map((account) =>
-                        account.id === selectedAccount.id
-                          ? {
-                              ...account,
-                              boundaries: { ...account.boundaries, folders: event.target.value },
-                            }
-                          : account
-                      )
-                    )
-                  }
-                />
-              </label>
-              <label className="field-label">
-                Recipients/domains
-                <input
-                  value={selectedAccount.boundaries.recipients}
-                  onChange={(event) =>
-                    setAccounts((prev) =>
-                      prev.map((account) =>
-                        account.id === selectedAccount.id
-                          ? {
-                              ...account,
-                              boundaries: { ...account.boundaries, recipients: event.target.value },
-                            }
-                          : account
-                      )
-                    )
-                  }
-                />
-              </label>
-              <label className="field-label">
-                Channels
-                <input
-                  value={selectedAccount.boundaries.channels}
-                  onChange={(event) =>
-                    setAccounts((prev) =>
-                      prev.map((account) =>
-                        account.id === selectedAccount.id
-                          ? {
-                              ...account,
-                              boundaries: { ...account.boundaries, channels: event.target.value },
-                            }
-                          : account
-                      )
-                    )
-                  }
-                />
-              </label>
-            </div>
-
-            <div>
-              <h3>Security</h3>
-              <p>Last used: {selectedAccount.lastUsed}</p>
-              <div className="row-actions">
-                <button className="btn subtle" onClick={() => pushToast("Access revoked.")}>Revoke access</button>
-                <button className="btn subtle" onClick={() => pushToast("Token rotated.")}>Rotate token</button>
+          ) : (
+            <>
+              <div className="section-head">
+                <h2>{selectedAccount.name} permissions</h2>
+                <button className="btn subtle" onClick={() => runAccountTest(selectedAccount.id)}>
+                  Test connection
+                </button>
               </div>
-            </div>
-          </div>
+
+              <div className="details-grid">
+                <div>
+                  <h3>Capabilities</h3>
+                  {(
+                    [
+                      ["Read", "read"],
+                      ["Search", "search"],
+                      ["Draft", "draft"],
+                      ["Send / Write", "sendWrite"],
+                      ["Delete", "delete"],
+                      ["Execute", "execute"],
+                    ] as const
+                  ).map(([label, key]) => (
+                    <label key={key} className="toggle-row">
+                      <input
+                        type="checkbox"
+                        checked={selectedAccount.capabilities[key]}
+                        onChange={() =>
+                          setAccounts((prev) =>
+                            prev.map((account) =>
+                              account.id === selectedAccount.id
+                                ? {
+                                    ...account,
+                                    capabilities: {
+                                      ...account.capabilities,
+                                      [key]: !account.capabilities[key],
+                                    },
+                                  }
+                                : account
+                            )
+                          )
+                        }
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
+
+                <div>
+                  <h3>Data boundaries</h3>
+                  <label className="field-label">
+                    Folders/projects
+                    <input
+                      value={selectedAccount.boundaries.folders}
+                      onChange={(event) =>
+                        setAccounts((prev) =>
+                          prev.map((account) =>
+                            account.id === selectedAccount.id
+                              ? {
+                                  ...account,
+                                  boundaries: { ...account.boundaries, folders: event.target.value },
+                                }
+                              : account
+                          )
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="field-label">
+                    Recipients/domains
+                    <input
+                      value={selectedAccount.boundaries.recipients}
+                      onChange={(event) =>
+                        setAccounts((prev) =>
+                          prev.map((account) =>
+                            account.id === selectedAccount.id
+                              ? {
+                                  ...account,
+                                  boundaries: { ...account.boundaries, recipients: event.target.value },
+                                }
+                              : account
+                          )
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="field-label">
+                    Channels
+                    <input
+                      value={selectedAccount.boundaries.channels}
+                      onChange={(event) =>
+                        setAccounts((prev) =>
+                          prev.map((account) =>
+                            account.id === selectedAccount.id
+                              ? {
+                                  ...account,
+                                  boundaries: { ...account.boundaries, channels: event.target.value },
+                                }
+                              : account
+                          )
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+
+                <div>
+                  <h3>Security</h3>
+                  <p>Last used: {selectedAccount.lastUsed}</p>
+                  <div className="row-actions">
+                    <button className="btn subtle" onClick={() => pushToast("Access revoked.")}>Revoke access</button>
+                    <button className="btn subtle" onClick={() => pushToast("Token rotated.")}>Rotate token</button>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
         </section>
       </div>
     );
@@ -2495,7 +2571,7 @@ export default function App() {
             {filteredRecipes.map((recipe) => (
               <button
                 key={recipe.id}
-                className={`recipe-card ${selectedRecipe.id === recipe.id ? "selected" : ""}`}
+                className={`recipe-card ${selectedRecipe?.id === recipe.id ? "selected" : ""}`}
                 onClick={() => {
                   setSelectedRecipeId(recipe.id);
                   setInternetInstallConfirm(false);
@@ -2516,67 +2592,76 @@ export default function App() {
         </section>
 
         <section className="section-card">
-          <div className="section-head">
-            <h2>{selectedRecipe.name}</h2>
-            <div className="row-actions">
-              <button className="btn subtle" onClick={() => tryRecipe(selectedRecipe)}>Try it</button>
-              <button className="btn primary" onClick={() => installRecipe(selectedRecipe)}>Install / Enable</button>
+          {!selectedRecipe ? (
+            <div className="empty-state">
+              <p>No recipes available in this category.</p>
+              <span>Try another filter or install a skill.</span>
             </div>
-          </div>
-
-          {selectedRecipe.provenance === "from internet" && (
-            <div className="risk-banner">
-              <p>You are installing a recipe from outside your device/team. It may run actions on your behalf.</p>
-              <label className="toggle-row">
-                <input
-                  type="checkbox"
-                  checked={internetInstallConfirm}
-                  onChange={(event) => setInternetInstallConfirm(event.target.checked)}
-                />
-                <span>I understand and want to continue</span>
-              </label>
-            </div>
-          )}
-
-          <div className="details-grid">
-            <div>
-              <h3>What it does</h3>
-              <p>{selectedRecipe.purpose}</p>
-              <p>Example: {selectedRecipe.name} for a daily team update.</p>
-            </div>
-            <div>
-              <h3>Permissions required</h3>
-              <div className="permission-list">
-                {selectedRecipe.permissions.map((permission) => (
-                  <label key={permission} className="toggle-row">
-                    <input type="checkbox" checked readOnly />
-                    <span>{permission}</span>
-                  </label>
-                ))}
+          ) : (
+            <>
+              <div className="section-head">
+                <h2>{selectedRecipe.name}</h2>
+                <div className="row-actions">
+                  <button className="btn subtle" onClick={() => tryRecipe(selectedRecipe)}>Try it</button>
+                  <button className="btn primary" onClick={() => installRecipe(selectedRecipe)}>Install / Enable</button>
+                </div>
               </div>
-            </div>
-            <div>
-              <h3>Restricted mode</h3>
-              <p>Allowed: read / draft / preview</p>
-              <p>Blocked: send / write / execute</p>
-              <label className="toggle-row">
-                <input
-                  type="checkbox"
-                  checked={selectedRecipe.restrictedMode}
-                  onChange={() =>
-                    setRecipes((prev) =>
-                      prev.map((recipe) =>
-                        recipe.id === selectedRecipe.id
-                          ? { ...recipe, restrictedMode: !recipe.restrictedMode }
-                          : recipe
-                      )
-                    )
-                  }
-                />
-                <span>Run in restricted mode</span>
-              </label>
-            </div>
-          </div>
+
+              {selectedRecipe.provenance === "from internet" && (
+                <div className="risk-banner">
+                  <p>You are installing a recipe from outside your device/team. It may run actions on your behalf.</p>
+                  <label className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={internetInstallConfirm}
+                      onChange={(event) => setInternetInstallConfirm(event.target.checked)}
+                    />
+                    <span>I understand and want to continue</span>
+                  </label>
+                </div>
+              )}
+
+              <div className="details-grid">
+                <div>
+                  <h3>What it does</h3>
+                  <p>{selectedRecipe.purpose}</p>
+                  <p>Example: {selectedRecipe.name} for a daily team update.</p>
+                </div>
+                <div>
+                  <h3>Permissions required</h3>
+                  <div className="permission-list">
+                    {selectedRecipe.permissions.map((permission) => (
+                      <label key={permission} className="toggle-row">
+                        <input type="checkbox" checked readOnly />
+                        <span>{permission}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <h3>Restricted mode</h3>
+                  <p>Allowed: read / draft / preview</p>
+                  <p>Blocked: send / write / execute</p>
+                  <label className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={selectedRecipe.restrictedMode}
+                      onChange={() =>
+                        setRecipes((prev) =>
+                          prev.map((recipe) =>
+                            recipe.id === selectedRecipe.id
+                              ? { ...recipe, restrictedMode: !recipe.restrictedMode }
+                              : recipe
+                          )
+                        )
+                      }
+                    />
+                    <span>Run in restricted mode</span>
+                  </label>
+                </div>
+              </div>
+            </>
+          )}
         </section>
       </div>
     );
@@ -2585,6 +2670,14 @@ export default function App() {
   function renderInspectorContent() {
     if (activeNav !== "ask") {
       if (activeNav === "routines") {
+        if (!selectedRoutine) {
+          return (
+            <div className="inspector-content">
+              <h3>Routine Inspector</h3>
+              <p>No routine selected.</p>
+            </div>
+          );
+        }
         return (
           <div className="inspector-content">
             <h3>Routine Inspector</h3>
@@ -2596,6 +2689,14 @@ export default function App() {
       }
 
       if (activeNav === "accounts") {
+        if (!selectedAccount) {
+          return (
+            <div className="inspector-content">
+              <h3>Account Inspector</h3>
+              <p>No account selected.</p>
+            </div>
+          );
+        }
         return (
           <div className="inspector-content">
             <h3>Account Inspector</h3>
@@ -2607,6 +2708,14 @@ export default function App() {
       }
 
       if (activeNav === "library") {
+        if (!selectedRecipe) {
+          return (
+            <div className="inspector-content">
+              <h3>Recipe Inspector</h3>
+              <p>No recipe selected.</p>
+            </div>
+          );
+        }
         return (
           <div className="inspector-content">
             <h3>Recipe Inspector</h3>
