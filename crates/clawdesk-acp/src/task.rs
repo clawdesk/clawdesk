@@ -127,7 +127,40 @@ pub struct Task {
     pub artifacts: Vec<super::message::Artifact>,
     /// History of state transitions.
     pub history: Vec<TaskTransition>,
+
+    // ── Thread-as-Agent context ──────────────────────────────────────
+
+    /// Thread ID this task is executing within.
+    /// Links the A2A task to a specific chat thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<u128>,
+
+    /// Session key for A2A routing (agent-scoped).
+    /// Format: `agent:{agent_id}:{identifier}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
+
+    /// Spawn mode: `"run"` (fire-and-forget) or `"session"` (persistent).
+    /// Determines whether the task thread is ephemeral or long-lived.
+    #[serde(default = "default_run_mode", skip_serializing_if = "is_run_mode")]
+    pub spawn_mode: String,
+
+    /// Cleanup policy after task completion.
+    /// `"keep"` — preserve the thread and history.
+    /// `"delete"` — remove the sub-agent thread after announce.
+    #[serde(default = "default_cleanup", skip_serializing_if = "is_keep")]
+    pub cleanup: String,
+
+    /// Whether to announce the result to the requester's thread.
+    #[serde(default = "default_announce")]
+    pub announce_on_complete: bool,
 }
+
+fn default_run_mode() -> String { "run".to_string() }
+fn is_run_mode(s: &str) -> bool { s == "run" }
+fn default_cleanup() -> String { "keep".to_string() }
+fn is_keep(s: &str) -> bool { s == "keep" }
+fn default_announce() -> bool { true }
 
 /// Record of a state transition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,7 +193,27 @@ impl Task {
             progress: 0.0,
             artifacts: vec![],
             history: vec![],
+            thread_id: None,
+            session_key: None,
+            spawn_mode: default_run_mode(),
+            cleanup: default_cleanup(),
+            announce_on_complete: true,
         }
+    }
+
+    /// Create a task bound to a specific thread.
+    pub fn for_thread(
+        requester_id: impl Into<String>,
+        executor_id: impl Into<String>,
+        input: serde_json::Value,
+        thread_id: u128,
+        spawn_mode: &str,
+    ) -> Self {
+        let mut task = Self::new(requester_id, executor_id, input);
+        task.thread_id = Some(thread_id);
+        task.spawn_mode = spawn_mode.to_string();
+        task.session_key = Some(format!("agent:{}:{:032x}", task.executor_id, thread_id));
+        task
     }
 
     /// Apply an event to the task, transitioning its state.

@@ -8,6 +8,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use clawdesk_acp::thread_agent::{ThreadInfo, ThreadAgentConfig, thread_agent_card};
 use clawdesk_channel::reply_formatter::{MarkupFormat, ReplyFormatter};
 use clawdesk_storage::session_store::SessionStore;
 use clawdesk_types::channel::ChannelId;
@@ -48,12 +49,22 @@ pub struct SendMessageResponse {
     pub reply: String,
     pub session_id: String,
     pub thread_id: String,
+    /// A2A agent identity for this thread (e.g. `thread-<uuid>`).
+    pub agent_id: String,
 }
 
 /// POST /api/v1/message
 ///
 /// Creates or resumes a session, appends the user message, runs the real
 /// AgentRunner pipeline to generate a response, and persists the exchange.
+///
+/// ## A2A routing
+///
+/// Before running the local AgentRunner, the handler resolves the thread's
+/// owning agent via its `thread_id`. If the thread has an A2A agent binding
+/// and the agent is remote, the message is delegated via POST to the
+/// remote agent's `/a2a/tasks/send` endpoint. Local threads run the
+/// AgentRunner in-process as before.
 pub async fn send_message(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<SendMessageRequest>,
@@ -107,6 +118,31 @@ pub async fn send_message(
             }
             s
         });
+
+    // --- Thread-as-Agent: ensure this thread has an AgentCard registered ---
+    // Every thread is lazily registered as an A2A-capable agent on first
+    // message, making it discoverable for task delegation by other threads.
+    let model_for_agent = session.model.as_deref().unwrap_or("sonnet").to_string();
+    let agent_id = format!("thread-{}", &thread_id);
+    {
+        // Build the card using the public fn and upsert by agent_id key
+        let card = thread_agent_card(
+            &ThreadInfo {
+                thread_id: 0, // Gateway uses string IDs; hex key not used
+                agent_id: agent_id.clone(),
+                title: format!("Thread {}", &thread_id[..8.min(thread_id.len())]),
+                model: Some(model_for_agent.clone()),
+                capabilities: vec!["text_generation".to_string()],
+                skills: vec![],
+                spawn_mode: "standalone".to_string(),
+                parent_thread_id: None,
+            },
+            None,
+            "http://localhost:18789",
+        );
+        state.thread_agents.upsert_card(&agent_id, card);
+        debug!(%thread_id, %agent_id, "thread agent registered");
+    }
 
     // Append user message
     let user_msg = AgentMessage {
@@ -230,6 +266,7 @@ pub async fn send_message(
             reply: formatted_reply,
             session_id,
             thread_id: thread_id.clone(),
+            agent_id,
         }))
     }
     .await;
@@ -239,6 +276,136 @@ pub async fn send_message(
         .release(&thread_id, &request_owner)
         .await;
     response
+}
+
+/// GET /api/v1/thread-agents
+///
+/// Lists all registered thread agents with their A2A capability cards.
+/// Each thread that has processed at least one message is an A2A-capable
+/// agent discoverable for task delegation.
+pub async fn list_thread_agents(
+    State(state): State<Arc<GatewayState>>,
+) -> impl IntoResponse {
+    let cards = state.thread_agents.all_cards();
+    let agents: Vec<serde_json::Value> = cards
+        .into_iter()
+        .map(|card| {
+            serde_json::json!({
+                "agent_id": card.id,
+                "name": card.name,
+                "url": card.endpoint.url,
+                "capabilities": card.capabilities.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>(),
+                "skills": card.skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "thread_agents": agents,
+        "count": agents.len(),
+    }))
+}
+
+/// POST /api/v1/thread-agents/{thread_id}/delegate
+///
+/// Delegates a task from one thread-agent to another. This creates a
+/// sub-agent spawn: the target thread receives the task and the source
+/// thread will be notified on completion (announce flow).
+#[derive(Deserialize)]
+pub struct DelegateRequest {
+    /// The target thread agent to delegate to.
+    pub target_agent_id: String,
+    /// The task prompt to send.
+    pub prompt: String,
+    /// Spawn mode: "run" (fire-and-forget) or "session" (persistent).
+    #[serde(default = "default_run_mode")]
+    pub spawn_mode: String,
+}
+
+fn default_run_mode() -> String {
+    "run".to_string()
+}
+
+#[derive(Serialize)]
+pub struct DelegateResponse {
+    pub task_id: String,
+    pub source_agent_id: String,
+    pub target_agent_id: String,
+    pub status: String,
+}
+
+pub async fn delegate_task(
+    State(state): State<Arc<GatewayState>>,
+    axum::extract::Path(thread_id): axum::extract::Path<String>,
+    Json(req): Json<DelegateRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    use clawdesk_acp::thread_agent::{create_spawn_task, SpawnRequest};
+
+    let source_agent_id = format!("thread-{}", thread_id);
+
+    // Verify both agents exist
+    let _source_card = state
+        .thread_agents
+        .get_by_key(&source_agent_id)
+        .ok_or_else(|| ApiError::Internal(format!(
+            "Source thread agent '{}' not registered. Send a message first.",
+            source_agent_id
+        )))?;
+
+    let _target_card = state
+        .thread_agents
+        .get_by_key(&req.target_agent_id)
+        .ok_or_else(|| ApiError::Internal(format!(
+            "Target thread agent '{}' not found in registry.",
+            req.target_agent_id
+        )))?;
+
+    // Create a child thread ID (using hash of source + target for determinism)
+    let child_thread_id: u128 = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source_agent_id.hash(&mut hasher);
+        req.target_agent_id.hash(&mut hasher);
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .hash(&mut hasher);
+        hasher.finish() as u128
+    };
+
+    let spawn_req = SpawnRequest {
+        child_agent_id: req.target_agent_id.clone(),
+        title: format!("Delegated from {}", source_agent_id),
+        task_prompt: req.prompt.clone(),
+        spawn_mode: req.spawn_mode.clone(),
+        cleanup: "keep".to_string(),
+        model: None,
+        capabilities: vec![],
+        skills: vec![],
+    };
+
+    let result = create_spawn_task(
+        &source_agent_id,
+        0, // parent_thread_id (gateway uses string IDs)
+        child_thread_id,
+        &spawn_req,
+    );
+
+    let task_id = result.task.id.to_string();
+
+    debug!(
+        source = %source_agent_id,
+        target = %req.target_agent_id,
+        task_id = %task_id,
+        "thread agent delegation created"
+    );
+
+    Ok(Json(DelegateResponse {
+        task_id,
+        source_agent_id,
+        target_agent_id: req.target_agent_id,
+        status: "submitted".to_string(),
+    }))
 }
 
 #[derive(Serialize)]

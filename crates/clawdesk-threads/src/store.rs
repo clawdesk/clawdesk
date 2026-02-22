@@ -214,6 +214,10 @@ impl ThreadStore {
             pinned: false,
             archived: false,
             tags: Vec::new(),
+            spawn_mode: "standalone".to_string(),
+            parent_thread_id: None,
+            capabilities: Vec::new(),
+            skills: Vec::new(),
         };
 
         // Primary record

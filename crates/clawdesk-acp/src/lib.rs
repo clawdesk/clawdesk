@@ -3,8 +3,8 @@
 //! Agent-to-Agent protocol (A2A/ACP) for ClawDesk.
 //!
 //! Implements the Agent Client Protocol — a standard for inter-agent communication,
-//! task delegation, and capability discovery. Inspired by Google's A2A protocol
-//! and OpenClaw's ACP implementation.
+//! task delegation, and capability discovery. Based on Google's A2A protocol
+//! specification.
 //!
 //! ## Core abstractions
 //!
@@ -61,6 +61,7 @@ pub mod session_router;
 pub mod skill_wiring;
 pub mod streaming;
 pub mod task;
+pub mod thread_agent;
 
 pub use agent_card::{AgentCard, AgentCapability, AgentEndpoint, AgentSkill};
 pub use announce::{AnnounceRouter, Announcement, AnnouncePayload, DeliveryTarget, DeliveryResult, RetryPolicy};
@@ -72,3 +73,9 @@ pub use router::{AgentDirectory, AgentRouter, RoutingDecision};
 pub use server::A2AHandler;
 pub use session_router::{AgentSource, AgentSummary, CircuitBreaker, SessionRouter};
 pub use task::{Task, TaskId, TaskState, TaskEvent};
+pub use thread_agent::{
+    ThreadAgentConfig, ThreadAgentRegistry, ThreadInfo,
+    SpawnRequest, SpawnResult,
+    agent_session_key, parse_agent_session_key,
+    thread_agent_card, create_spawn_task,
+};

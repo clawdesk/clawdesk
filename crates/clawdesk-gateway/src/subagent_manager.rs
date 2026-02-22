@@ -36,6 +36,10 @@ impl ManagedState {
 }
 
 /// Tracked sub-agent entry.
+///
+/// Models the full lifecycle of a sub-agent spawned from a thread.
+/// Tracks the child thread, session keys, task prompt, spawn mode,
+/// cleanup policy, and announce delivery state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentEntry {
     pub id: SubAgentId,
@@ -46,6 +50,61 @@ pub struct SubAgentEntry {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub output_preview: Option<String>,
+
+    // ── Thread-as-Agent lifecycle fields ──────────────────────────────
+
+    /// Thread ID the sub-agent operates within.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<u128>,
+
+    /// Child session key (agent-scoped: `agent:{child_agent}:{thread_id}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_key: Option<String>,
+
+    /// Requester session key (for announce routing back to parent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_session_key: Option<String>,
+
+    /// The task/prompt given to this sub-agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_prompt: Option<String>,
+
+    /// Spawn mode: `"run"` (fire-and-forget) or `"session"` (persistent).
+    #[serde(default = "default_spawn_mode")]
+    pub spawn_mode: String,
+
+    /// Cleanup policy: `"delete"` (remove thread) or `"keep"` (preserve).
+    #[serde(default = "default_cleanup_policy")]
+    pub cleanup: String,
+
+    /// Execution outcome (set on completion/failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<serde_json::Value>,
+
+    /// Announce delivery state — tracks result delivery to the parent.
+    #[serde(default)]
+    pub announce_state: AnnounceState,
+}
+
+fn default_spawn_mode() -> String { "run".to_string() }
+fn default_cleanup_policy() -> String { "keep".to_string() }
+
+/// State of result announcement delivery to the parent thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AnnounceState {
+    /// Not yet attempted.
+    Pending,
+    /// Successfully delivered to the parent.
+    Delivered,
+    /// Delivery failed after retries.
+    Failed { retry_count: u32 },
+    /// Announce intentionally suppressed (e.g. steer-restart).
+    Suppressed { reason: String },
+}
+
+impl Default for AnnounceState {
+    fn default() -> Self { Self::Pending }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +203,14 @@ impl SubAgentManager {
             started_at: None,
             completed_at: None,
             output_preview: None,
+            thread_id: None,
+            child_session_key: None,
+            requester_session_key: None,
+            task_prompt: None,
+            spawn_mode: default_spawn_mode(),
+            cleanup: default_cleanup_policy(),
+            outcome: None,
+            announce_state: AnnounceState::default(),
         };
 
         let mut entries = self.entries.write().map_err(|e| e.to_string())?;
@@ -200,6 +267,125 @@ impl SubAgentManager {
         if let Ok(mut entries) = self.entries.write() {
             entries.retain(|_, e| e.state.is_active());
         }
+    }
+
+    // ── Thread-as-Agent lifecycle methods ─────────────────────────────
+
+    /// Register a sub-agent spawned from a parent thread.
+    ///
+    /// Creates a full lifecycle record with thread binding, session keys,
+    /// spawn mode, and cleanup policy. Returns the assigned `SubAgentId`.
+    pub fn spawn_from_thread(
+        &self,
+        parent_agent: &str,
+        child_agent: &str,
+        depth: u32,
+        thread_id: u128,
+        task_prompt: &str,
+        spawn_mode: &str,
+        cleanup: &str,
+        requester_session_key: Option<&str>,
+    ) -> Result<SubAgentId, String> {
+        let id = self.register(parent_agent, child_agent, depth)?;
+
+        let child_session_key = format!("agent:{}:{:032x}", child_agent, thread_id);
+
+        if let Ok(mut entries) = self.entries.write() {
+            if let Some(entry) = entries.get_mut(&id.0) {
+                entry.thread_id = Some(thread_id);
+                entry.child_session_key = Some(child_session_key);
+                entry.requester_session_key = requester_session_key.map(|s| s.to_string());
+                entry.task_prompt = Some(task_prompt.to_string());
+                entry.spawn_mode = spawn_mode.to_string();
+                entry.cleanup = cleanup.to_string();
+            }
+        }
+
+        Ok(id)
+    }
+
+    /// Mark a sub-agent as completed and set its outcome.
+    ///
+    /// If `announce_on_complete` is true for this entry's spawn_mode,
+    /// the announce_state is set to `Pending` (caller is responsible
+    /// for actual delivery via `AnnounceRouter`).
+    pub fn complete_with_outcome(
+        &self,
+        id: &SubAgentId,
+        outcome: serde_json::Value,
+    ) -> Result<(), String> {
+        let mut entries = self.entries.write().map_err(|e| e.to_string())?;
+        let entry = entries.get_mut(&id.0).ok_or("Sub-agent not found")?;
+        entry.state = ManagedState::Completed;
+        entry.completed_at = Some(chrono::Utc::now().to_rfc3339());
+        entry.outcome = Some(outcome);
+        // announce_state stays Pending — caller delivers via AnnounceRouter
+        Ok(())
+    }
+
+    /// Mark an announce as delivered.
+    pub fn mark_announced(&self, id: &SubAgentId) -> Result<(), String> {
+        let mut entries = self.entries.write().map_err(|e| e.to_string())?;
+        let entry = entries.get_mut(&id.0).ok_or("Sub-agent not found")?;
+        entry.announce_state = AnnounceState::Delivered;
+        Ok(())
+    }
+
+    /// Steer-restart: suppress the current announce and re-queue with a new task.
+    ///
+    /// The existing sub-agent is cancelled with announce suppressed,
+    /// and a new entry is registered with the updated task prompt.
+    pub fn steer_restart(
+        &self,
+        id: &SubAgentId,
+        new_task_prompt: &str,
+    ) -> Result<SubAgentId, String> {
+        // Suppress announce on the old entry and cancel it
+        let (parent, child, depth, thread_id, session_keys, cleanup) = {
+            let mut entries = self.entries.write().map_err(|e| e.to_string())?;
+            let entry = entries.get_mut(&id.0).ok_or("Sub-agent not found")?;
+            if !entry.state.is_active() {
+                return Err("Cannot steer-restart a completed sub-agent".to_string());
+            }
+            entry.state = ManagedState::Cancelled;
+            entry.announce_state = AnnounceState::Suppressed {
+                reason: "steer-restart".to_string(),
+            };
+            (
+                entry.parent_agent.clone(),
+                entry.child_agent.clone(),
+                entry.depth,
+                entry.thread_id,
+                (entry.child_session_key.clone(), entry.requester_session_key.clone()),
+                entry.cleanup.clone(),
+            )
+        };
+
+        // Register new entry with same thread binding
+        let new_id = self.register(&parent, &child, depth)?;
+        if let Ok(mut entries) = self.entries.write() {
+            if let Some(entry) = entries.get_mut(&new_id.0) {
+                entry.thread_id = thread_id;
+                entry.child_session_key = session_keys.0;
+                entry.requester_session_key = session_keys.1;
+                entry.task_prompt = Some(new_task_prompt.to_string());
+                entry.cleanup = cleanup;
+            }
+        }
+
+        Ok(new_id)
+    }
+
+    /// List sub-agents that need announce delivery.
+    pub fn pending_announces(&self) -> Vec<SubAgentEntry> {
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        entries
+            .values()
+            .filter(|e| {
+                !e.state.is_active() && e.announce_state == AnnounceState::Pending
+            })
+            .cloned()
+            .collect()
     }
 
     /// Cancel all sub-agents for a parent.

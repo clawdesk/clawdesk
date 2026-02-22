@@ -110,6 +110,12 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
         .route(
             "/api/v1/sessions/:id/compact",
             post(rpc::compact_session),
+        )
+        // Thread-as-Agent routes
+        .route("/api/v1/thread-agents", get(routes::list_thread_agents))
+        .route(
+            "/api/v1/thread-agents/:thread_id/delegate",
+            post(routes::delegate_task),
         );
 
     // OpenAI-compatible API

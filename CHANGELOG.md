@@ -2,6 +2,55 @@
 
 ## [Unreleased] — 2026-02-22
 
+### Added
+
+#### Thread-as-Agent A2A Architecture
+Every chat thread is now an A2A-capable agent with task delegation support.
+
+- **`clawdesk-acp` — `thread_agent.rs`** (~540 lines): Core bridge module.
+  - Agent-scoped session keys (`agent:{id}:{thread_hex}` format) with
+    `agent_session_key()` / `parse_agent_session_key()` roundtrip.
+  - `ThreadAgentConfig` — per-thread agent overrides (name, model, capabilities,
+    limits).
+  - `ThreadInfo` — decoupled thread view to avoid circular crate deps.
+  - `thread_agent_card()` — generates per-thread `AgentCard` with capability
+    string→enum mapping and metadata.
+  - `SpawnRequest` / `SpawnResult` — sub-agent thread spawning primitives.
+  - `create_spawn_task()` — wires A2A `Task` with thread bindings and session keys.
+  - `ThreadAgentRegistry` — `RwLock<HashMap>` registry with `upsert`/`upsert_card`/
+    `get`/`get_by_key`/`remove`/`all_cards`/`count` supporting both `u128` and
+    string-based thread IDs.
+  - 12 unit tests covering key format, roundtrip, card generation, config overrides,
+    spawn task wiring, and registry CRUD.
+
+- **`clawdesk-acp` — `session_router.rs`**: Added 4 thread-affinity methods:
+  - `bind_thread_to_agent()` — creates agent-scoped session key + affinity entry.
+  - `unbind_thread()` — removes all affinity entries for a thread.
+  - `route_for_thread()` — convenience wrapper for thread-aware routing.
+  - `register_thread_agent()` — registers card in directory + binds affinity.
+
+- **`clawdesk-acp` — `task.rs`**: Enriched `Task` with thread context:
+  `thread_id`, `session_key`, `spawn_mode`, `cleanup`, `announce_on_complete`.
+  Added `Task::for_thread()` constructor.
+
+- **`clawdesk-threads` — `types.rs`**: Enriched `ThreadMeta` with `spawn_mode`
+  (standalone/run/session), `parent_thread_id`, `capabilities`, `skills`.
+
+- **`clawdesk-gateway` — `subagent_manager.rs`**: Enriched `SubAgentEntry` with
+  full lifecycle tracking: `thread_id`, `child_session_key`,
+  `requester_session_key`, `task_prompt`, `spawn_mode`, `cleanup`, `outcome`,
+  `AnnounceState` enum (Pending/Delivered/Failed/Suppressed).
+
+- **`clawdesk-gateway` — `routes.rs`**: Thread-agent API endpoints:
+  - `send_message` now auto-registers each thread as an A2A agent on first
+    message. Response includes `agent_id`.
+  - `GET /api/v1/thread-agents` — list all registered thread agents.
+  - `POST /api/v1/thread-agents/:thread_id/delegate` — delegate a task from
+    one thread-agent to another via A2A.
+
+- **`clawdesk-gateway` — `state.rs`**: Added `ThreadAgentRegistry` to
+  `GatewayState` for per-thread agent card storage.
+
 ### Performance
 
 #### O(1) Rolling Hash for Streaming Integrity (`delta_stream.rs`)

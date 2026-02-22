@@ -446,6 +446,79 @@ impl SessionRouter {
             })
             .collect()
     }
+
+    // ─── Thread-as-Agent affinity ────────────────────────────────────────
+
+    /// Bind a thread to an agent in the session affinity table.
+    ///
+    /// Creates an agent-scoped session key (`agent:{agent_id}:{thread_hex}`)
+    /// and establishes affinity so subsequent messages to this thread route
+    /// to the same agent.
+    pub fn bind_thread_to_agent(&mut self, thread_id: u128, agent_id: &str) {
+        let session_key = SessionKey::from(
+            crate::thread_agent::agent_session_key(agent_id, thread_id),
+        );
+        self.affinity.insert(
+            session_key.clone(),
+            AffinityEntry {
+                agent_id: agent_id.to_string(),
+                established_at: Utc::now(),
+                turn_count: 0,
+                last_used: Utc::now(),
+            },
+        );
+        info!(
+            thread_id = %format!("{:032x}", thread_id),
+            agent = %agent_id,
+            "bound thread to agent (session affinity)"
+        );
+    }
+
+    /// Unbind a thread from its agent (e.g., when re-assigning).
+    ///
+    /// Removes all session affinity entries for this thread across all agents.
+    pub fn unbind_thread(&mut self, thread_id: u128) {
+        let thread_hex = format!("{:032x}", thread_id);
+        let before = self.affinity.len();
+        self.affinity.retain(|key, _| {
+            let key_str = key.to_string();
+            !key_str.contains(&thread_hex)
+        });
+        let removed = before - self.affinity.len();
+        if removed > 0 {
+            debug!(thread_id = %thread_hex, removed, "unbound thread from agent affinities");
+        }
+    }
+
+    /// Route for a specific thread, checking its agent affinity first.
+    ///
+    /// Convenience method that:
+    /// 1. Builds the agent-scoped session key for the thread
+    /// 2. Delegates to `route_with_session`
+    pub fn route_for_thread(
+        &mut self,
+        thread_id: u128,
+        agent_id: &str,
+        required_capabilities: &[AgentCapability],
+        exclude_agents: &[String],
+    ) -> RoutingDecision {
+        let session_key = SessionKey::from(
+            crate::thread_agent::agent_session_key(agent_id, thread_id),
+        );
+        self.route_with_session(&session_key, required_capabilities, exclude_agents)
+    }
+
+    /// Register a thread's agent card in the directory and establish affinity.
+    ///
+    /// This is the primary method for making a thread an A2A agent:
+    /// 1. Registers the card in the agent directory
+    /// 2. Marks it as a ClawDesk-native agent
+    /// 3. Binds the thread to that agent via session affinity
+    pub fn register_thread_agent(&mut self, card: AgentCard, thread_id: u128) {
+        let agent_id = card.id.clone();
+        self.register_clawdesk(card);
+        self.bind_thread_to_agent(thread_id, &agent_id);
+    }
 }
 
 impl Default for SessionRouter {

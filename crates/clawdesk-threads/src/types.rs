@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Metadata for a chat thread (the "header" stored at `threads/{id}`).
+///
+/// Every thread is an **agent** in the A2A protocol. The `agent_id` field
+/// identifies which agent owns this thread, and the optional `spawn_mode`
+/// / `parent_thread_id` fields model sub-agent thread hierarchies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadMeta {
     /// Thread identifier (UUID as u128, stored hex-encoded in the key).
@@ -29,7 +33,36 @@ pub struct ThreadMeta {
     /// Arbitrary user-defined tags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+
+    // ── A2A thread-as-agent fields ────────────────────────────────────
+
+    /// Spawn mode: how this thread-agent was created.
+    /// - `"standalone"` (default) — user-created top-level thread
+    /// - `"run"` — fire-and-forget sub-agent task (result announced to parent)
+    /// - `"session"` — persistent sub-agent session (stays active)
+    #[serde(default = "default_spawn_mode", skip_serializing_if = "is_standalone")]
+    pub spawn_mode: String,
+
+    /// Parent thread ID if this is a sub-agent thread.
+    /// Set when `spawn_mode` is `"run"` or `"session"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_thread_id: Option<u128>,
+
+    /// Per-agent capability overrides.
+    /// Lists capability strings this thread-agent advertises (e.g. "code-review",
+    /// "summarize"). Used to generate the thread's A2A `AgentCard`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+
+    /// Per-agent skill filter.
+    /// If non-empty, only these skills are available to this thread-agent
+    /// (overrides the global skill registry).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
 }
+
+fn default_spawn_mode() -> String { "standalone".to_string() }
+fn is_standalone(s: &str) -> bool { s == "standalone" }
 
 /// A single chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -19,6 +19,7 @@
 
 use arc_swap::ArcSwap;
 use clawdesk_acp::server::A2AState;
+use clawdesk_acp::thread_agent::ThreadAgentRegistry;
 use clawdesk_agents::ToolRegistry;
 use clawdesk_channel::inbound_adapter::InboundAdapterRegistry;
 use clawdesk_channel::registry::ChannelRegistry;
@@ -77,6 +78,11 @@ pub struct GatewayState {
     // --- A2A protocol state ---
     /// Shared A2A protocol state (agent card, directory, tasks, policy).
     pub a2a_state: ArcSwap<A2AState>,
+
+    // --- Thread-as-Agent registry ---
+    /// Every thread is an A2A-capable agent; this registry holds per-thread
+    /// AgentCards keyed by `agent:{id}:{thread_hex}`.
+    pub thread_agents: Arc<ThreadAgentRegistry>,
 }
 
 impl GatewayState {
@@ -115,6 +121,7 @@ impl GatewayState {
                     "http://localhost:18789",
                 ),
             )),
+            thread_agents: Arc::new(ThreadAgentRegistry::new("http://localhost:18789")),
         }
     }
 
