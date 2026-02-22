@@ -825,6 +825,37 @@ export function ChatPage({
     activeSendAbortRef.current = null;
   }, []);
 
+  const stopMessage = useCallback(async () => {
+    if (!isSending && !sendingRef.current) return;
+
+    if (activeSendAbortRef.current) {
+      activeSendAbortRef.current.abort();
+    }
+
+    try {
+      await api.cancelActiveRun(activeChatIdRef.current ?? undefined);
+    } catch {
+      // Ignore cancel failures; local UI still stops the spinner.
+    }
+
+    const streamMsgId = streamingMsgIdRef.current;
+    if (streamMsgId) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === streamMsgId
+            ? { ...m, isStreaming: false, text: m.text || "Stopped by user." }
+            : m
+        )
+      );
+    }
+
+    streamingMsgIdRef.current = null;
+    sendingRef.current = false;
+    activeSendAbortRef.current = null;
+    setIsSending(false);
+    pushToast("Stopped.");
+  }, [isSending, pushToast]);
+
   // Select a chat from the sidebar
   const selectSession = useCallback((session: SessionSummary) => {
     // Switch to the agent if different
@@ -1239,9 +1270,12 @@ export function ChatPage({
                       {showHeader && (
                         <div className="chat-thread-sidebar-group-header">{timeRange}</div>
                       )}
-                      <button
+                      <div
                         className={`chat-thread-sidebar-item ${activeChatId === s.chat_id ? "active" : ""}`}
+                        role="button"
+                        tabIndex={0}
                         onClick={() => selectSession(s)}
+                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") selectSession(s); }}
                       >
                         <div className="chat-thread-sidebar-item-row">
                           <div className="chat-thread-sidebar-item-title">{s.title || "Untitled"}</div>
@@ -1256,7 +1290,7 @@ export function ChatPage({
                         <div className="chat-thread-sidebar-item-meta">
                           {s.message_count} msgs · {new Date(s.last_activity).toLocaleDateString([], { month: "short", day: "numeric" })}
                         </div>
-                      </button>
+                      </div>
                     </div>
                   );
                 });
@@ -1522,25 +1556,35 @@ export function ChatPage({
                     }}
                     disabled={isSending || !agent}
                   />
-                  <button
-                    className={`chat-send-btn ${input.trim() && agent ? "active" : ""}`}
-                    disabled={isSending || !agent || !input.trim()}
-                    onClick={() => {
-                      console.log("[UI] send button clicked. input:", input.trim()?.slice(0, 30), "isSending:", isSending, "sendingRef:", sendingRef.current);
-                      if (input.trim() && !isSending) {
-                        // Defensive: if sendingRef is stuck true but isSending is false,
-                        // force-clear the ref to recover from inconsistent state
-                        if (sendingRef.current) {
-                          console.warn("[UI] sendingRef stuck true while isSending=false — force-resetting");
-                          sendingRef.current = false;
+                  {isSending ? (
+                    <button
+                      className="chat-send-btn chat-stop-btn active"
+                      onClick={stopMessage}
+                      title="Stop response"
+                    >
+                      <Icon name="pause" />
+                    </button>
+                  ) : (
+                    <button
+                      className={`chat-send-btn ${input.trim() && agent ? "active" : ""}`}
+                      disabled={!agent || !input.trim()}
+                      onClick={() => {
+                        console.log("[UI] send button clicked. input:", input.trim()?.slice(0, 30), "isSending:", isSending, "sendingRef:", sendingRef.current);
+                        if (input.trim() && !isSending) {
+                          // Defensive: if sendingRef is stuck true but isSending is false,
+                          // force-clear the ref to recover from inconsistent state
+                          if (sendingRef.current) {
+                            console.warn("[UI] sendingRef stuck true while isSending=false — force-resetting");
+                            sendingRef.current = false;
+                          }
+                          sendMessage(input.trim());
+                          setInput("");
                         }
-                        sendMessage(input.trim());
-                        setInput("");
-                      }
-                    }}
-                  >
-                    <Icon name="send" />
-                  </button>
+                      }}
+                    >
+                      <Icon name="send" />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

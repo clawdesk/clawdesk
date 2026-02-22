@@ -33,6 +33,18 @@ use tracing::{debug, error, info, warn};
 /// Maximum number of tool call rounds before forcing a response.
 const MAX_TOOL_ROUNDS: usize = 25;
 
+/// Return a UTF-8-safe byte prefix of `input`.
+fn safe_prefix(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    &input[..end]
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Channel context — injected into system prompt for channel-aware responses
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1366,9 +1378,10 @@ impl AgentRunner {
 
                     // T4: Truncate oversized tool results to per-result budget
                     if content_text.len() > per_result_char_limit && per_result_char_limit > 100 {
+                        let preview = safe_prefix(&content_text, per_result_char_limit);
                         content_text = format!(
                             "{}...\n[truncated: output was {} chars, budget allows ~{} chars]",
-                            &content_text[..per_result_char_limit],
+                            preview,
                             result.content.len(),
                             per_result_char_limit
                         );
@@ -1470,9 +1483,10 @@ impl AgentRunner {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.content) {
                             if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
                                 if content.len() > adaptive_limit {
+                                    let preview = safe_prefix(content, adaptive_limit);
                                     msg.content = std::sync::Arc::from(format!(
                                         "{}...[truncated from {} chars]",
-                                        &content[..adaptive_limit],
+                                        preview,
                                         content.len()
                                     ));
                                 } else {
@@ -1517,7 +1531,7 @@ impl AgentRunner {
                         // Truncate very long individual messages to keep the
                         // summarization prompt itself within reasonable bounds.
                         if m.content.len() > 600 {
-                            transcript.push_str(&m.content[..600]);
+                            transcript.push_str(safe_prefix(&m.content, 600));
                             transcript.push_str("…");
                         } else {
                             transcript.push_str(&m.content);
@@ -1763,7 +1777,7 @@ impl AgentRunner {
             }
 
             // Find best split point within the max_length window
-            let window = &remaining[..max_length];
+            let window = safe_prefix(remaining, max_length);
 
             // Prefer paragraph breaks (double newline)
             let split_at = window.rfind("\n\n")

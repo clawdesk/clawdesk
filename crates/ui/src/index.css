@@ -3453,6 +3453,10 @@ h6.md-heading {
   cursor: pointer;
 }
 
+.chat-stop-btn.active {
+  background: var(--danger);
+}
+
 .chat-send-btn svg {
   width: 15px;
   height: 15px;
