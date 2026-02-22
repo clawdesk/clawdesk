@@ -274,6 +274,29 @@ impl SochStore {
                         }
                     }
 
+                    // ── WAL backup cleanup ─────────────────────────
+                    // After a successful open + self-test, remove old WAL
+                    // backup files from previous retry-quarantine cycles.
+                    // These are safety copies and are no longer needed once
+                    // the database opens and passes verification.
+                    if let Ok(entries) = std::fs::read_dir(path) {
+                        let mut cleaned = 0u32;
+                        for entry in entries.flatten() {
+                            let name = entry.file_name();
+                            let name_str = name.to_string_lossy();
+                            if name_str.starts_with("wal.log.backup.") || name_str.starts_with("wal.log.corrupt.") {
+                                if let Err(e) = std::fs::remove_file(entry.path()) {
+                                    warn!(file = %name_str, error = %e, "Failed to remove old WAL backup");
+                                } else {
+                                    cleaned += 1;
+                                }
+                            }
+                        }
+                        if cleaned > 0 {
+                            info!(cleaned, "Cleaned up old WAL backup/corrupt files after successful open");
+                        }
+                    }
+
                     return Ok(Self {
                         connection,
                         op_lock: Mutex::new(()),

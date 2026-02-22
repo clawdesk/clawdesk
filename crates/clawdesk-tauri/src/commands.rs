@@ -2439,9 +2439,17 @@ pub async fn delete_chat(chat_id: String, state: State<'_, AppState>) -> Result<
         let mut sessions = state.sessions.write().map_err(|e| e.to_string())?;
         sessions.remove(&chat_id);
     }
-    // Remove from SochDB
+    // Remove from SochDB — delete + commit so the deletion is durable.
+    // Without commit, deleted chats silently reappear on next restart.
     let key = format!("chats/{}", chat_id);
     let _ = state.soch_store.delete(&key);
+    if let Err(e) = state.soch_store.commit() {
+        tracing::warn!(chat_id = %chat_id, error = %e, "delete_chat: commit failed — deletion may not be durable");
+    }
+    // Also remove tool history for this chat
+    let tool_key = format!("tool_history/{}", chat_id);
+    let _ = state.soch_store.delete(&tool_key);
+    let _ = state.soch_store.commit();
     Ok(true)
 }
 

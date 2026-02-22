@@ -46,9 +46,9 @@ impl ConversationStore for SochStore {
             detail: e.to_string(),
         })?;
 
-        self.put(&path, &bytes)?;
+        self.put_durable(&path, &bytes)?;
 
-        debug!(%key, %ts, "message appended");
+        debug!(%key, %ts, "message appended (durable)");
         Ok(())
     }
 
@@ -82,12 +82,16 @@ impl ConversationStore for SochStore {
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
 
-        // Write all entries back-to-back so they land in one group-commit batch.
-        for (path, bytes) in &entries {
-            self.put(path, bytes)?;
+        // Write all entries then commit once — durable batch.
+        {
+            let refs: Vec<(&str, &[u8])> = entries
+                .iter()
+                .map(|(p, b)| (p.as_str(), b.as_slice()))
+                .collect();
+            self.put_batch(&refs)?;
         }
 
-        debug!(%key, count = msgs.len(), "batch messages appended");
+        debug!(%key, count = msgs.len(), "batch messages appended (durable)");
         Ok(())
     }
 
