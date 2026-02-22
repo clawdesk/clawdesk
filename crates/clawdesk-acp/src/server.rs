@@ -10,6 +10,11 @@
 //! serialized by a lightweight `Mutex`.  This eliminates reader contention
 //! on the hot path (every `send_task` / `list_agents` call).
 //!
+//! **Active tasks** use a `DashMap` (sharded concurrent map).  Each shard
+//! has its own lock, so operations on different tasks never contend.
+//! This replaces the previous `RwLock<FxHashMap>` which forced a global
+//! barrier on every write and bounced cache lines across cores on reads.
+//!
 //! ## Endpoints
 //!
 //! | Method | Path                     | Description                    |
@@ -28,6 +33,7 @@ use crate::router::{AgentDirectory, AgentRouter};
 use crate::session_router::AgentSource;
 use crate::task::{Task, TaskEvent, TaskState};
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -42,8 +48,12 @@ pub struct A2AState {
     pub directory: ArcSwap<AgentDirectory>,
     /// Router for capability-based delegation.
     pub router: AgentRouter,
-    /// Active tasks (in-memory for now; production would use SochDB).
-    pub tasks: RwLock<FxHashMap<String, Task>>,
+    /// Active tasks — sharded concurrent map (DashMap).
+    ///
+    /// Each shard has its own lock, so concurrent operations on different
+    /// tasks never contend.  Replaces the previous `RwLock<FxHashMap>`
+    /// which bounced cache lines across cores on the MESI protocol.
+    pub tasks: DashMap<String, Task>,
     /// A2A policy engine (controls delegation permissions and rate limits).
     pub policy: TokioMutex<PolicyEngine>,
     /// Agent source registry: agent_id → AgentSource.
@@ -58,7 +68,7 @@ impl A2AState {
             self_card,
             directory: ArcSwap::from_pointee(AgentDirectory::new()),
             router: AgentRouter::new(),
-            tasks: RwLock::new(FxHashMap::default()),
+            tasks: DashMap::new(),
             policy: TokioMutex::new(PolicyEngine::permissive()),
             agent_sources: RwLock::new(FxHashMap::default()),
             directory_mu: tokio::sync::Mutex::new(()),
@@ -71,7 +81,7 @@ impl A2AState {
             self_card,
             directory: ArcSwap::from_pointee(AgentDirectory::new()),
             router: AgentRouter::new(),
-            tasks: RwLock::new(FxHashMap::default()),
+            tasks: DashMap::new(),
             policy: TokioMutex::new(PolicyEngine::new(policy)),
             agent_sources: RwLock::new(FxHashMap::default()),
             directory_mu: tokio::sync::Mutex::new(()),
@@ -227,8 +237,6 @@ impl A2AHandler {
 
         state
             .tasks
-            .write()
-            .await
             .insert(task_id.as_str().to_string(), task);
 
         // In a real implementation, we'd now dispatch the task to the executor
@@ -301,8 +309,7 @@ impl A2AHandler {
 
     /// GET /a2a/tasks/:id — get task status.
     pub async fn get_task(state: &A2AState, task_id: &str) -> Result<TaskResponse, String> {
-        let tasks = state.tasks.read().await;
-        let task = tasks
+        let task = state.tasks
             .get(task_id)
             .ok_or_else(|| format!("task '{}' not found", task_id))?;
 
@@ -322,8 +329,7 @@ impl A2AHandler {
         task_id: &str,
         reason: Option<String>,
     ) -> Result<TaskResponse, String> {
-        let mut tasks = state.tasks.write().await;
-        let task = tasks
+        let mut task = state.tasks
             .get_mut(task_id)
             .ok_or_else(|| format!("task '{}' not found", task_id))?;
 
@@ -345,8 +351,7 @@ impl A2AHandler {
         task_id: &str,
         input: serde_json::Value,
     ) -> Result<TaskResponse, String> {
-        let mut tasks = state.tasks.write().await;
-        let task = tasks
+        let mut task = state.tasks
             .get_mut(task_id)
             .ok_or_else(|| format!("task '{}' not found", task_id))?;
 

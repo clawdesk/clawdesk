@@ -1034,6 +1034,7 @@ dependencies = [
  "clawdesk-agents",
  "clawdesk-providers",
  "clawdesk-types",
+ "dashmap",
  "proptest",
  "reqwest 0.12.28",
  "rustc-hash 2.1.1",

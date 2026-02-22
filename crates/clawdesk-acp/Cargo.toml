@@ -24,6 +24,7 @@ thiserror = { workspace = true }
 reqwest = { workspace = true }
 rustc-hash = { workspace = true }
 aho-corasick = { workspace = true }
+dashmap = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

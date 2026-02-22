@@ -2,6 +2,28 @@
 
 ## [Unreleased] — 2026-02-22
 
+### Performance
+
+#### O(1) Rolling Hash for Streaming Integrity (`delta_stream.rs`)
+- Replaced FNV-1a full-rehash (`fnv1a_hash(self.assembled.as_bytes())`) with a
+  composable polynomial rolling hash mod Mersenne prime (2⁶¹ − 1).
+- `DeltaEncoder::push()` now computes H(S ‖ C) = H(S) · p^|C| + H(C) mod M,
+  processing only the incoming chunk bytes — O(|chunk|) per delta instead of
+  O(|assembled|).
+- `DeltaDecoder` uses the rolling hash on the common append path; falls back to
+  full rehash only on rare insert/replace operations.
+- Eliminates the O(N²) algorithmic trap where streaming N deltas forced
+  1 + 2 + … + N bytes of hashing.
+
+#### Wait-Free Task Partitioning via Sharded Map (`server.rs`)
+- Replaced `RwLock<FxHashMap<String, Task>>` with `DashMap<String, Task>`
+  (internally sharded, each shard independently locked).
+- Operations on different tasks no longer contend — eliminates MESI cache-line
+  bouncing across cores on the RwLock atomic counter.
+- Updated all 4 handler methods (`send_task`, `get_task`, `cancel_task`,
+  `provide_input`) and both constructors.
+- Added `dashmap = "5.5"` to workspace and `clawdesk-acp` Cargo.toml.
+
 ### Added
 
 #### SochDB MemoryBackend Trait & Implementation

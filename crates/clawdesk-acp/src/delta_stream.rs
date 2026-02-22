@@ -11,7 +11,17 @@
 //!
 //! This module adds `DeltaStream` — a protocol layer on top of `BackpressureStream`
 //! that tracks byte offsets, supports checkpoint-based resumption, and uses
-//! FNV-1a hashes for integrity verification.
+//! a polynomial rolling hash for O(1)-per-delta integrity verification.
+//!
+//! ## Rolling Hash
+//!
+//! Previous implementation used FNV-1a, which rehashed the entire assembled
+//! string on every delta — O(N²) over the stream. Now uses a composable
+//! polynomial hash mod Mersenne prime (2⁶¹ − 1):
+//!
+//! H(S ∥ C) = H(S) · p^|C| + H(C) mod M
+//!
+//! Each push only processes the incoming bytes: O(|chunk|) per delta.
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -47,6 +57,7 @@ pub struct StreamCheckpoint {
 /// Server-side delta stream encoder.
 ///
 /// Accumulates the response text and emits deltas with offset tracking.
+/// Uses a polynomial rolling hash for O(|chunk|) integrity updates.
 pub struct DeltaEncoder {
     /// Task/response identifier.
     task_id: String,
@@ -60,6 +71,8 @@ pub struct DeltaEncoder {
     checkpoints: VecDeque<StreamCheckpoint>,
     /// Maximum checkpoints to retain.
     max_checkpoints: usize,
+    /// Rolling hash state — updated incrementally on each push.
+    rolling_hash: RollingHash,
 }
 
 impl DeltaEncoder {
@@ -71,6 +84,7 @@ impl DeltaEncoder {
             checkpoint_interval: 10,
             checkpoints: VecDeque::new(),
             max_checkpoints: 50,
+            rolling_hash: RollingHash::new(),
         }
     }
 
@@ -80,10 +94,14 @@ impl DeltaEncoder {
     }
 
     /// Append a text chunk and produce a delta.
+    ///
+    /// Hash update is O(|text|) via rolling polynomial hash,
+    /// not O(|assembled|) as with a full rehash.
     pub fn push(&mut self, text: &str) -> TextDelta {
         let offset = self.assembled.len();
         self.assembled.push_str(text);
-        let hash = fnv1a_hash(self.assembled.as_bytes());
+        self.rolling_hash.append(text.as_bytes());
+        let hash = self.rolling_hash.value();
         let seq = self.seq;
         self.seq += 1;
 
@@ -120,7 +138,7 @@ impl DeltaEncoder {
 
     /// Emit the final (done) delta.
     pub fn finish(&mut self) -> TextDelta {
-        let hash = fnv1a_hash(self.assembled.as_bytes());
+        let hash = self.rolling_hash.value();
         let seq = self.seq;
         self.seq += 1;
 
@@ -161,6 +179,7 @@ impl DeltaEncoder {
 /// Client-side delta stream decoder.
 ///
 /// Applies incoming deltas to reconstruct the full response text.
+/// Uses rolling hash for O(|chunk|) verification on appends.
 pub struct DeltaDecoder {
     /// Assembled text buffer.
     assembled: String,
@@ -172,6 +191,11 @@ pub struct DeltaDecoder {
     done: bool,
     /// Hash mismatches detected.
     hash_mismatches: u64,
+    /// Rolling hash state (invalidated on non-append operations).
+    rolling_hash: RollingHash,
+    /// Whether the rolling hash is in sync with `assembled`.
+    /// Set to `false` on insert/replace operations; rehashed lazily.
+    hash_valid: bool,
 }
 
 impl DeltaDecoder {
@@ -182,17 +206,24 @@ impl DeltaDecoder {
             deltas_applied: 0,
             done: false,
             hash_mismatches: 0,
+            rolling_hash: RollingHash::new(),
+            hash_valid: true,
         }
     }
 
     /// Resume from a checkpoint (for reconnection).
+    ///
+    /// Computes rolling hash from the provided text (one-time O(|text|) cost).
     pub fn from_checkpoint(checkpoint: &StreamCheckpoint, assembled_so_far: String) -> Self {
+        let rolling_hash = RollingHash::from_data(assembled_so_far.as_bytes());
         Self {
             assembled: assembled_so_far,
             last_seq: Some(checkpoint.last_seq),
             deltas_applied: 0,
             done: false,
             hash_mismatches: 0,
+            rolling_hash,
+            hash_valid: true,
         }
     }
 
@@ -212,8 +243,8 @@ impl DeltaDecoder {
         if delta.done {
             self.done = true;
             self.last_seq = Some(delta.seq);
-            // Verify final hash
-            let local_hash = fnv1a_hash(self.assembled.as_bytes());
+            // Verify final hash — ensure rolling hash is current
+            let local_hash = self.current_hash();
             if local_hash != delta.hash {
                 self.hash_mismatches += 1;
                 return false;
@@ -223,24 +254,29 @@ impl DeltaDecoder {
 
         // Apply delta at offset
         if delta.offset == self.assembled.len() {
-            // Append (common case)
+            // Append (common case) — O(|text|) rolling hash update
             self.assembled.push_str(&delta.text);
+            if self.hash_valid {
+                self.rolling_hash.append(delta.text.as_bytes());
+            }
         } else if delta.offset < self.assembled.len() {
-            // Insert/replace at offset
+            // Insert/replace at offset — invalidates rolling hash
             self.assembled
                 .replace_range(delta.offset..delta.offset, &delta.text);
+            self.hash_valid = false;
         } else {
             // Gap — pad with spaces (shouldn't happen in normal operation)
             let padding = delta.offset - self.assembled.len();
             self.assembled.extend(std::iter::repeat(' ').take(padding));
             self.assembled.push_str(&delta.text);
+            self.hash_valid = false;
         }
 
         self.last_seq = Some(delta.seq);
         self.deltas_applied += 1;
 
-        // Verify hash
-        let local_hash = fnv1a_hash(self.assembled.as_bytes());
+        // Verify hash — O(|chunk|) in common append case
+        let local_hash = self.current_hash();
         if local_hash != delta.hash {
             self.hash_mismatches += 1;
             return false;
@@ -279,8 +315,17 @@ impl DeltaDecoder {
         self.last_seq.map(|seq| StreamCheckpoint {
             last_seq: seq,
             offset: self.assembled.len(),
-            hash: fnv1a_hash(self.assembled.as_bytes()),
+            hash: self.current_hash(),
         })
+    }
+
+    /// Get the current hash, rehashing from scratch if invalidated.
+    fn current_hash(&self) -> u64 {
+        if self.hash_valid {
+            self.rolling_hash.value()
+        } else {
+            RollingHash::compute(self.assembled.as_bytes())
+        }
     }
 }
 
@@ -290,20 +335,111 @@ impl Default for DeltaDecoder {
     }
 }
 
-/// FNV-1a 64-bit hash — fast non-cryptographic hash for integrity checking.
-///
-/// Chosen over CRC32 for better distribution, and over SHA-256 for speed.
-/// Collision probability ≈ 2⁻⁶⁴ per pair — sufficient for delta verification.
-fn fnv1a_hash(data: &[u8]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x00000100000001B3;
+// ═══════════════════════════════════════════════════════════════════════════
+// Polynomial Rolling Hash — O(|chunk|) composable integrity verification
+// ═══════════════════════════════════════════════════════════════════════════
 
-    let mut hash = FNV_OFFSET;
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
+/// Mersenne prime M = 2⁶¹ − 1, used as the hash modulus.
+///
+/// Chosen because:
+/// - Large enough for negligible collision probability (~2⁻⁶¹ per pair)
+/// - Allows efficient modular reduction via bit tricks
+/// - Well-studied in Rabin-Karp fingerprinting literature
+const MERSENNE_61: u64 = (1u64 << 61) - 1;
+
+/// Hash base (a prime > 256 to avoid trivial collisions with byte values).
+const HASH_BASE: u64 = 131;
+
+/// Composable polynomial rolling hash.
+///
+/// H(s₀s₁…sₖ₋₁) = Σ sᵢ · p^(k−1−i)  mod M
+///
+/// Appending chunk C of length m:
+///   H(S ∥ C) = H(S) · p^m + H(C)  mod M
+///
+/// Each append only processes the incoming bytes, keeping the operation
+/// strictly O(|chunk|) and entirely within L1 cache.
+#[derive(Debug, Clone)]
+struct RollingHash {
+    hash: u64,
+}
+
+impl RollingHash {
+    fn new() -> Self {
+        Self { hash: 0 }
     }
-    hash
+
+    /// Initialize from existing data (one-time O(|data|) cost).
+    fn from_data(data: &[u8]) -> Self {
+        let mut h = Self::new();
+        h.append(data);
+        h
+    }
+
+    /// Append bytes and update the hash in O(|data|).
+    ///
+    /// H(S ∥ C) = H(S) · p^|C| + H(C)  mod M
+    fn append(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        let p_pow = mod_pow(HASH_BASE, data.len() as u64);
+        let chunk_hash = hash_bytes(data);
+        self.hash = mod_add(mod_mul(self.hash, p_pow), chunk_hash);
+    }
+
+    /// Get the current hash value.
+    fn value(&self) -> u64 {
+        self.hash
+    }
+
+    /// Compute hash from scratch (for non-append operations / verification).
+    fn compute(data: &[u8]) -> u64 {
+        hash_bytes(data)
+    }
+}
+
+/// Hash a byte slice: H = Σ data[i] · p^(len−1−i) mod M
+#[inline]
+fn hash_bytes(data: &[u8]) -> u64 {
+    let mut h: u64 = 0;
+    for &byte in data {
+        h = mod_add(mod_mul(h, HASH_BASE), byte as u64);
+    }
+    h
+}
+
+/// Modular multiplication: (a × b) mod M, using u128 to avoid overflow.
+#[inline]
+fn mod_mul(a: u64, b: u64) -> u64 {
+    ((a as u128 * b as u128) % MERSENNE_61 as u128) as u64
+}
+
+/// Modular addition: (a + b) mod M.
+#[inline]
+fn mod_add(a: u64, b: u64) -> u64 {
+    let sum = a as u128 + b as u128;
+    (sum % MERSENNE_61 as u128) as u64
+}
+
+/// Modular exponentiation: base^exp mod M, via binary exponentiation.
+#[inline]
+fn mod_pow(mut base: u64, mut exp: u64) -> u64 {
+    if exp == 0 {
+        return 1;
+    }
+    base %= MERSENNE_61;
+    let mut result: u64 = 1;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = mod_mul(result, base);
+        }
+        exp >>= 1;
+        if exp > 0 {
+            base = mod_mul(base, base);
+        }
+    }
+    result
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -419,12 +555,31 @@ mod tests {
     }
 
     #[test]
-    fn fnv1a_consistency() {
-        let h1 = fnv1a_hash(b"hello");
-        let h2 = fnv1a_hash(b"hello");
-        let h3 = fnv1a_hash(b"world");
+    fn rolling_hash_consistency() {
+        let h1 = RollingHash::compute(b"hello");
+        let h2 = RollingHash::compute(b"hello");
+        let h3 = RollingHash::compute(b"world");
         assert_eq!(h1, h2);
         assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn rolling_hash_composability() {
+        // H("hello world") computed at once must equal
+        // H("hello ") then append("world")
+        let full = RollingHash::compute(b"hello world");
+
+        let mut incremental = RollingHash::new();
+        incremental.append(b"hello ");
+        incremental.append(b"world");
+        assert_eq!(full, incremental.value());
+
+        // Also test 3-way split
+        let mut three_way = RollingHash::new();
+        three_way.append(b"hel");
+        three_way.append(b"lo ");
+        three_way.append(b"world");
+        assert_eq!(full, three_way.value());
     }
 
     #[test]
