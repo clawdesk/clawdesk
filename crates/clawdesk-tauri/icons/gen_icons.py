@@ -1,26 +1,53 @@
-import struct, zlib, shutil
+#!/usr/bin/env python3
+"""Generate Tauri app icons from logo.svg.
 
-def make_png(size):
-    def chunk(ctype, data):
-        c = ctype + data
-        return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
-    ihdr = struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0)
-    row = b'\x00' + bytes([99, 102, 241, 255] * size)
-    raw = row * size
-    idat = zlib.compress(raw)
-    return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr) + chunk(b'IDAT', idat) + chunk(b'IEND', b'')
+Requires: rsvg-convert (librsvg), Pillow, iconutil (macOS).
+Run from the icons/ directory:
+    python3 gen_icons.py
+"""
+import subprocess, os, sys
 
-for s in [32, 128]:
-    with open(f'{s}x{s}.png', 'wb') as f:
-        f.write(make_png(s))
+ROOT = os.path.dirname(os.path.abspath(__file__))
+SVG = os.path.join(ROOT, "..", "..", "..", "logo.svg")
 
-with open('128x128@2x.png', 'wb') as f:
-    f.write(make_png(256))
+if not os.path.exists(SVG):
+    print(f"Error: logo.svg not found at {SVG}")
+    sys.exit(1)
 
-png32 = open('32x32.png', 'rb').read()
-ico = struct.pack('<HHH', 0, 1, 1) + struct.pack('<BBBBHHII', 32, 32, 0, 0, 1, 32, len(png32), 22) + png32
-with open('icon.ico', 'wb') as f:
-    f.write(ico)
+def rsvg(size, out):
+    subprocess.run(["rsvg-convert", "-w", str(size), "-h", str(size), SVG, "-o", out], check=True)
 
-shutil.copy('128x128.png', 'icon.icns')
-print('Icons created')
+# PNGs for Tauri bundle
+rsvg(32, os.path.join(ROOT, "32x32.png"))
+rsvg(128, os.path.join(ROOT, "128x128.png"))
+rsvg(256, os.path.join(ROOT, "128x128@2x.png"))
+rsvg(1024, os.path.join(ROOT, "icon-master.png"))
+
+# Windows ICO (7 sizes)
+from PIL import Image
+master = Image.open(os.path.join(ROOT, "128x128@2x.png")).convert("RGBA")
+sizes = [(16,16), (24,24), (32,32), (48,48), (64,64), (128,128), (256,256)]
+ico_imgs = [master.resize(s, Image.LANCZOS) for s in sizes]
+ico_imgs[-1].save(os.path.join(ROOT, "icon.ico"), format="ICO", append_images=ico_imgs[:-1], sizes=sizes)
+
+# macOS ICNS via iconutil
+iconset = os.path.join(ROOT, "icon.iconset")
+os.makedirs(iconset, exist_ok=True)
+for name, sz in [
+    ("icon_16x16", 16), ("icon_16x16@2x", 32),
+    ("icon_32x32", 32), ("icon_32x32@2x", 64),
+    ("icon_128x128", 128), ("icon_128x128@2x", 256),
+    ("icon_256x256", 256), ("icon_256x256@2x", 512),
+    ("icon_512x512", 512), ("icon_512x512@2x", 1024),
+]:
+    rsvg(sz, os.path.join(iconset, f"{name}.png"))
+subprocess.run(["iconutil", "-c", "icns", iconset, "-o", os.path.join(ROOT, "icon.icns")], check=True)
+
+import shutil
+shutil.rmtree(iconset)
+
+print("Icons generated from logo.svg:")
+for f in sorted(os.listdir(ROOT)):
+    if f.endswith((".png", ".ico", ".icns")):
+        sz = os.path.getsize(os.path.join(ROOT, f))
+        print(f"  {f:24s} {sz:>8,} bytes")
