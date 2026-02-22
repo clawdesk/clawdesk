@@ -1931,12 +1931,13 @@ h3 {
 
 .modal-card {
   position: relative;
+  z-index: 201;
   width: min(760px, calc(100vw - 28px));
   max-height: calc(100vh - 28px);
   border-radius: var(--radius-xl);
-  background: var(--panel-strong);
-  border: 1px solid var(--line);
-  box-shadow: var(--shadow-lg);
+  background: var(--bg-deep);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-xl);
   display: grid;
   grid-template-rows: auto 1fr;
   color: var(--text);
