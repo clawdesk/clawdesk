@@ -27,6 +27,17 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+fn safe_prefix(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    &input[..end]
+}
+
 // ═══════════════════════════════════════════════════════════
 // T4 FIX: SandboxGate adapter — bridges SandboxPolicyEngine → SandboxGate trait
 // ═══════════════════════════════════════════════════════════
@@ -715,8 +726,9 @@ pub async fn send_message(
     let auto_title = if is_new_chat {
         let words: Vec<&str> = request.content.split_whitespace().take(6).collect();
         let title = words.join(" ");
-        if title.len() > 60 {
-            format!("{}…", &title[..57])
+        if title.chars().count() > 60 {
+            let short = title.chars().take(57).collect::<String>();
+            format!("{short}…")
         } else {
             title
         }
@@ -1037,7 +1049,8 @@ pub async fn send_message(
                     CompactionLevel::DropMetadata => {
                         for msg in history.iter_mut() {
                             if msg.role == MessageRole::Tool && msg.content.len() > 500 {
-                                let truncated = format!("{}...[truncated]", &msg.content[..500]);
+                                let preview = safe_prefix(&msg.content, 500);
+                                let truncated = format!("{preview}...[truncated]");
                                 msg.content = std::sync::Arc::from(truncated);
                                 msg.cached_tokens = Some(estimate_tokens(&msg.content));
                             }
@@ -1052,7 +1065,7 @@ pub async fn send_message(
                                 transcript.push_str(m.role.as_str());
                                 transcript.push_str(": ");
                                 if m.content.len() > 600 {
-                                    transcript.push_str(&m.content[..600]);
+                                    transcript.push_str(safe_prefix(&m.content, 600));
                                     transcript.push_str("…");
                                 } else {
                                     transcript.push_str(&m.content);
@@ -1361,6 +1374,19 @@ pub async fn send_message(
         }
         hasher.finish()
     };
+
+    // Task 2: Pre-compute query embedding for semantic cache lookup.
+    // This embedding is reused for both cache lookup and cache store,
+    // eliminating duplicate embedding API calls and enabling ANN-based
+    // semantic cache matching instead of exact-only matching.
+    let query_embedding = match state.embedding_provider.embed(&request.content).await {
+        Ok(result) => Some(result.vector),
+        Err(e) => {
+            tracing::debug!(error = %e, "query embedding for semantic cache failed, using exact match only");
+            None
+        }
+    };
+
     // T13: Include model name in cache namespace — prevents cross-model cache hits
     // (same query + same persona but different model would otherwise collide).
     let cache_namespace = format!("agent:{}:{}:{:x}", agent.id, agent.model, prompt_hash);
@@ -1368,7 +1394,7 @@ pub async fn send_message(
         &request.content,
         &cache_namespace,
         0, // no allowed-set filtering
-        None, // no pre-computed embedding
+        query_embedding.as_deref(), // Task 2: pass pre-computed embedding for ANN lookup
     ).ok().and_then(|result| {
         if let Some(entry) = result.entry {
             match result.match_type {
@@ -1483,6 +1509,9 @@ pub async fn send_message(
     let _session_guard = state.session_lanes.acquire(&session_lane_key).await
         .map_err(|e| format!("Session lane error: {}", e))?;
 
+    // Per-run cancellation token for this chat request.
+    let run_cancel = state.cancel.child_token();
+
     // Build per-request ToolRegistry with skill-provided tools
     let mut request_tool_registry = build_skill_tool_registry(
         &active_skills,
@@ -1498,7 +1527,7 @@ pub async fn send_message(
             agents.clone()
         };
         let negotiator_ref = Arc::clone(&state.negotiator);
-        let cancel_ref = state.cancel.clone();
+        let cancel_ref = run_cancel.clone();
         let base_tools = Arc::clone(&state.tool_registry);
         let sandbox_engine_ref = Arc::clone(&state.sandbox_engine);
 
@@ -1557,7 +1586,7 @@ pub async fn send_message(
     {
         let dynamic_fn = build_dynamic_spawn_fn(
             Arc::clone(&state.negotiator),
-            state.cancel.clone(),
+            run_cancel.clone(),
             Arc::clone(&state.tool_registry),
             Arc::clone(&state.sandbox_engine),
             Arc::clone(&state.sub_mgr),
@@ -1596,7 +1625,7 @@ pub async fn send_message(
         provider,
         request_tool_registry,
         config,
-        state.cancel.clone(),
+        run_cancel.clone(),
     )
     .with_events(event_tx.clone())
     .with_approval_gate(Arc::new(crate::state::TauriApprovalGate::new(
@@ -1679,11 +1708,21 @@ pub async fn send_message(
     // API rate-limit exhaustion and memory pressure from unbounded concurrency.
     let _llm_permit = state.llm_concurrency.acquire().await
         .map_err(|_| "LLM concurrency semaphore closed".to_string())?;
+    {
+        let mut active = state.active_chat_runs.write().await;
+        active.insert(chat_id.clone(), run_cancel.clone());
+    }
     let run_result = runner
         .run_with_failover(history.clone(), system_prompt.clone())
         .await
         .map_err(|e| e.to_string());
     drop(_llm_permit); // Release concurrency slot immediately after LLM call
+
+    // Clear this run from active cancellation registry.
+    {
+        let mut active = state.active_chat_runs.write().await;
+        active.remove(&chat_id);
+    }
 
     // Drop ALL broadcast senders so the forwarder sees `Closed` and exits.
     // `runner` holds a cloned Sender from `.with_events(event_tx.clone())` and
@@ -1731,13 +1770,16 @@ pub async fn send_message(
     }
 
     // ── SochDB SemanticCache: store the LLM response for future cache hits ──
+    // Task 2: Pass the pre-computed query embedding so SemanticCache stores it
+    // alongside the response. Future lookups with similar embeddings will hit
+    // ANN-based semantic matching, not just exact string matching.
     if execution_err.is_none() {
         let _ = state.semantic_cache.store(
             &request.content,
             &cache_namespace,
             0,
             agent_response.content.as_bytes(),
-            None,
+            query_embedding.clone(), // Task 2: store the query embedding
             vec![],
             None,
         );
@@ -2142,6 +2184,7 @@ pub async fn send_message(
     // batch embedding. Failures logged at warn level (visible in release builds).
     {
         let mem = Arc::clone(&state.memory);
+        let temporal_graph = Arc::clone(&state.temporal_graph); // Task 5
         let user_content = request.content.clone();
         let asst_content = assistant_msg.content.clone();
         let agent_id_for_mem = agent.id.clone();
@@ -2187,6 +2230,22 @@ pub async fn send_message(
                         agent = %agent_id_for_mem,
                         "Memory stored (user + assistant)"
                     );
+
+                    // ── Task 5: Create temporal edges for this conversation turn ──
+                    // Temporal edges record that this agent was discussing these
+                    // memories at this point in time. This enables temporal queries
+                    // like "what was the agent working on 5 minutes ago?"
+                    let agent_node = format!("agent:{}", agent_id_for_mem);
+                    for memory_id in &ids {
+                        let _ = temporal_graph.add_edge(
+                            &agent_node,
+                            "discussed",
+                            memory_id,
+                            Some(std::collections::HashMap::from([
+                                ("turn_timestamp".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339())),
+                            ])),
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -2244,6 +2303,32 @@ pub async fn get_session_messages(agent_id: String, state: State<'_, AppState>) 
         }
     }
     Ok(vec![])
+}
+
+/// Cancel active chat runs.
+///
+/// If `chat_id` is provided, cancels only that run.
+/// If `chat_id` is `None`, cancels all active chat runs.
+#[tauri::command]
+pub async fn cancel_active_run(
+    chat_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let mut active = state.active_chat_runs.write().await;
+
+    if let Some(chat_id) = chat_id {
+        if let Some(token) = active.remove(&chat_id) {
+            token.cancel();
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+
+    let had_any = !active.is_empty();
+    for (_, token) in active.drain() {
+        token.cancel();
+    }
+    Ok(had_any)
 }
 
 /// Get message history for a specific chat by chat_id.
@@ -3295,7 +3380,7 @@ pub async fn run_pipeline(
                                         response.output_tokens,
                                     );
                                     let preview_len = response.content.len().min(200);
-                                    let preview = &response.content[..preview_len];
+                                    let preview = safe_prefix(&response.content, preview_len);
                                     (
                                         i,
                                         Some(response.content.clone()),
@@ -4365,4 +4450,3 @@ fn build_dynamic_spawn_fn(
         })
     })
 }
-

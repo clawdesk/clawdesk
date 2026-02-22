@@ -607,6 +607,9 @@ function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       chat_title: "Mock conversation",
     } as unknown as T);
   }
+  if (cmd === "cancel_active_run") {
+    return Promise.resolve(true as unknown as T);
+  }
   if (cmd === "delete_agent") {
     const agentId = (args as any)?.agentId;
     const stored = localStorage.getItem("clawdesk._mockAgents");
@@ -677,7 +680,7 @@ export async function importOpenClawConfig(configJson: string): Promise<ImportRe
 }
 
 // ══════════════════════════════════════════════════════════════
-// Chat (7)
+// Chat (8)
 // ══════════════════════════════════════════════════════════════
 
 export async function sendMessage(agentId: string, content: string, modelOverride?: string, chatId?: string, providerOverride?: string, apiKey?: string, baseUrl?: string): Promise<SendMessageResponse> {
@@ -692,6 +695,10 @@ export async function sendMessage(agentId: string, content: string, modelOverrid
       base_url: baseUrl || null,
     },
   });
+}
+
+export async function cancelActiveRun(chatId?: string): Promise<boolean> {
+  return invoke<boolean>("cancel_active_run", { chatId: chatId ?? null });
 }
 
 export async function getSessionMessages(agentId: string): Promise<ChatMessage[]> {
@@ -1661,5 +1668,4 @@ export async function deleteWhisperModel(model: string): Promise<boolean> {
 export async function getVoiceInputStatus(): Promise<VoiceInputStatusResult> {
   return invoke<VoiceInputStatusResult>("get_voice_input_status");
 }
-
 

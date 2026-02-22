@@ -216,6 +216,44 @@ impl PersistentCachedProvider {
         self.l1_put(key.clone(), result.clone()).await;
         self.l2_put(&key, result).await;
     }
+
+    // ── Task 6: Unified cache layer API ────────────────────────────
+
+    /// Check if an embedding is already cached for the given text.
+    ///
+    /// This allows external code (e.g., the semantic cache) to check for
+    /// existing embeddings before making redundant API calls. Returns
+    /// `None` if the embedding is not cached.
+    pub async fn get_cached(&self, text: &str) -> Option<EmbeddingResult> {
+        if !self.config.enabled {
+            return None;
+        }
+        self.lookup(text).await
+    }
+
+    /// Import an externally-computed embedding into the cache.
+    ///
+    /// This is the inverse of `get_cached` — when some other component
+    /// (e.g., the semantic cache or MemoryManager recall pipeline) has
+    /// already computed an embedding, it can share it with the embedding
+    /// cache to avoid 6KB/entry duplication.
+    pub async fn import_embedding(&self, text: &str, embedding: Vec<f32>) {
+        if !self.config.enabled {
+            return;
+        }
+        let result = EmbeddingResult {
+            vector: embedding,
+            model: self.inner.name().to_string(),
+            dimensions: self.inner.dimensions(),
+            tokens_used: 0, // imported, not computed
+        };
+        self.store(text, &result).await;
+    }
+
+    /// Get the current L1 cache size (for metrics/observability).
+    pub async fn l1_size(&self) -> usize {
+        self.l1.lock().await.len()
+    }
 }
 
 #[async_trait]

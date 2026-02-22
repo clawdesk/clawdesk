@@ -315,7 +315,7 @@ export function StorePage({ pushToast }: StorePageProps) {
           />
           <button
             className="btn primary store-search-btn"
-            onClick={handleSearch}
+            onClick={() => { void handleSearch(); }}
             disabled={loading}
           >
             {loading ? "Searching…" : "Search"}
@@ -374,7 +374,7 @@ export function StorePage({ pushToast }: StorePageProps) {
           {!loading && displayEntries.length === 0 && (
             <div className="store-empty">
               <p>No skills found. Try a different search or category.</p>
-              <button className="btn subtle" onClick={handleSearch}>
+              <button className="btn subtle" onClick={() => { void handleSearch(); }}>
                 Browse all skills
               </button>
             </div>

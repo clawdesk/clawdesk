@@ -424,9 +424,14 @@ impl Tool for HttpTool {
             .map_err(|e| format!("failed to read response body: {e}"))?;
 
         let truncated = if body.len() > self.max_response_bytes {
+            // Find a valid char boundary at or before max_response_bytes
+            let mut end = self.max_response_bytes;
+            while end > 0 && !body.is_char_boundary(end) {
+                end -= 1;
+            }
             format!(
                 "{}...\n[truncated: {} bytes total]",
-                &body[..self.max_response_bytes],
+                &body[..end],
                 body.len()
             )
         } else {
@@ -545,9 +550,13 @@ impl Tool for FileReadTool {
             let end = end_line.unwrap_or(lines.len()).min(lines.len());
             lines[start..end].join("\n")
         } else if content.len() > self.max_bytes {
+            let mut end = self.max_bytes;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
             format!(
                 "{}...\n[truncated: {} bytes total, {} lines]",
-                &content[..self.max_bytes],
+                &content[..end],
                 content.len(),
                 content.lines().count()
             )

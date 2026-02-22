@@ -45,8 +45,22 @@ pub use embedding::{
 };
 pub use hybrid::{HybridSearcher, SearchStrategy};
 pub use ingest::IngestionResult;
-pub use manager::{MemoryManager, MemoryConfig, MemorySource};
+pub use manager::{MemoryManager, MemoryConfig, MemorySource, MemoryStats};
 pub use mmr::{mmr_rerank, MmrCandidate, MmrConfig, MmrResult};
+// Re-export MemoryBackend trait from storage so consumers can refer to it via clawdesk-memory
+pub use clawdesk_storage::memory_backend::{
+    MemoryBackend, MemoryWriteOp, AtomicWriteResult, PolicyCheckResult,
+    // Memory Schema types (A4)
+    Episode, EpisodeType, Event, EventRole, EventMetrics, Entity, EntityKind, EntityFacts,
+    // Context Query types (A1)
+    ContextQueryResult, ContextSection, ContextFormat, TruncationStrategy,
+    // Task Queue types (A8)
+    BackgroundTask, TaskClaimResult, TaskQueueStats,
+    // Batch types (A7)
+    BatchWriteResult,
+    // Path Query types (A6)
+    PathQueryRow,
+};
 pub use pipeline::BatchPipeline;
 pub use reranker::{lexical_rerank, RerankerConfig, RerankerStrategy};
 pub use session_indexer::{index_session, SessionIndexConfig, SessionMessage};

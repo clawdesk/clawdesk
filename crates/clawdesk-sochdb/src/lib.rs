@@ -33,6 +33,7 @@ pub mod config;
 pub mod conversation;
 pub mod federation;
 pub mod graph;
+pub mod memory_backend;
 pub mod replay;
 pub mod session;
 pub mod compaction;
@@ -46,6 +47,7 @@ pub use bridge::{
     SochGraphOverlay, SochTemporalGraph, SochPolicyEngine,
     SochAtomicWriter, SochAgentRegistry, SochToolRouter,
 };
+pub use memory_backend::SochMemoryBackend;
 
 use clawdesk_types::error::StorageError;
 use parking_lot::Mutex;

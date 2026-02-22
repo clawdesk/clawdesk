@@ -51,6 +51,7 @@ use clawdesk_skills::bundled::load_bundled_skills;
 use clawdesk_skills::registry::SkillRegistry;
 use clawdesk_skills::{SkillVerifier, TrustLevel};
 use clawdesk_sochdb::SochStore;
+use clawdesk_sochdb::SochMemoryBackend;
 use clawdesk_sochdb::{
     SochConn, SochSemanticCache, SochTraceStore, SochCheckpointStore,
     SochGraphOverlay, SochTemporalGraph, SochPolicyEngine,
@@ -383,8 +384,12 @@ pub struct AppState {
     /// Agent capability registry — multi-agent routing by tool capabilities.
     pub agent_registry: Arc<SochAgentRegistry>,
 
-    // ── Memory system: embeddings + hybrid search backed by SochDB VectorStore ──
-    pub memory: Arc<MemoryManager<SochStore>>,
+    // ── Memory system: embeddings + hybrid search backed by SochDB MemoryBackend ──
+    // Uses SochMemoryBackend for full integration: atomic writes, graph nodes,
+    // temporal edges, policy checks, and trace spans.
+    pub memory: Arc<MemoryManager<SochMemoryBackend>>,
+    /// Shared embedding provider — used by semantic cache to pre-compute query embeddings (Task 2).
+    pub embedding_provider: Arc<dyn EmbeddingProvider>,
 
     // Real backend services
     pub skill_registry: RwLock<SkillRegistry>,
@@ -418,6 +423,8 @@ pub struct AppState {
     pub pipelines: RwLock<Vec<PipelineDescriptor>>,
     pub started_at: std::time::Instant,
     pub cancel: tokio_util::sync::CancellationToken,
+    /// Per-chat cancellation tokens for currently-running `send_message` tasks.
+    pub active_chat_runs: tokio::sync::RwLock<HashMap<String, tokio_util::sync::CancellationToken>>,
 
     // ── Durable Runtime ──
     pub durable_runner: Option<Arc<DurableAgentRunner>>,
@@ -736,16 +743,22 @@ impl AppState {
         // Tiered provider: tries cloud APIs → Ollama → auto-degrades to FTS-only.
         // Memory search always works, even without any API key or Ollama install.
         let embedding: Arc<dyn EmbeddingProvider> = build_tiered_provider();
+        let embedding_for_state = embedding.clone(); // Task 2: shared with semantic cache
         info!("Tiered embedding provider ready — memory always has FTS fallback");
 
-        // ── MemoryManager<SochStore> ────────────────────────────────
+        // ── MemoryManager<SochMemoryBackend> ─────────────────────────
+        // SochMemoryBackend wraps SochStore + all SochDB advanced modules
+        // (AtomicMemoryWriter, GraphOverlay, TemporalGraphOverlay, PolicyEngine, TraceStore)
+        // enabling atomic writes (Task 1), graph nodes (Task 7), temporal edges (Task 5),
+        // policy checks (Task 9), and trace spans (Task 8) in the memory pipeline.
+        let soch_memory_backend = Arc::new(SochMemoryBackend::new(soch_store.clone()));
         let memory_config = MemoryConfig::default();
         let memory = Arc::new(MemoryManager::new(
-            soch_store.clone() as Arc<SochStore>,
+            soch_memory_backend,
             embedding,
             memory_config,
         ));
-        info!("MemoryManager<SochStore> initialized — remember/recall/forget ready");
+        info!("MemoryManager<SochMemoryBackend> initialized — full SochDB integration active");
 
         // ── SochDB advanced modules (via SochConn bridge) ───────────
         let conn = SochConn::new(soch_store.clone());
@@ -1184,6 +1197,7 @@ impl AppState {
             atomic_writer,
             agent_registry,
             memory,
+            embedding_provider: embedding_for_state,
 
             skill_registry: RwLock::new(skill_registry),
             provider_registry: RwLock::new(provider_registry),
@@ -1207,6 +1221,7 @@ impl AppState {
             pipelines: RwLock::new(pipelines),
             started_at: std::time::Instant::now(),
             cancel,
+            active_chat_runs: tokio::sync::RwLock::new(HashMap::new()),
 
             // ── Durable Runtime ──
             durable_runner: None,

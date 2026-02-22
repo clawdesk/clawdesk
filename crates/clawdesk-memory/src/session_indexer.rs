@@ -23,7 +23,7 @@
 
 use crate::chunker::{chunk_text, flatten_session, sha256_hex, ChunkerConfig};
 use crate::manager::{MemoryConfig, MemoryManager, MemorySource};
-use clawdesk_storage::vector_store::VectorStore;
+use clawdesk_storage::memory_backend::MemoryBackend;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -66,7 +66,7 @@ pub struct SessionMessage {
 /// Index a completed session into the memory system.
 ///
 /// Returns the number of chunks stored, or an error string.
-pub async fn index_session<S: VectorStore>(
+pub async fn index_session<S: MemoryBackend>(
     manager: &MemoryManager<S>,
     session_id: &str,
     messages: &[SessionMessage],

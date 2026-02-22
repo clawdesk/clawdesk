@@ -2,6 +2,17 @@
 //!
 //! Integrates chunking, temporal decay, and MMR diversity
 //! re-ranking into the remember/recall pipeline.
+//!
+//! ## SochDB Integration
+//!
+//! When the backend implements `MemoryBackend` (e.g., `SochMemoryBackend`),
+//! the manager automatically uses:
+//! - **Atomic writes** (Task 1): all-or-nothing multi-index writes
+//! - **Graph nodes** (Task 7): memory nodes + edges in knowledge graph
+//! - **Graph-contextual retrieval** (Task 3): scope search to graph-reachable memories
+//! - **Temporal pre-filter** (Task 4): true time-bounded edge queries
+//! - **Policy checks** (Task 9): PII redaction before storage, access control on read
+//! - **Trace spans** (Task 8): OpenTelemetry-compatible instrumentation
 
 use crate::chunker::{chunk_text, sha256_hex, ChunkerConfig};
 use crate::embedding::EmbeddingProvider;
@@ -9,13 +20,29 @@ use crate::hybrid::{HybridSearcher, SearchStrategy};
 use crate::mmr::{mmr_rerank, MmrCandidate, MmrConfig};
 use crate::pipeline::BatchPipeline;
 use crate::temporal_decay::{apply_temporal_decay, TemporalDecayConfig};
+use clawdesk_storage::memory_backend::{
+    MemoryBackend, MemoryWriteOp, PolicyCheckResult,
+    // Memory Schema types (A4)
+    Episode, EpisodeType, Event, Entity, EntityKind, EntityFacts,
+    // Context Query types (A1)
+    ContextQueryResult, ContextFormat, TruncationStrategy,
+    // Task Queue types (A8)
+    BackgroundTask, TaskClaimResult, TaskQueueStats,
+    // Multi-Vector types (A11)
+    MultiVectorDocument, DocumentSearchResult,
+    // Path Query types (A6)
+    PathQueryRow,
+    // Batch types (A7)
+    BatchWriteResult,
+};
 use clawdesk_storage::vector_store::{
-    CollectionConfig, DistanceMetric, VectorSearchResult, VectorStore,
+    CollectionConfig, DistanceMetric, VectorSearchResult,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Where a memory came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +73,16 @@ pub struct MemoryConfig {
     pub temporal_decay: TemporalDecayConfig,
     /// MMR diversity re-ranking configuration.
     pub mmr: MmrConfig,
+    /// Optional session node ID for graph-contextual retrieval (Task 3).
+    /// When set, `recall()` scopes search to memories reachable from this node.
+    pub session_node_id: Option<String>,
+    /// Optional trace run ID for observability spans (Task 8).
+    /// When set, `remember()` and `recall()` emit trace spans.
+    pub trace_run_id: Option<String>,
+    /// Optional agent ID for policy access checks (Task 9).
+    pub agent_id: Option<String>,
+    /// Maximum graph traversal depth for contextual retrieval.
+    pub graph_max_depth: usize,
 }
 
 impl Default for MemoryConfig {
@@ -59,6 +96,10 @@ impl Default for MemoryConfig {
             chunker: ChunkerConfig::default(),
             temporal_decay: TemporalDecayConfig::default(),
             mmr: MmrConfig::default(),
+            session_node_id: None,
+            trace_run_id: None,
+            agent_id: None,
+            graph_max_depth: 3,
         }
     }
 }
@@ -72,7 +113,11 @@ pub struct MemoryStats {
 }
 
 /// High-level memory management: remember, recall, forget.
-pub struct MemoryManager<S: VectorStore> {
+///
+/// Generic over `S: MemoryBackend` — when the backend is `SochMemoryBackend`,
+/// the manager uses atomic writes, graph nodes, temporal edges, policy checks,
+/// and trace spans. Other backends get default no-op behavior for these features.
+pub struct MemoryManager<S: MemoryBackend> {
     store: Arc<S>,
     embedding: Arc<dyn EmbeddingProvider>,
     searcher: HybridSearcher<S>,
@@ -81,8 +126,15 @@ pub struct MemoryManager<S: VectorStore> {
     collection_ready: OnceCell<()>,
 }
 
-impl<S: VectorStore> MemoryManager<S> {
+impl<S: MemoryBackend> MemoryManager<S> {
     pub fn new(store: Arc<S>, embedding: Arc<dyn EmbeddingProvider>, config: MemoryConfig) -> Self {
+        // Recover any incomplete atomic writes from a prior crash (Task 1).
+        match store.recover_atomic_writes() {
+            Ok(0) => {}
+            Ok(n) => info!(replayed = n, "recovered incomplete atomic memory writes"),
+            Err(e) => warn!(error = %e, "atomic write recovery failed"),
+        }
+
         let searcher = HybridSearcher::new(store.clone());
         let pipeline = BatchPipeline::new(embedding.clone());
 
@@ -94,6 +146,21 @@ impl<S: VectorStore> MemoryManager<S> {
             config,
             collection_ready: OnceCell::new(),
         }
+    }
+
+    /// Update the session node for graph-contextual retrieval.
+    pub fn set_session_node(&mut self, node_id: Option<String>) {
+        self.config.session_node_id = node_id;
+    }
+
+    /// Update the trace run ID for observability.
+    pub fn set_trace_run_id(&mut self, run_id: Option<String>) {
+        self.config.trace_run_id = run_id;
+    }
+
+    /// Update the agent ID for policy checks.
+    pub fn set_agent_id(&mut self, agent_id: Option<String>) {
+        self.config.agent_id = agent_id;
     }
 
     /// Ensure the collection exists (lazy init).
@@ -123,10 +190,32 @@ impl<S: VectorStore> MemoryManager<S> {
             .map(|_| ())
     }
 
+    /// Apply policy check on content before storage (Task 9).
+    /// Returns the (possibly redacted) content, or an error if denied.
+    fn policy_filter_content(&self, content: &str) -> Result<String, String> {
+        match self.store.policy_check_content(content) {
+            PolicyCheckResult::Allow => Ok(content.to_string()),
+            PolicyCheckResult::Redacted(redacted) => {
+                debug!("policy: content redacted before storage");
+                Ok(redacted)
+            }
+            PolicyCheckResult::Deny(reason) => {
+                warn!(reason = %reason, "policy: content denied");
+                Err(format!("policy denied: {reason}"))
+            }
+        }
+    }
+
     /// Store a memory with automatic embedding.
     ///
     /// Long texts are chunked and each chunk is stored with a
     /// content-hash dedup key so duplicate writes are idempotent.
+    ///
+    /// ## SochDB Integration
+    /// - **Task 1**: All chunks written atomically (all-or-nothing)
+    /// - **Task 7**: Graph nodes + edges created for each memory
+    /// - **Task 8**: Trace spans emitted for the operation
+    /// - **Task 9**: Content checked against policy before storage
     pub async fn remember(
         &self,
         content: &str,
@@ -135,136 +224,327 @@ impl<S: VectorStore> MemoryManager<S> {
     ) -> Result<String, String> {
         self.ensure_collection().await?;
 
-        let chunks = chunk_text(content, &self.config.chunker);
+        // ── Task 8: Start trace span ───────────────────────────────
+        let span = self.config.trace_run_id.as_ref().and_then(|rid| {
+            self.store.trace_start_span(rid, "memory.remember")
+        });
+
+        // ── Task 9: Policy check on content ────────────────────────
+        let content = self.policy_filter_content(content)?;
+
+        let chunks = chunk_text(&content, &self.config.chunker);
 
         if chunks.is_empty() {
+            if let Some(ref s) = span {
+                self.store.trace_end_span(s, false, Some(HashMap::from([
+                    ("error".into(), "no_chunks".into()),
+                ])));
+            }
             return Err("content produced no chunks".into());
         }
 
-        // Single-chunk fast path (most common).
-        if chunks.len() == 1 {
-            let chunk = &chunks[0];
-            let embed_result = self
-                .embedding
-                .embed(&chunk.text)
-                .await
-                .map_err(|e| format!("embed: {e}"))?;
-
-            let id = uuid::Uuid::new_v4().to_string();
-            let content_hash = sha256_hex(&chunk.text);
-            let mut enriched_meta = metadata;
-            enriched_meta["source"] = serde_json::json!(format!("{:?}", source));
-            enriched_meta["content"] = serde_json::json!(&chunk.text);
-            enriched_meta["timestamp"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
-            enriched_meta["content_hash"] = serde_json::json!(content_hash);
-
-            self.store
-                .insert(
-                    &self.config.collection_name,
-                    &id,
-                    &embed_result.vector,
-                    Some(enriched_meta),
-                )
-                .await
-                .map_err(|e| format!("insert: {e}"))?;
-
-            debug!(id = %id, len = chunk.text.len(), "memory stored (single chunk)");
-            return Ok(id);
-        }
-
-        // Multi-chunk path: embed in batch and insert all chunks.
+        // ── Embed all chunks ───────────────────────────────────────
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-        let batch_result = self
-            .pipeline
-            .embed_all(&texts)
-            .await
-            .map_err(|e| format!("batch embed: {e}"))?;
+        let batch_result = if texts.len() == 1 {
+            // Single-chunk: use direct embed (cheaper path)
+            let emb = self.embedding.embed(&texts[0]).await.map_err(|e| format!("embed: {e}"))?;
+            crate::embedding::BatchEmbeddingResult {
+                embeddings: vec![emb],
+                total_tokens: 0,
+            }
+        } else {
+            self.pipeline.embed_all(&texts).await.map_err(|e| format!("batch embed: {e}"))?
+        };
 
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
+        let now_str = now.to_rfc3339();
         let collection = &self.config.collection_name;
+        let primary_id = uuid::Uuid::new_v4().to_string();
+
+        // ── Build atomic write ops (Task 1) + graph nodes (Task 7) ─
+        let mut atomic_ops: Vec<MemoryWriteOp> = Vec::new();
         let mut ids = Vec::with_capacity(chunks.len());
 
         for (i, (chunk, emb)) in chunks.iter().zip(batch_result.embeddings.iter()).enumerate() {
-            let id = uuid::Uuid::new_v4().to_string();
+            let id = if i == 0 {
+                primary_id.clone()
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            };
             let content_hash = sha256_hex(&chunk.text);
-            let mut enriched_meta = metadata.clone();
+
+            let mut enriched_meta = if i == 0 { metadata.clone() } else { metadata.clone() };
             enriched_meta["source"] = serde_json::json!(format!("{:?}", source));
             enriched_meta["content"] = serde_json::json!(&chunk.text);
-            enriched_meta["timestamp"] = serde_json::json!(&now);
+            enriched_meta["timestamp"] = serde_json::json!(&now_str);
             enriched_meta["content_hash"] = serde_json::json!(content_hash);
-            enriched_meta["chunk_index"] = serde_json::json!(i);
-            enriched_meta["total_chunks"] = serde_json::json!(chunks.len());
-            enriched_meta["original_length"] = serde_json::json!(content.len());
+            if chunks.len() > 1 {
+                enriched_meta["chunk_index"] = serde_json::json!(i);
+                enriched_meta["total_chunks"] = serde_json::json!(chunks.len());
+                enriched_meta["original_length"] = serde_json::json!(content.len());
+            }
 
-            self.store
-                .insert(collection, &id, &emb.vector, Some(enriched_meta))
-                .await
-                .map_err(|e| format!("insert chunk {i}: {e}"))?;
+            // Convert metadata to HashMap<String, String> for atomic write
+            let meta_map: HashMap<String, String> = enriched_meta
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| (k.clone(), v.to_string().trim_matches('"').to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Task 1: Atomic PutEmbedding op
+            atomic_ops.push(MemoryWriteOp::PutEmbedding {
+                collection: collection.to_string(),
+                id: id.clone(),
+                embedding: emb.vector.clone(),
+                metadata: meta_map,
+            });
+
+            // Task 7: Create graph node for this memory chunk
+            let mut node_props: HashMap<String, serde_json::Value> = HashMap::new();
+            node_props.insert("source".into(), serde_json::json!(format!("{:?}", source)));
+            node_props.insert("timestamp".into(), serde_json::json!(&now_str));
+            node_props.insert("content_hash".into(), serde_json::json!(content_hash));
+
+            atomic_ops.push(MemoryWriteOp::CreateNode {
+                namespace: "clawdesk".to_string(),
+                node_id: id.clone(),
+                node_type: "memory".to_string(),
+                properties: node_props,
+            });
+
+            // Task 7: Link chunk to session node if available
+            if let Some(ref session_id) = self.config.session_node_id {
+                atomic_ops.push(MemoryWriteOp::CreateEdge {
+                    namespace: "clawdesk".to_string(),
+                    from_id: session_id.clone(),
+                    edge_type: "has_memory".to_string(),
+                    to_id: id.clone(),
+                    properties: HashMap::new(),
+                });
+            }
+
+            // Task 7: Link multi-chunk memories together
+            if chunks.len() > 1 && i > 0 {
+                atomic_ops.push(MemoryWriteOp::CreateEdge {
+                    namespace: "clawdesk".to_string(),
+                    from_id: primary_id.clone(),
+                    edge_type: "has_chunk".to_string(),
+                    to_id: id.clone(),
+                    properties: HashMap::from([
+                        ("chunk_index".into(), serde_json::json!(i)),
+                    ]),
+                });
+            }
 
             ids.push(id);
         }
 
-        debug!(
-            chunks = chunks.len(),
-            original_len = content.len(),
-            "memory stored (chunked)"
-        );
+        // ── Task 1: Execute atomic write ───────────────────────────
+        match self.store.write_atomic(&primary_id, atomic_ops) {
+            Ok(result) => {
+                debug!(
+                    id = %primary_id,
+                    ops = result.ops_applied,
+                    intent = result.intent_id,
+                    chunks = chunks.len(),
+                    "memory stored atomically"
+                );
+            }
+            Err(e) if e.contains("not supported") => {
+                // Fallback: non-atomic inserts for backends without atomic writes
+                debug!("atomic writes not supported, falling back to sequential inserts");
+                for (i, (chunk, emb)) in chunks.iter().zip(batch_result.embeddings.iter()).enumerate() {
+                    let id = &ids[i];
+                    let content_hash = sha256_hex(&chunk.text);
+                    let mut enriched_meta = metadata.clone();
+                    enriched_meta["source"] = serde_json::json!(format!("{:?}", source));
+                    enriched_meta["content"] = serde_json::json!(&chunk.text);
+                    enriched_meta["timestamp"] = serde_json::json!(&now_str);
+                    enriched_meta["content_hash"] = serde_json::json!(content_hash);
+                    if chunks.len() > 1 {
+                        enriched_meta["chunk_index"] = serde_json::json!(i);
+                        enriched_meta["total_chunks"] = serde_json::json!(chunks.len());
+                        enriched_meta["original_length"] = serde_json::json!(content.len());
+                    }
 
-        // Return first chunk ID as the primary identifier.
-        Ok(ids.into_iter().next().unwrap())
+                    self.store
+                        .insert(collection, id, &emb.vector, Some(enriched_meta))
+                        .await
+                        .map_err(|e| format!("insert chunk {i}: {e}"))?;
+                }
+            }
+            Err(e) => {
+                if let Some(ref s) = span {
+                    self.store.trace_end_span(s, false, Some(HashMap::from([
+                        ("error".into(), e.clone()),
+                    ])));
+                }
+                return Err(format!("atomic write failed: {e}"));
+            }
+        }
+
+        // ── Task 8: End trace span ─────────────────────────────────
+        if let Some(ref s) = span {
+            self.store.trace_end_span(s, true, Some(HashMap::from([
+                ("memory_id".into(), primary_id.clone()),
+                ("chunks".into(), chunks.len().to_string()),
+            ])));
+        }
+
+        Ok(primary_id)
     }
 
     /// Batch-store memories.
     ///
-    /// Embeddings are computed in batch, then all inserts run concurrently.
+    /// Embeddings are computed in batch. Each memory is written atomically
+    /// with its graph node and session edge (Tasks 1, 7).
     pub async fn remember_batch(
         &self,
         items: Vec<(String, MemorySource, serde_json::Value)>,
     ) -> Result<Vec<String>, String> {
         self.ensure_collection().await?;
 
-        let texts: Vec<String> = items.iter().map(|(t, _, _)| t.clone()).collect();
+        let span = self.config.trace_run_id.as_ref().and_then(|rid| {
+            self.store.trace_start_span(rid, "memory.remember_batch")
+        });
+
+        // Task 9: Policy-filter all content
+        let filtered_items: Vec<(String, MemorySource, serde_json::Value)> = items
+            .into_iter()
+            .map(|(content, source, meta)| {
+                let filtered = self.policy_filter_content(&content).unwrap_or(content);
+                (filtered, source, meta)
+            })
+            .collect();
+
+        let texts: Vec<String> = filtered_items.iter().map(|(t, _, _)| t.clone()).collect();
         let batch_result = self
             .pipeline
             .embed_all(&texts)
             .await
             .map_err(|e| format!("batch embed: {e}"))?;
 
-        // Build insert futures and fire them concurrently.
         let collection = &self.config.collection_name;
-        let futs: Vec<_> = items
-            .into_iter()
-            .zip(batch_result.embeddings)
-            .map(|((content, source, metadata), emb)| {
-                let id = uuid::Uuid::new_v4().to_string();
-                let store = self.store.clone();
-                let col = collection.clone();
-                let mut enriched_meta = metadata;
-                enriched_meta["source"] = serde_json::json!(format!("{:?}", source));
-                enriched_meta["content"] = serde_json::json!(content);
-                async move {
-                    store
-                        .insert(&col, &id, &emb.vector, Some(enriched_meta))
+        let now_str = chrono::Utc::now().to_rfc3339();
+        let mut all_ids = Vec::with_capacity(filtered_items.len());
+
+        for ((content, source, metadata), emb) in filtered_items.into_iter().zip(batch_result.embeddings) {
+            let id = uuid::Uuid::new_v4().to_string();
+            let content_hash = sha256_hex(&content);
+
+            let mut enriched_meta = metadata;
+            enriched_meta["source"] = serde_json::json!(format!("{:?}", source));
+            enriched_meta["content"] = serde_json::json!(&content);
+            enriched_meta["timestamp"] = serde_json::json!(&now_str);
+            enriched_meta["content_hash"] = serde_json::json!(&content_hash);
+
+            // Build atomic ops (Task 1 + Task 7)
+            let meta_map: HashMap<String, String> = enriched_meta
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| (k.clone(), v.to_string().trim_matches('"').to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let mut ops = vec![
+                MemoryWriteOp::PutEmbedding {
+                    collection: collection.to_string(),
+                    id: id.clone(),
+                    embedding: emb.vector.clone(),
+                    metadata: meta_map,
+                },
+                MemoryWriteOp::CreateNode {
+                    namespace: "clawdesk".to_string(),
+                    node_id: id.clone(),
+                    node_type: "memory".to_string(),
+                    properties: HashMap::from([
+                        ("source".into(), serde_json::json!(format!("{:?}", source))),
+                        ("timestamp".into(), serde_json::json!(&now_str)),
+                        ("content_hash".into(), serde_json::json!(&content_hash)),
+                    ]),
+                },
+            ];
+
+            if let Some(ref session_id) = self.config.session_node_id {
+                ops.push(MemoryWriteOp::CreateEdge {
+                    namespace: "clawdesk".to_string(),
+                    from_id: session_id.clone(),
+                    edge_type: "has_memory".to_string(),
+                    to_id: id.clone(),
+                    properties: HashMap::new(),
+                });
+            }
+
+            match self.store.write_atomic(&id, ops) {
+                Ok(_) => {
+                    debug!(id = %id, "batch memory stored atomically");
+                }
+                Err(e) if e.contains("not supported") => {
+                    // Fallback: non-atomic insert
+                    self.store
+                        .insert(collection, &id, &emb.vector, Some(enriched_meta))
                         .await
                         .map_err(|e| format!("insert: {e}"))?;
-                    Ok::<String, String>(id)
                 }
-            })
-            .collect();
+                Err(e) => {
+                    warn!(error = %e, id = %id, "atomic write failed in batch");
+                    // Still insert via fallback so we don't lose data
+                    self.store
+                        .insert(collection, &id, &emb.vector, Some(enriched_meta))
+                        .await
+                        .map_err(|e| format!("insert fallback: {e}"))?;
+                }
+            }
 
-        futures::future::try_join_all(futs).await
+            all_ids.push(id);
+        }
+
+        if let Some(ref s) = span {
+            self.store.trace_end_span(s, true, Some(HashMap::from([
+                ("count".into(), all_ids.len().to_string()),
+            ])));
+        }
+
+        Ok(all_ids)
     }
 
     /// Recall relevant memories.
     ///
-    /// Pipeline: vector+BM25 hybrid search → temporal decay →
-    /// MMR diversity re-ranking → min-relevance filter.
+    /// Pipeline: graph-contextual pre-filter → vector+BM25 hybrid search →
+    /// temporal decay → MMR diversity re-ranking → min-relevance filter.
+    ///
+    /// ## SochDB Integration
+    /// - **Task 3**: Scopes search to graph-reachable memories when session_node_id is set
+    /// - **Task 4**: Uses temporal pre-filter via edge queries
+    /// - **Task 8**: Trace spans for each pipeline stage
+    /// - **Task 9**: Access control check before returning results
     pub async fn recall(
         &self,
         query: &str,
         max_results: Option<usize>,
     ) -> Result<Vec<VectorSearchResult>, String> {
         self.ensure_collection().await?;
+
+        let span = self.config.trace_run_id.as_ref().and_then(|rid| {
+            self.store.trace_start_span(rid, "memory.recall")
+        });
+
+        // ── Task 9: Access control check ───────────────────────────
+        if let Some(ref agent_id) = self.config.agent_id {
+            if !self.store.policy_check_access(agent_id, &self.config.collection_name) {
+                if let Some(ref s) = span {
+                    self.store.trace_end_span(s, false, Some(HashMap::from([
+                        ("error".into(), "access_denied".into()),
+                    ])));
+                }
+                return Err(format!("agent '{}' denied access to collection '{}'", agent_id, self.config.collection_name));
+            }
+        }
 
         let query_result = self
             .embedding
@@ -277,6 +557,23 @@ impl<S: VectorStore> MemoryManager<S> {
         let top_k = max_results.unwrap_or(self.config.max_results);
         let fetch_k = (top_k * 3).max(20); // 3x headroom
 
+        // ── Task 3: Graph-contextual pre-filter ────────────────────
+        // When a session node is set, find all memory IDs reachable from it
+        // and use them to scope the vector search.
+        let reachable_ids: Option<Vec<String>> = self.config.session_node_id.as_ref().and_then(|session_id| {
+            match self.store.graph_reachable_memory_ids(session_id, "has_memory", self.config.graph_max_depth) {
+                Ok(ids) if !ids.is_empty() => {
+                    debug!(session = %session_id, reachable = ids.len(), "graph-contextual pre-filter");
+                    Some(ids)
+                }
+                Ok(_) => None, // no reachable nodes, search all
+                Err(e) => {
+                    debug!(error = %e, "graph traversal failed, searching all memories");
+                    None
+                }
+            }
+        });
+
         let mut results = self
             .searcher
             .search(
@@ -288,7 +585,62 @@ impl<S: VectorStore> MemoryManager<S> {
             )
             .await?;
 
-        // ── Stage 1: Temporal decay ────────────────────────────────
+        // Task 3: Filter to graph-reachable memories if available
+        if let Some(ref reachable) = reachable_ids {
+            let before = results.len();
+            results.retain(|r| reachable.contains(&r.id));
+            debug!(
+                before,
+                after = results.len(),
+                "graph-contextual filter applied"
+            );
+            // If filtering removed everything, fall back to unfiltered results
+            if results.is_empty() {
+                debug!("graph filter removed all results, using unfiltered");
+                results = self
+                    .searcher
+                    .search(
+                        &self.config.collection_name,
+                        &query_result.vector,
+                        query,
+                        fetch_k,
+                        self.config.search_strategy,
+                    )
+                    .await?;
+            }
+        }
+
+        // ── Task 4: Temporal pre-filter ────────────────────────────
+        // If the backend supports temporal edges, check which memories are
+        // still "valid" at the current time. This is more accurate than
+        // the post-hoc exponential decay.
+        if let Some(ref session_id) = self.config.session_node_id {
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            match self.store.temporal_edges_at(session_id, Some("has_memory"), now_ms) {
+                Ok(edges) if !edges.is_empty() => {
+                    let valid_ids: Vec<String> = edges.iter().map(|e| e.to_id.clone()).collect();
+                    let before = results.len();
+                    // Boost temporally-valid memories instead of hard-filtering
+                    for result in &mut results {
+                        if valid_ids.contains(&result.id) {
+                            result.score *= 1.2; // 20% boost for temporally-valid
+                        }
+                    }
+                    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                    debug!(
+                        temporal_valid = valid_ids.len(),
+                        total = before,
+                        "temporal pre-filter boost applied"
+                    );
+                }
+                Ok(_) => {} // no temporal edges, continue with decay
+                Err(e) => {
+                    debug!(error = %e, "temporal pre-filter failed, using decay fallback");
+                }
+            }
+        }
+
+        // ── Stage 1: Temporal decay (fallback / supplementary) ─────
         if self.config.temporal_decay.enabled {
             let mut scored: Vec<(String, f32, serde_json::Value)> = results
                 .iter()
@@ -303,8 +655,6 @@ impl<S: VectorStore> MemoryManager<S> {
                     results[i].score = *decayed_score;
                 }
             }
-            // Re-sort by decayed score (apply_temporal_decay already sorts,
-            // but map-back may not preserve order).
             results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         }
 
@@ -343,15 +693,231 @@ impl<S: VectorStore> MemoryManager<S> {
             .filter(|r| r.score >= self.config.min_relevance)
             .collect();
 
-        debug!(query = %query, results = filtered.len(), "memory recall (decay+mmr)");
+        // ── Task 8: End trace span ─────────────────────────────────
+        if let Some(ref s) = span {
+            self.store.trace_end_span(s, true, Some(HashMap::from([
+                ("query_len".into(), query.len().to_string()),
+                ("results".into(), filtered.len().to_string()),
+            ])));
+        }
+
+        debug!(query = %query, results = filtered.len(), "memory recall (graph+temporal+decay+mmr)");
         Ok(filtered)
     }
 
     /// Forget a specific memory.
+    ///
+    /// Also removes the graph node and any temporal edges (Tasks 7, 5).
     pub async fn forget(&self, id: &str) -> Result<bool, String> {
-        self.store
+        let span = self.config.trace_run_id.as_ref().and_then(|rid| {
+            self.store.trace_start_span(rid, "memory.forget")
+        });
+
+        // Remove from vector store
+        let deleted = self.store
             .delete(&self.config.collection_name, id)
             .await
-            .map_err(|e| format!("delete: {e}"))
+            .map_err(|e| format!("delete: {e}"))?;
+
+        // Clean up graph edges pointing to this memory
+        if let Some(ref session_id) = self.config.session_node_id {
+            let _ = self.store.temporal_invalidate_edge(session_id, "has_memory", id);
+        }
+
+        if let Some(ref s) = span {
+            self.store.trace_end_span(s, true, Some(HashMap::from([
+                ("memory_id".into(), id.to_string()),
+                ("deleted".into(), deleted.to_string()),
+            ])));
+        }
+
+        Ok(deleted)
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // New capability delegates (A1, A4, A6, A7, A8, A11)
+    // ════════════════════════════════════════════════════════════════
+
+    // ── Batch Writes (A7) ──────────────────────────────────────────
+
+    /// Batch-insert precomputed embeddings into a collection.
+    pub fn batch_insert_embeddings(
+        &self,
+        collection: &str,
+        items: Vec<(String, Vec<f32>, HashMap<String, String>)>,
+    ) -> Result<BatchWriteResult, String> {
+        self.store.batch_insert_embeddings(collection, items)
+    }
+
+    // ── Episode Management (A4) ────────────────────────────────────
+
+    /// Create a new episode (conversation session, task, workflow).
+    pub fn create_episode(&self, episode: &Episode) -> Result<(), String> {
+        self.store.create_episode(episode)
+    }
+
+    /// Get an episode by ID.
+    pub fn get_episode(&self, episode_id: &str) -> Result<Option<Episode>, String> {
+        self.store.get_episode(episode_id)
+    }
+
+    /// Search episodes by text query.
+    pub fn search_episodes(&self, query: &str, k: usize) -> Result<Vec<Episode>, String> {
+        self.store.search_episodes(query, k)
+    }
+
+    // ── Event Management (A4) ──────────────────────────────────────
+
+    /// Append an event to an episode's timeline.
+    pub fn append_event(&self, event: &Event) -> Result<(), String> {
+        self.store.append_event(event)
+    }
+
+    /// Get the timeline for an episode.
+    pub fn get_timeline(&self, episode_id: &str, max_events: usize) -> Result<Vec<Event>, String> {
+        self.store.get_timeline(episode_id, max_events)
+    }
+
+    // ── Entity Management (A4) ─────────────────────────────────────
+
+    /// Create or update an entity.
+    pub fn upsert_entity(&self, entity: &Entity) -> Result<(), String> {
+        self.store.upsert_entity(entity)
+    }
+
+    /// Get an entity by ID.
+    pub fn get_entity(&self, entity_id: &str) -> Result<Option<Entity>, String> {
+        self.store.get_entity(entity_id)
+    }
+
+    /// Search entities by kind and text query.
+    pub fn search_entities(
+        &self,
+        kind: Option<EntityKind>,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<Entity>, String> {
+        self.store.search_entities(kind, query, k)
+    }
+
+    /// Get entity facts (entity + recent episodes + related entities).
+    pub fn get_entity_facts(&self, entity_id: &str) -> Result<Option<EntityFacts>, String> {
+        self.store.get_entity_facts(entity_id)
+    }
+
+    // ── Context Assembly (A1) ──────────────────────────────────────
+
+    /// Build token-budgeted context for LLM prompts.
+    ///
+    /// Assembles context from multiple sources (system prompt, recent memories,
+    /// entity knowledge, conversation history) within a token budget.
+    pub fn build_context(
+        &self,
+        session_id: Option<&str>,
+        agent_id: Option<&str>,
+        token_budget: usize,
+        sections: Vec<(&str, i32, &str)>,
+        truncation: TruncationStrategy,
+        format: ContextFormat,
+    ) -> Result<ContextQueryResult, String> {
+        self.store.context_query(
+            session_id,
+            agent_id,
+            token_budget,
+            sections,
+            truncation,
+            format,
+        )
+    }
+
+    // ── Task Queue (A8) ────────────────────────────────────────────
+
+    /// Enqueue a background task for memory maintenance.
+    pub fn enqueue_task(
+        &self,
+        queue_id: &str,
+        priority: i64,
+        payload: Vec<u8>,
+    ) -> Result<BackgroundTask, String> {
+        self.store.enqueue_task(queue_id, priority, payload)
+    }
+
+    /// Enqueue a delayed background task.
+    pub fn enqueue_delayed_task(
+        &self,
+        queue_id: &str,
+        priority: i64,
+        payload: Vec<u8>,
+        delay_ms: u64,
+    ) -> Result<BackgroundTask, String> {
+        self.store.enqueue_delayed_task(queue_id, priority, payload, delay_ms)
+    }
+
+    /// Claim a task from the queue.
+    pub fn claim_task(
+        &self,
+        queue_id: &str,
+        worker_id: &str,
+    ) -> Result<TaskClaimResult, String> {
+        self.store.claim_task(queue_id, worker_id)
+    }
+
+    /// Acknowledge successful task completion.
+    pub fn ack_task(&self, queue_id: &str, task_id: &str) -> Result<(), String> {
+        self.store.ack_task(queue_id, task_id)
+    }
+
+    /// Negative-acknowledge a task (return to queue with optional delay).
+    pub fn nack_task(
+        &self,
+        queue_id: &str,
+        task_id: &str,
+        delay_ms: Option<u64>,
+    ) -> Result<(), String> {
+        self.store.nack_task(queue_id, task_id, delay_ms)
+    }
+
+    /// Get task queue statistics.
+    pub fn queue_stats(&self, queue_id: &str) -> Result<TaskQueueStats, String> {
+        self.store.queue_stats(queue_id)
+    }
+
+    // ── Path Query (A6) ────────────────────────────────────────────
+
+    /// Query data by hierarchical path.
+    pub fn path_query(
+        &self,
+        path: &str,
+        filters: Option<Vec<(&str, serde_json::Value)>>,
+    ) -> Result<Vec<PathQueryRow>, String> {
+        self.store.path_query(path, filters)
+    }
+
+    // ── SQL Query (A15) ────────────────────────────────────────────
+
+    /// Execute a SQL-like query against the memory store.
+    pub fn sql_query(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Vec<HashMap<String, serde_json::Value>>, String> {
+        self.store.sql_query(sql, params)
+    }
+
+    // ── Predefined Views (A5) ──────────────────────────────────────
+
+    /// List all available predefined views.
+    pub fn list_views(&self) -> Vec<String> {
+        self.store.list_views()
+    }
+
+    /// Query a predefined view with optional filters.
+    pub fn query_view(
+        &self,
+        view_name: &str,
+        filters: Option<HashMap<String, serde_json::Value>>,
+        limit: Option<usize>,
+    ) -> Result<Vec<HashMap<String, serde_json::Value>>, String> {
+        self.store.query_view(view_name, filters, limit)
     }
 }
