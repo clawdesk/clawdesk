@@ -2439,18 +2439,42 @@ pub async fn delete_chat(chat_id: String, state: State<'_, AppState>) -> Result<
         let mut sessions = state.sessions.write().map_err(|e| e.to_string())?;
         sessions.remove(&chat_id);
     }
-    // Remove from SochDB — delete + commit so the deletion is durable.
-    // Without commit, deleted chats silently reappear on next restart.
+    // Atomic delete + commit under a single lock guard so an interleaving
+    // `put_durable` cannot re-write the session between delete and commit.
     let key = format!("chats/{}", chat_id);
-    let _ = state.soch_store.delete(&key);
-    if let Err(e) = state.soch_store.commit() {
-        tracing::warn!(chat_id = %chat_id, error = %e, "delete_chat: commit failed — deletion may not be durable");
+    if let Err(e) = state.soch_store.delete_durable(&key) {
+        tracing::warn!(chat_id = %chat_id, error = %e, "delete_chat: failed to delete session from SochDB");
     }
     // Also remove tool history for this chat
     let tool_key = format!("tool_history/{}", chat_id);
-    let _ = state.soch_store.delete(&tool_key);
-    let _ = state.soch_store.commit();
+    if let Err(e) = state.soch_store.delete_durable(&tool_key) {
+        tracing::warn!(chat_id = %chat_id, error = %e, "delete_chat: failed to delete tool history from SochDB");
+    }
     Ok(true)
+}
+
+/// Clear all chat history — delete every session from SochDB and the in-memory cache.
+/// Used by the "Full Reset" UI action.
+#[tauri::command]
+pub async fn clear_all_chats(state: State<'_, AppState>) -> Result<u32, String> {
+    // 1. Clear the in-memory session cache
+    let count = {
+        let mut sessions = state.sessions.write().map_err(|e| e.to_string())?;
+        let count = sessions.len() as u32;
+        sessions.clear();
+        count
+    };
+    // 2. Delete all chat sessions from SochDB (atomic scan + batch delete + commit)
+    if let Err(e) = state.soch_store.delete_prefix("chats/") {
+        tracing::error!(error = %e, "clear_all_chats: failed to delete chat prefix");
+        return Err(format!("Failed to clear chats: {e}"));
+    }
+    // 3. Delete all tool history
+    if let Err(e) = state.soch_store.delete_prefix("tool_history/") {
+        tracing::warn!(error = %e, "clear_all_chats: failed to delete tool_history prefix");
+    }
+    tracing::info!(deleted = count, "All chat history cleared");
+    Ok(count)
 }
 
 /// Rename a chat session.

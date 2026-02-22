@@ -638,6 +638,9 @@ function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (cmd === "delete_chat") {
     return Promise.resolve(true as unknown as T);
   }
+  if (cmd === "clear_all_chats") {
+    return Promise.resolve(0 as unknown as T);
+  }
   if (cmd === "update_chat_title") {
     return Promise.resolve(true as unknown as T);
   }
@@ -719,6 +722,11 @@ export async function createChat(agentId: string): Promise<SessionSummary> {
 
 export async function deleteChat(chatId: string): Promise<boolean> {
   return invoke<boolean>("delete_chat", { chatId });
+}
+
+/** Delete all chat history from SochDB. Returns the number of sessions deleted. */
+export async function clearAllChats(): Promise<number> {
+  return invoke<number>("clear_all_chats");
 }
 
 export async function updateChatTitle(chatId: string, title: string): Promise<boolean> {

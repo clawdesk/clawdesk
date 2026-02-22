@@ -628,6 +628,31 @@ export function SettingsPage({
                   </button>
                 </div>
               </div>
+
+              {/* Danger Zone — Full Reset */}
+              <div className="settings-group">
+                <div className="settings-group-label" style={{ color: "var(--error)" }}>Danger Zone</div>
+                <div className="section-card" style={{ padding: 16, border: "1px solid var(--error)", borderRadius: 8 }}>
+                  <p className="settings-desc" style={{ marginBottom: 8 }}>
+                    Permanently delete all chat history. This cannot be undone.
+                  </p>
+                  <button
+                    className="btn subtle"
+                    style={{ color: "var(--error)", borderColor: "var(--error)" }}
+                    onClick={async () => {
+                      if (!window.confirm("Delete ALL chat history? This cannot be undone.")) return;
+                      try {
+                        const count = await api.clearAllChats();
+                        pushToast(`Cleared ${count} chat session${count === 1 ? "" : "s"}.`);
+                      } catch (e: any) {
+                        pushToast(`Failed to clear history: ${e?.message || e}`);
+                      }
+                    }}
+                  >
+                    🗑️ Clear All Chat History
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 

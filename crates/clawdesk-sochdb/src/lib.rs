@@ -467,6 +467,49 @@ impl SochStore {
             })
     }
 
+    /// Delete a key with immediate commit (durable).
+    ///
+    /// Acquires write lock, deletes, and commits in one atomic operation.
+    /// Prevents the race in `delete()` + `commit()` where an interleaving
+    /// `put_durable()` can re-write the key between the two calls.
+    pub fn delete_durable(&self, key: &str) -> Result<(), StorageError> {
+        let _guard = self.op_lock.lock();
+        self.connection.delete(key)
+            .map_err(|e| StorageError::OpenFailed {
+                detail: format!("delete_durable: delete failed: {e}"),
+            })?;
+        self.connection.commit()
+            .map_err(|e| StorageError::OpenFailed {
+                detail: format!("delete_durable: commit failed: {e}"),
+            })?;
+        Ok(())
+    }
+
+    /// Delete all keys matching a prefix, with a single commit at the end.
+    ///
+    /// Returns the number of keys deleted. Useful for bulk cleanup (e.g. clearing all chats).
+    pub fn delete_prefix(&self, prefix: &str) -> Result<usize, StorageError> {
+        let _guard = self.op_lock.lock();
+        let entries = self.connection.scan(prefix)
+            .map_err(|e| StorageError::OpenFailed {
+                detail: format!("delete_prefix: scan failed: {e}"),
+            })?;
+        let count = entries.len();
+        for (key, _) in &entries {
+            self.connection.delete(key)
+                .map_err(|e| StorageError::OpenFailed {
+                    detail: format!("delete_prefix: delete '{}' failed: {e}", key),
+                })?;
+        }
+        if count > 0 {
+            self.connection.commit()
+                .map_err(|e| StorageError::OpenFailed {
+                    detail: format!("delete_prefix: commit failed: {e}"),
+                })?;
+        }
+        Ok(count)
+    }
+
     // =========================================================================
     // Transaction API
     // =========================================================================

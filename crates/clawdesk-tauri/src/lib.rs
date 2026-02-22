@@ -66,6 +66,7 @@ pub fn run() {
             commands::list_sessions,
             commands::create_chat,
             commands::delete_chat,
+            commands::clear_all_chats,
             commands::update_chat_title,
             commands::list_skills,
             commands::activate_skill,
