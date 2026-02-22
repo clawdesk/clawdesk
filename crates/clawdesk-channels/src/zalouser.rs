@@ -2,7 +2,7 @@
 //!
 //! Unlike the `ZaloChannel` (Official Account API), this adapter connects
 //! through a personal Zalo account using the `zca` CLI tool for direct
-//! and group messaging. This matches OpenClaw's `zalouser` extension.
+//! and group messaging.
 //!
 //! ## Architecture
 //!

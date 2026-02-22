@@ -47,12 +47,7 @@ impl ActivityJournal {
             detail: e.to_string(),
         })?;
 
-        self.store
-            .db()
-            .put(key.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.store.put(&key, &bytes)?;
 
         debug!(%run_id, seq, kind = entry.kind_label(), "journal entry appended");
         Ok(())
@@ -66,18 +61,13 @@ impl ActivityJournal {
         let prefix = format!("runtime:runs:{}:journal:", run_id);
         let entries = self
             .store
-            .db()
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&prefix)?;
 
         let mut journal = Vec::with_capacity(entries.len());
-        for (key_bytes, value) in &entries {
+        for (key_str, value) in &entries {
             match serde_json::from_slice::<JournalEntry>(value) {
                 Ok(entry) => journal.push(entry),
                 Err(e) => {
-                    let key_str = String::from_utf8_lossy(key_bytes);
                     warn!(%run_id, key = %key_str, error = %e, "skipping corrupted journal entry");
                 }
             }
@@ -118,11 +108,7 @@ impl ActivityJournal {
         let prefix = format!("runtime:runs:{}:journal:", run_id);
         let entries = self
             .store
-            .db()
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&prefix)?;
         Ok(entries.len())
     }
 
@@ -131,15 +117,11 @@ impl ActivityJournal {
         let prefix = format!("runtime:runs:{}:journal:", run_id);
         let entries = self
             .store
-            .db()
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&prefix)?;
 
         let count = entries.len();
         for (key, _) in &entries {
-            let _ = self.store.db().delete(key);
+            let _ = self.store.delete(key);
         }
 
         debug!(%run_id, count, "journal entries deleted");

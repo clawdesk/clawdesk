@@ -18,7 +18,13 @@ reqwest = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
 fastrand = "2"
+whisper-rs = "0.13"
+hound = "3.5"
+cpal = "0.15"
+ringbuf = "0.4"
 
 [dev-dependencies]
 proptest = "1"

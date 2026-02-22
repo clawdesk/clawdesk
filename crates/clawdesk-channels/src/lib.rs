@@ -40,6 +40,7 @@ pub mod mattermost;
 pub mod msteams;
 pub mod nextcloud_talk;
 pub mod nostr;
+pub mod retry_policy;
 pub mod sidecar;
 pub mod signal;
 pub mod slack;

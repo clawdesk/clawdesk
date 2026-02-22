@@ -259,6 +259,71 @@ impl Default for SkillVerifier {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// A3: Signing API — for skill publishers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Sign a skill manifest with an Ed25519 signing key.
+///
+/// Mutates the manifest in-place to set `signature` and `publisher_key`.
+///
+/// ## Usage
+///
+/// ```ignore
+/// let signing_key = SigningKey::from_bytes(&key_bytes);
+/// sign_manifest(&mut manifest, &signing_key);
+/// // manifest.signature and manifest.publisher_key are now set
+/// ```
+pub fn sign_manifest(
+    manifest: &mut SkillManifest,
+    signing_key: &ed25519_dalek::SigningKey,
+) {
+    use ed25519_dalek::Signer;
+
+    let verifying_key = signing_key.verifying_key();
+    let pub_hex = hex::encode(verifying_key.as_bytes());
+
+    // Set publisher key before computing canonical bytes
+    // (canonical bytes don't include signature, but may include publisher key for binding)
+    manifest.publisher_key = Some(pub_hex);
+
+    let canonical = canonical_manifest_bytes(manifest);
+    let sig = signing_key.sign(&canonical);
+    manifest.signature = Some(hex::encode(sig.to_bytes()));
+}
+
+/// Generate a deterministic Ed25519 keypair for testing.
+///
+/// Returns (signing_key_hex, public_key_hex).
+/// Uses a fixed seed — NOT for production use.
+#[cfg(test)]
+pub fn generate_publisher_keypair() -> (String, String) {
+    use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
+
+    // Derive a deterministic 32-byte seed from a test string
+    let seed = Sha256::digest(b"clawdesk-test-publisher-keypair-seed");
+    let seed_bytes: [u8; 32] = seed.into();
+    let signing_key = SigningKey::from_bytes(&seed_bytes);
+    let verifying_key = signing_key.verifying_key();
+
+    (
+        hex::encode(signing_key.to_bytes()),
+        hex::encode(verifying_key.as_bytes()),
+    )
+}
+
+/// Verify a content hash matches the expected value.
+///
+/// Used for integrity verification of downloaded skill packages.
+pub fn verify_content_hash(content: &[u8], expected_hash: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    let actual = hex::encode(hasher.finalize());
+    actual == expected_hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

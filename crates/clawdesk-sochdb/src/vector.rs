@@ -11,8 +11,8 @@
 //!
 //! ## Search
 //!
-//! Uses `BinaryHeap` min-heap for O(N log k) top-k selection instead of
-//! O(N log N) full sort. For N=10K, k=10: saves 99.9% of sort comparisons.
+//! Uses buffered quickselect (`TopKBuffer`) for O(N) linear-time top-k
+//! selection instead of O(N log N) full sort. For N=10K, k=10: saves 99.9% of sort comparisons.
 //!
 //! Backward compatible: falls back to JSON deserialization for legacy entries
 //! that still use the old single-key JSON format.
@@ -24,7 +24,6 @@ use clawdesk_storage::vector_store::{
 use clawdesk_types::error::StorageError;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 use tracing::debug;
 
 use crate::SochStore;
@@ -61,48 +60,64 @@ fn decode_embedding(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// A scored result for the min-heap. Lower scores sort first (min-heap),
-/// so we keep the top-k highest scores by ejecting the minimum.
+/// A scored result entry used during top-k selection.
 struct ScoredEntry {
     id: String,
     score: f32,
     meta_bytes: Vec<u8>,
 }
 
-impl PartialEq for ScoredEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.score == other.score
-    }
+/// Buffered top-K collector using amortised quickselect.
+///
+/// Instead of a `BinaryHeap` with O(log k) branch-heavy sift per insertion,
+/// scores are appended linearly into a flat buffer (O(1) branchless write).
+/// When the buffer reaches capacity 2k, `select_nth_unstable_by` partitions
+/// the array at rank k in O(k) expected time, keeping only the top k.
+///
+/// Amortised insertion: O(1).  Total: O(N) strict linear — vs O(N log k) heap.
+/// Branch prediction: near-perfect (unconditional push) vs ~50% misprediction
+/// on heap sift comparisons over random score distributions.
+struct TopKBuffer {
+    buf: Vec<ScoredEntry>,
+    k: usize,
 }
 
-impl Eq for ScoredEntry {}
-
-impl PartialOrd for ScoredEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ScoredEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering: BinaryHeap is a max-heap, so by reversing
-        // we get a min-heap that lets us evict the lowest-scored entry.
-        other
-            .score
-            .partial_cmp(&self.score)
-            .unwrap_or(Ordering::Equal)
-    }
-}
-
-/// Push a scored entry into the min-heap, evicting the minimum if at capacity.
-fn heap_push(heap: &mut BinaryHeap<ScoredEntry>, entry: ScoredEntry, k: usize) {
-    if heap.len() < k {
-        heap.push(entry);
-    } else if let Some(min) = heap.peek() {
-        if entry.score > min.score {
-            heap.pop();
-            heap.push(entry);
+impl TopKBuffer {
+    fn new(k: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(2 * k + 1),
+            k,
         }
+    }
+
+    /// Append a scored entry.  O(1) amortised.
+    #[inline]
+    fn push(&mut self, entry: ScoredEntry) {
+        self.buf.push(entry);
+        if self.buf.len() >= 2 * self.k {
+            self.compact();
+        }
+    }
+
+    /// Partition to keep the top k entries, discard the rest.
+    fn compact(&mut self) {
+        if self.buf.len() <= self.k {
+            return;
+        }
+        let k = self.k;
+        self.buf.select_nth_unstable_by(k, |a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal)
+        });
+        self.buf.truncate(k);
+    }
+
+    /// Finalise: return the top k entries sorted by score descending.
+    fn into_sorted_desc(mut self) -> Vec<ScoredEntry> {
+        self.compact();
+        self.buf.sort_unstable_by(|a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal)
+        });
+        self.buf
     }
 }
 
@@ -160,7 +175,7 @@ fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 /// Load collection config to know which distance metric to use.
 fn load_metric(store: &SochStore, collection: &str) -> DistanceMetric {
     let key = format!("vectors/collections/{}", collection);
-    match store.db().get(key.as_bytes()) {
+    match store.get(&key) {
         Ok(Some(bytes)) => serde_json::from_slice::<CollectionConfig>(&bytes)
             .map(|c| c.metric)
             .unwrap_or(DistanceMetric::Cosine),
@@ -199,11 +214,7 @@ impl VectorStore for SochStore {
             serde_json::to_vec(&config).map_err(|e| StorageError::SerializationFailed {
                 detail: e.to_string(),
             })?;
-        self.db()
-            .put(key.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put(&key, &bytes)?;
         debug!(name = %config.name, dim = config.dimension, "created vector collection");
         Ok(())
     }
@@ -226,11 +237,7 @@ impl VectorStore for SochStore {
         // Store embedding as raw f32 bytes (4 bytes per dimension).
         let data_key = format!("vectors/{}/{}/data", collection, id);
         let embedding_bytes = encode_embedding(embedding);
-        self.db()
-            .put(data_key.as_bytes(), &embedding_bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put(&data_key, &embedding_bytes)?;
 
         // Store metadata separately as compact JSON.
         let meta_key = format!("vectors/{}/{}/meta", collection, id);
@@ -239,17 +246,13 @@ impl VectorStore for SochStore {
             serde_json::to_vec(&meta).map_err(|e| StorageError::SerializationFailed {
                 detail: e.to_string(),
             })?;
-        self.db()
-            .put(meta_key.as_bytes(), &meta_bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put(&meta_key, &meta_bytes)?;
 
         debug!(%collection, %id, dim = embedding.len(), "inserted vector (binary)");
         Ok(())
     }
 
-    /// Search using BinaryHeap min-heap for O(N log k) top-k selection.
+    /// Search using buffered quickselect for O(N) top-k selection.
     async fn search(
         &self,
         collection: &str,
@@ -261,8 +264,8 @@ impl VectorStore for SochStore {
         let prefix = format!("vectors/{}/", collection);
 
         let entries = self
-            .db()
-            .scan(prefix.as_bytes())
+            .connection()
+            .scan(&prefix)
             .map_err(|e| StorageError::OpenFailed {
                 detail: e.to_string(),
             })?;
@@ -273,26 +276,25 @@ impl VectorStore for SochStore {
         let mut meta_map: std::collections::HashMap<String, Vec<u8>> =
             std::collections::HashMap::new();
 
-        for (key_bytes, value) in &entries {
-            let key_str = String::from_utf8_lossy(key_bytes);
+        for (key_str, value) in &entries {
             if key_str.ends_with("/data") {
                 let id = key_str
                     .strip_prefix(&prefix)
                     .and_then(|s| s.strip_suffix("/data"))
-                    .unwrap_or(&key_str)
+                    .unwrap_or(key_str)
                     .to_string();
                 data_map.insert(id, value.clone());
             } else if key_str.ends_with("/meta") {
                 let id = key_str
                     .strip_prefix(&prefix)
                     .and_then(|s| s.strip_suffix("/meta"))
-                    .unwrap_or(&key_str)
+                    .unwrap_or(key_str)
                     .to_string();
                 meta_map.insert(id, value.clone());
             }
         }
 
-        let mut heap: BinaryHeap<ScoredEntry> = BinaryHeap::with_capacity(k + 1);
+        let mut topk = TopKBuffer::new(k);
 
         for (id, data_bytes) in &data_map {
             // Determine if this is binary (raw f32) or legacy JSON format.
@@ -325,20 +327,16 @@ impl VectorStore for SochStore {
             }
 
             let mb = meta_map.get(id).cloned().unwrap_or_default();
-            heap_push(
-                &mut heap,
-                ScoredEntry {
-                    id: id.clone(),
-                    score: sim,
-                    meta_bytes: mb,
-                },
-                k,
-            );
+            topk.push(ScoredEntry {
+                id: id.clone(),
+                score: sim,
+                meta_bytes: mb,
+            });
         }
 
-        // Drain heap into sorted results (highest score first).
-        let mut results: Vec<VectorSearchResult> = heap
-            .into_sorted_vec()
+        // Drain buffer into sorted results (highest score first).
+        let results: Vec<VectorSearchResult> = topk
+            .into_sorted_desc()
             .into_iter()
             .map(|entry| {
                 let meta: VectorMeta =
@@ -354,13 +352,15 @@ impl VectorStore for SochStore {
                 }
             })
             .collect();
-        results.reverse(); // into_sorted_vec gives ascending; we want descending.
 
         debug!(%collection, k, results = results.len(), "vector search (binary+heap)");
         Ok(results)
     }
 
-    /// Hybrid search using BinaryHeap min-heap.
+    /// Hybrid search using BM25 keyword scoring + vector cosine similarity.
+    ///
+    /// Replaces the naive term-overlap scorer with proper Okapi BM25,
+    /// providing TF-IDF weighting and document length normalization.
     async fn hybrid_search(
         &self,
         collection: &str,
@@ -371,13 +371,11 @@ impl VectorStore for SochStore {
     ) -> Result<Vec<VectorSearchResult>, StorageError> {
         let metric = load_metric(self, collection);
         let prefix = format!("vectors/{}/", collection);
-        let query_lower = query_text.to_lowercase();
-        let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
         let text_weight = 1.0 - vector_weight;
 
         let entries = self
-            .db()
-            .scan(prefix.as_bytes())
+            .connection()
+            .scan(&prefix)
             .map_err(|e| StorageError::OpenFailed {
                 detail: e.to_string(),
             })?;
@@ -388,38 +386,136 @@ impl VectorStore for SochStore {
         let mut meta_map: std::collections::HashMap<String, Vec<u8>> =
             std::collections::HashMap::new();
 
-        for (key_bytes, value) in &entries {
-            let key_str = String::from_utf8_lossy(key_bytes);
+        for (key_str, value) in &entries {
             if key_str.ends_with("/data") {
                 let id = key_str
                     .strip_prefix(&prefix)
                     .and_then(|s| s.strip_suffix("/data"))
-                    .unwrap_or(&key_str)
+                    .unwrap_or(key_str)
                     .to_string();
                 data_map.insert(id, value.clone());
             } else if key_str.ends_with("/meta") {
                 let id = key_str
                     .strip_prefix(&prefix)
                     .and_then(|s| s.strip_suffix("/meta"))
-                    .unwrap_or(&key_str)
+                    .unwrap_or(key_str)
                     .to_string();
                 meta_map.insert(id, value.clone());
             }
         }
 
-        let mut heap: BinaryHeap<ScoredEntry> = BinaryHeap::with_capacity(k + 1);
+        // ── BM25 scoring pass ──────────────────────────────────────
+        // Build a lightweight in-line BM25 scorer from the document contents.
+        // Parameters: k1=1.2, b=0.75 (Robertson's defaults).
+        let bm25_k1: f64 = 1.2;
+        let bm25_b: f64 = 0.75;
+
+        // Tokenize query
+        let query_tokens: Vec<String> = query_text
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| s.len() >= 2)
+            .map(String::from)
+            .collect();
+
+        // First pass: extract all document texts and compute avgdl + IDF
+        struct DocInfo {
+            id: String,
+            tokens: Vec<String>,
+            length: usize,
+        }
+
+        let mut docs: Vec<DocInfo> = Vec::with_capacity(data_map.len());
+        // Also track document frequency for IDF
+        let mut df_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        for (id, _) in &data_map {
+            let content = meta_map
+                .get(id)
+                .and_then(|mb| serde_json::from_slice::<VectorMeta>(mb).ok())
+                .and_then(|m| m.content);
+
+            let text = content.as_deref().unwrap_or("");
+            let tokens: Vec<String> = text
+                .to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|s| s.len() >= 2)
+                .map(String::from)
+                .collect();
+
+            // Count unique terms for DF
+            let unique_terms: std::collections::HashSet<&str> =
+                tokens.iter().map(|s| s.as_str()).collect();
+            for term in &unique_terms {
+                *df_map.entry(term.to_string()).or_insert(0) += 1;
+            }
+
+            let length = tokens.len();
+            docs.push(DocInfo {
+                id: id.clone(),
+                tokens,
+                length,
+            });
+        }
+
+        let doc_count = docs.len() as f64;
+        let avg_dl = if docs.is_empty() {
+            1.0
+        } else {
+            docs.iter().map(|d| d.length as f64).sum::<f64>() / doc_count
+        };
+
+        // Second pass: compute BM25 score for each document
+        let mut bm25_scores: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
+
+        for doc in &docs {
+            if query_tokens.is_empty() {
+                bm25_scores.insert(doc.id.clone(), 0.0);
+                continue;
+            }
+
+            // Build term frequency map for this document
+            let mut tf_map: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+            for token in &doc.tokens {
+                *tf_map.entry(token.as_str()).or_insert(0) += 1;
+            }
+
+            let dl = doc.length as f64;
+            let mut bm25_score: f64 = 0.0;
+
+            for q_token in &query_tokens {
+                let tf = *tf_map.get(q_token.as_str()).unwrap_or(&0) as f64;
+                if tf == 0.0 {
+                    continue;
+                }
+                let df = *df_map.get(q_token.as_str()).unwrap_or(&0) as f64;
+                // IDF: ln((N - df + 0.5) / (df + 0.5) + 1)
+                let idf = ((doc_count - df + 0.5) / (df + 0.5) + 1.0).ln();
+                // BM25 term score
+                let numerator = tf * (bm25_k1 + 1.0);
+                let denominator = tf + bm25_k1 * (1.0 - bm25_b + bm25_b * dl / avg_dl);
+                bm25_score += idf * numerator / denominator;
+            }
+
+            bm25_scores.insert(doc.id.clone(), bm25_score as f32);
+        }
+
+        // Normalize BM25 scores to [0, 1] for weighted combination
+        let bm25_max = bm25_scores
+            .values()
+            .copied()
+            .fold(0.0f32, f32::max);
+        let bm25_normalizer = if bm25_max > 0.0 { bm25_max } else { 1.0 };
+
+        // ── Combined scoring pass ──────────────────────────────────
+        let mut topk = TopKBuffer::new(k);
 
         for (id, data_bytes) in &data_map {
-            let (embedding, content_str) =
+            let embedding =
                 if data_bytes.len() % 4 == 0 && data_bytes.first() != Some(&b'{') {
-                    let emb = decode_embedding(data_bytes);
-                    let content = meta_map
-                        .get(id)
-                        .and_then(|mb| serde_json::from_slice::<VectorMeta>(mb).ok())
-                        .and_then(|m| m.content);
-                    (emb, content)
+                    decode_embedding(data_bytes)
                 } else if let Ok(record) = serde_json::from_slice::<VectorRecord>(data_bytes) {
-                    let content = record.content.clone();
                     if !meta_map.contains_key(id) {
                         let meta = VectorMeta {
                             metadata: record.metadata,
@@ -429,42 +525,29 @@ impl VectorStore for SochStore {
                             meta_map.insert(id.clone(), mb);
                         }
                     }
-                    (record.embedding, content)
+                    record.embedding
                 } else {
                     continue;
                 };
 
-            // Vector similarity score.
+            // Vector similarity score
             let vec_score = score_vectors(query_embedding, &embedding, metric);
 
-            // Simple keyword overlap score.
-            let text_score = if !query_terms.is_empty() {
-                let content_lower = content_str.as_deref().unwrap_or("").to_lowercase();
-                let matches = query_terms
-                    .iter()
-                    .filter(|t| content_lower.contains(*t))
-                    .count();
-                matches as f32 / query_terms.len() as f32
-            } else {
-                0.0
-            };
+            // BM25 score (normalized to [0, 1])
+            let text_score = bm25_scores.get(id).copied().unwrap_or(0.0) / bm25_normalizer;
 
             let combined = vector_weight * vec_score + text_weight * text_score;
 
             let mb = meta_map.get(id).cloned().unwrap_or_default();
-            heap_push(
-                &mut heap,
-                ScoredEntry {
-                    id: id.clone(),
-                    score: combined,
-                    meta_bytes: mb,
-                },
-                k,
-            );
+            topk.push(ScoredEntry {
+                id: id.clone(),
+                score: combined,
+                meta_bytes: mb,
+            });
         }
 
-        let mut results: Vec<VectorSearchResult> = heap
-            .into_sorted_vec()
+        let results: Vec<VectorSearchResult> = topk
+            .into_sorted_desc()
             .into_iter()
             .map(|entry| {
                 let meta: VectorMeta =
@@ -480,9 +563,8 @@ impl VectorStore for SochStore {
                 }
             })
             .collect();
-        results.reverse();
 
-        debug!(%collection, k, %vector_weight, "hybrid search (binary+heap)");
+        debug!(%collection, k, %vector_weight, "hybrid search (BM25+vector)");
         Ok(results)
     }
 
@@ -490,12 +572,8 @@ impl VectorStore for SochStore {
         // Delete both data and meta keys (handles both new and legacy format).
         let data_key = format!("vectors/{}/{}/data", collection, id);
         let meta_key = format!("vectors/{}/{}/meta", collection, id);
-        self.db()
-            .delete(data_key.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
-        let _ = self.db().delete(meta_key.as_bytes());
+        self.delete(&data_key)?;
+        let _ = self.delete(&meta_key);
         debug!(%collection, %id, "deleted vector");
         Ok(true)
     }

@@ -15,9 +15,12 @@ clawdesk-types = { workspace = true }
 clawdesk-storage = { workspace = true }
 sochdb = { workspace = true }
 sochdb-core = { workspace = true }
+sochdb-storage = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
+parking_lot = { workspace = true }

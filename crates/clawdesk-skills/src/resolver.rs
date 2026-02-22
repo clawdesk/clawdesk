@@ -39,6 +39,20 @@ pub enum UnresolvedReason {
     CyclicDependency { cycle: Vec<SkillId> },
 }
 
+impl std::fmt::Display for UnresolvedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingDependency { dependency } => {
+                write!(f, "missing dependency: {}", dependency)
+            }
+            Self::CyclicDependency { cycle } => {
+                let ids: Vec<&str> = cycle.iter().map(|id| id.as_str()).collect();
+                write!(f, "cyclic dependency among: {}", ids.join(", "))
+            }
+        }
+    }
+}
+
 /// Dependency resolver using Kahn's algorithm for topological sorting.
 pub struct SkillResolver;
 

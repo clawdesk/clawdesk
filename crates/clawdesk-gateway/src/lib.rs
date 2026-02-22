@@ -36,10 +36,14 @@
 //! - `POST   /api/v1/admin/skills/:id/deactivate` — deactivate a skill
 //! - `POST   /api/v1/admin/channels/reload` — rebuild channels from config
 
+pub mod a2a_routes;
 pub mod admin;
 pub mod bootstrap;
 pub mod error;
 pub mod fanout;
+pub mod fanout_executor;
+pub mod grace_window;
+pub mod idempotency;
 pub mod middleware;
 pub mod openai_compat;
 pub mod rate_limiter;
@@ -150,14 +154,31 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
         .route(
             "/api/v1/admin/channels/reload",
             post(skills_admin::reload_channels),
+        )
+        // Unified skill RPC endpoint
+        .route(
+            "/api/v1/skills/rpc",
+            post(skills_admin::skill_rpc),
         );
 
     // WebSocket
     let ws = Router::new().route("/ws", get(ws::ws_handler));
 
+    // A2A protocol routes
+    let a2a = Router::new()
+        .route("/.well-known/agent.json", get(a2a_routes::agent_card))
+        .route("/a2a/tasks/send", post(a2a_routes::send_task))
+        .route("/a2a/tasks/:id", get(a2a_routes::get_task))
+        .route("/a2a/tasks/:id/cancel", post(a2a_routes::cancel_task))
+        .route("/a2a/tasks/:id/input", post(a2a_routes::provide_input))
+        .route("/a2a/agents", get(a2a_routes::list_agents))
+        .route("/a2a/agents/register", post(a2a_routes::register_agent))
+        .route("/a2a/agents/discover", post(a2a_routes::discover_agent));
+
     api.merge(openai)
         .merge(admin)
         .merge(ws)
+        .merge(a2a)
         .layer(axum::middleware::from_fn(middleware::request_tracing))
         .with_state(state)
 }

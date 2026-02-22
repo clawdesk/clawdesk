@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import * as api from "../api";
 import type { SkillDescriptor, SkillTrustInfo, SkillTriggerInfo } from "../types";
 import { Icon } from "./Icon";
@@ -51,6 +51,7 @@ const EMPTY_DRAFT: SkillDraft = {
 const CATEGORIES = [
   "general", "coding", "writing", "research", "automation",
   "data", "devops", "security", "communication", "design",
+  "core", "openclaw", "channel", "media", "dev",
 ];
 
 const ICON_OPTIONS = ["⚡", "🔧", "📝", "🔍", "🤖", "📊", "🛠️", "🔒", "📡", "🎨", "💡", "🧪"];
@@ -72,6 +73,16 @@ export function SkillDesigner({
   onSaved,
   pushToast,
 }: SkillDesignerProps) {
+  const isEditing = !!existingSkill;
+
+  // Build dynamic categories list — include existence skill's category if not in defaults
+  const categories = useMemo(() => {
+    if (existingSkill && !CATEGORIES.includes(existingSkill.category)) {
+      return [existingSkill.category, ...CATEGORIES];
+    }
+    return CATEGORIES;
+  }, [existingSkill]);
+
   const [tab, setTab] = useState<DesignerTab>("edit");
   const [draft, setDraft] = useState<SkillDraft>(() => {
     if (existingSkill) {
@@ -97,6 +108,25 @@ export function SkillDesigner({
   const [isSaving, setIsSaving] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Load full skill detail (instructions, tags, tools) from backend when editing
+  useEffect(() => {
+    if (!existingSkill) return;
+    setIsLoading(true);
+    api.getSkillDetail(existingSkill.id).then((detail) => {
+      setDraft((prev) => ({
+        ...prev,
+        description: detail.description || prev.description,
+        version: detail.version || prev.version,
+        instructions: detail.instructions || "",
+        tags: detail.tags.join(", "),
+        allowedTools: detail.required_tools.join(" "),
+      }));
+    }).catch(() => {
+      // Backend detail unavailable — keep existing draft
+    }).finally(() => setIsLoading(false));
+  }, [existingSkill]);
 
   const patch = useCallback(
     (key: keyof SkillDraft, value: string) =>
@@ -208,7 +238,7 @@ export function SkillDesigner({
       results.push({ level: "warn", message: "No allowed-tools defined. Skill will use agent defaults." });
     }
 
-    // Token estimation
+    // Token estimation (client-side)
     const estimatedTokens = Math.ceil(skillMd.length / 4);
     if (estimatedTokens > 8000) {
       results.push({ level: "warn", message: `Estimated ${estimatedTokens} tokens. Large skills increase context cost.` });
@@ -216,7 +246,23 @@ export function SkillDesigner({
       results.push({ level: "pass", message: `Estimated ${estimatedTokens} tokens.` });
     }
 
-    // Try backend trust/validation if the skill exists
+    // Backend validation — run SKILL.md through parse_skill_md + adapt_skill pipeline
+    try {
+      const backendResult = await api.validateSkillMd(skillMd);
+      if (backendResult.valid) {
+        results.push({ level: "pass", message: `Backend adapter pipeline: OK (${backendResult.estimated_tokens} tokens).` });
+      }
+      for (const err of backendResult.errors) {
+        results.push({ level: "error", message: `Backend: ${err}` });
+      }
+      for (const warn of backendResult.warnings) {
+        results.push({ level: "warn", message: `Backend: ${warn}` });
+      }
+    } catch {
+      results.push({ level: "warn", message: "Backend validation unavailable." });
+    }
+
+    // Trust check for existing skills
     if (existingSkill) {
       try {
         const trust = await api.getSkillTrustLevel(existingSkill.id);
@@ -261,18 +307,24 @@ export function SkillDesigner({
   const handleSave = useCallback(async () => {
     setIsSaving(true);
     try {
-      // Activate or update via the backend
-      if (existingSkill) {
-        pushToast(`Skill "${draft.name}" updated.`);
-      } else {
-        pushToast(`Skill "${draft.name}" created. Install from Skills page.`);
-      }
+      await api.registerSkill({
+        name: draft.name,
+        description: draft.description,
+        version: draft.version,
+        category: draft.category,
+        instructions: draft.instructions,
+        tags: draft.tags.split(",").map((t) => t.trim()).filter(Boolean),
+        allowed_tools: draft.allowedTools.split(/\s+/).filter(Boolean),
+        existing_id: existingSkill?.id ?? undefined,
+      });
+      pushToast(existingSkill ? `Skill "${draft.name}" updated and redeployed.` : `Skill "${draft.name}" created and activated.`);
       onSaved();
-    } catch {
-      pushToast("Failed to save skill.");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      pushToast(`Failed to save skill: ${msg}`);
     }
     setIsSaving(false);
-  }, [draft.name, existingSkill, onSaved, pushToast]);
+  }, [draft, existingSkill, onSaved, pushToast]);
 
   // ── Render ────────────────────────────────────────────────
 
@@ -291,7 +343,7 @@ export function SkillDesigner({
           </div>
           <div className="skill-designer-header-right">
             <button className="btn primary" disabled={isSaving || !draft.name.trim()} onClick={handleSave}>
-              {isSaving ? "Saving..." : "Save"}
+              {isSaving ? "Saving..." : isEditing ? "Save & Redeploy" : "Save"}
             </button>
             <button className="btn ghost" onClick={onClose}>✕</button>
           </div>
@@ -318,8 +370,11 @@ export function SkillDesigner({
 
         {/* Content */}
         <div className="skill-designer-body">
+          {isLoading && (
+            <div style={{ textAlign: "center", padding: 20, color: "#888" }}>Loading skill details...</div>
+          )}
           {/* ── Editor Tab ── */}
-          {tab === "edit" && (
+          {tab === "edit" && !isLoading && (
             <div className="skill-editor-form">
               <div className="skill-editor-row">
                 <div className="skill-editor-field" style={{ flex: 1 }}>
@@ -328,18 +383,22 @@ export function SkillDesigner({
                     className="input"
                     placeholder="my-awesome-skill"
                     value={draft.name}
-                    onChange={(e) => patch("name", e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-"))}
+                    readOnly={isEditing}
+                    onChange={(e) => isEditing ? undefined : patch("name", e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-"))}
                   />
+                  <span className="field-hint">{isEditing ? "Read-only when editing" : " "}</span>
                 </div>
-                <div className="skill-editor-field" style={{ width: 120 }}>
+                <div className="skill-editor-field" style={{ width: 130 }}>
                   <label className="field-label">Version</label>
                   <input className="input" value={draft.version} onChange={(e) => patch("version", e.target.value)} />
+                  <span className="field-hint"> </span>
                 </div>
-                <div className="skill-editor-field" style={{ width: 80 }}>
+                <div className="skill-editor-field" style={{ width: 90 }}>
                   <label className="field-label">Icon</label>
                   <select className="input" value={draft.icon} onChange={(e) => patch("icon", e.target.value)}>
                     {ICON_OPTIONS.map((ic) => <option key={ic} value={ic}>{ic}</option>)}
                   </select>
+                  <span className="field-hint"> </span>
                 </div>
               </div>
 
@@ -357,14 +416,14 @@ export function SkillDesigner({
                 <div className="skill-editor-field" style={{ flex: 1 }}>
                   <label className="field-label">Category</label>
                   <select className="input" value={draft.category} onChange={(e) => patch("category", e.target.value)}>
-                    {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                    {categories.map((c) => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
                 <div className="skill-editor-field" style={{ flex: 1 }}>
-                  <label className="field-label">Tags <span className="field-hint">comma-separated</span></label>
+                  <label className="field-label">Tags</label>
                   <input
                     className="input"
-                    placeholder="frontend, react, typescript"
+                    placeholder="frontend, react (comma-separated)"
                     value={draft.tags}
                     onChange={(e) => patch("tags", e.target.value)}
                   />
@@ -372,7 +431,7 @@ export function SkillDesigner({
               </div>
 
               <div className="skill-editor-field">
-                <label className="field-label">Instructions <span className="field-hint">markdown body</span></label>
+                <label className="field-label">Instructions</label>
                 <textarea
                   className="input skill-editor-textarea"
                   placeholder="# What this skill does&#10;&#10;Describe the skill's behavior, constraints, and examples..."
@@ -380,6 +439,7 @@ export function SkillDesigner({
                   onChange={(e) => patch("instructions", e.target.value)}
                   rows={10}
                 />
+                <span className="field-hint">markdown body</span>
               </div>
 
               <details className="skill-editor-advanced">

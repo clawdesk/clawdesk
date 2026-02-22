@@ -59,6 +59,7 @@ pub mod kill_tree;
 pub mod pty;
 pub mod session_mux;
 pub mod writer;
+pub mod sandbox;
 
 // Re-exports for ergonomic use.
 pub use checkpoint::CheckpointStore;

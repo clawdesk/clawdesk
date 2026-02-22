@@ -48,7 +48,7 @@ impl LeaseManager {
         let key = Self::lease_key(run_id);
 
         // Check for existing lease.
-        if let Ok(Some(bytes)) = self.store.db().get(key.as_bytes()) {
+        if let Ok(Some(bytes)) = self.store.get(&key) {
             if let Ok(existing) = serde_json::from_slice::<Lease>(&bytes) {
                 if existing.is_valid() && !existing.is_held_by(worker_id) {
                     return Err(RuntimeError::LeaseConflict {
@@ -70,12 +70,7 @@ impl LeaseManager {
         let bytes = serde_json::to_vec(&lease).map_err(|e| StorageError::SerializationFailed {
             detail: e.to_string(),
         })?;
-        self.store
-            .db()
-            .put(key.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.store.put(&key, &bytes)?;
 
         debug!(%run_id, worker_id, fence, "lease acquired");
         Ok(lease)
@@ -93,11 +88,7 @@ impl LeaseManager {
 
         let bytes = self
             .store
-            .db()
-            .get(key.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?
+            .get(&key)?
             .ok_or_else(|| RuntimeError::RunNotFound {
                 run_id: run_id.clone(),
             })?;
@@ -135,12 +126,7 @@ impl LeaseManager {
             serde_json::to_vec(&renewed).map_err(|e| StorageError::SerializationFailed {
                 detail: e.to_string(),
             })?;
-        self.store
-            .db()
-            .put(key.as_bytes(), &new_bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.store.put(&key, &new_bytes)?;
 
         debug!(%run_id, worker_id, "lease renewed");
         Ok(renewed)
@@ -155,7 +141,7 @@ impl LeaseManager {
     ) -> Result<(), RuntimeError> {
         let key = Self::lease_key(run_id);
 
-        if let Ok(Some(bytes)) = self.store.db().get(key.as_bytes()) {
+        if let Ok(Some(bytes)) = self.store.get(&key) {
             if let Ok(existing) = serde_json::from_slice::<Lease>(&bytes) {
                 if existing.fence_token != fence_token {
                     return Err(RuntimeError::StaleLease {
@@ -173,7 +159,7 @@ impl LeaseManager {
             }
         }
 
-        let _ = self.store.db().delete(key.as_bytes());
+        let _ = self.store.delete(&key);
         debug!(%run_id, worker_id, "lease released");
         Ok(())
     }
@@ -184,7 +170,7 @@ impl LeaseManager {
         run_id: &RunId,
     ) -> Result<Option<Lease>, RuntimeError> {
         let key = Self::lease_key(run_id);
-        match self.store.db().get(key.as_bytes()) {
+        match self.store.get(&key) {
             Ok(Some(bytes)) => {
                 let lease = serde_json::from_slice(&bytes).map_err(|e| {
                     RuntimeError::CheckpointCorrupted {
@@ -194,10 +180,7 @@ impl LeaseManager {
                 Ok(Some(lease))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(StorageError::OpenFailed {
-                detail: e.to_string(),
-            }
-            .into()),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -206,11 +189,7 @@ impl LeaseManager {
         let prefix = "runtime:leases:";
         let entries = self
             .store
-            .db()
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(prefix)?;
 
         let now = Utc::now();
         let mut expired = Vec::new();

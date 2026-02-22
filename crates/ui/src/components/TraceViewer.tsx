@@ -82,6 +82,7 @@ export function TraceViewer({ traceId: initialTraceId, onClose, pushToast }: Tra
   // Recent traces list
   const [recentTraces, setRecentTraces] = useState<TraceEntry[]>([]);
   const [loadingList, setLoadingList] = useState(false);
+  const [resolvingTraceId, setResolvingTraceId] = useState<string | null>(null);
 
   // Selected trace detail
   const [activeTraceId, setActiveTraceId] = useState<string | null>(initialTraceId ?? null);
@@ -165,6 +166,56 @@ export function TraceViewer({ traceId: initialTraceId, onClose, pushToast }: Tra
     () => spans.find((s) => s.span_id === selectedSpanId) ?? null,
     [spans, selectedSpanId]
   );
+
+  const extractTraceIdCandidates = useCallback((entry: TraceEntry): string[] => {
+    const fromFields = [entry.detail, entry.event]
+      .map((v) => (v || "").trim())
+      .filter(Boolean);
+
+    const joined = `${entry.event} ${entry.detail}`;
+    const uuidMatches = joined.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi) ?? [];
+    const tracePrefixed = joined.match(/(?:trace(?:[_:-]|\s+id(?:=|:)?\s*))[A-Za-z0-9_-]+/gi) ?? [];
+    const normalizedPrefixed = tracePrefixed
+      .map((raw) => {
+        const parts = raw.split(/[_:-]|\s+id(?:=|:)?\s*/i);
+        return parts[parts.length - 1]?.trim() ?? "";
+      })
+      .filter(Boolean);
+
+    return Array.from(new Set([...fromFields, ...uuidMatches, ...normalizedPrefixed]));
+  }, []);
+
+  const openTraceFromEntry = useCallback(async (entry: TraceEntry) => {
+    const candidates = extractTraceIdCandidates(entry);
+    if (candidates.length === 0) {
+      pushToast("No trace ID found in this log entry.");
+      return;
+    }
+
+    setResolvingTraceId(entry.timestamp + entry.event + entry.detail);
+    try {
+      for (const candidate of candidates) {
+        try {
+          const runInfo = await api.traceGetRun(candidate);
+          if (runInfo) {
+            setActiveTraceId(candidate);
+            return;
+          }
+
+          const spanInfos = await api.traceGetSpans(candidate);
+          if (spanInfos.length > 0) {
+            setActiveTraceId(candidate);
+            return;
+          }
+        } catch {
+          // try next candidate
+        }
+      }
+      pushToast("This entry does not map to a stored trace run.");
+    } finally {
+      setResolvingTraceId(null);
+    }
+  }, [extractTraceIdCandidates, pushToast]);
 
   // ── Render helpers ────────────────────────────────────────
 
@@ -373,14 +424,7 @@ export function TraceViewer({ traceId: initialTraceId, onClose, pushToast }: Tra
               <div
                 key={i}
                 className="trace-explorer-row"
-                onClick={() => {
-                  // TraceEntry has event field — use as trace ID if it looks like one
-                  // Otherwise just show it inline
-                  const possibleId = entry.detail || entry.event;
-                  if (possibleId) {
-                    setActiveTraceId(possibleId);
-                  }
-                }}
+                onClick={() => { void openTraceFromEntry(entry); }}
               >
                 <div className="trace-explorer-row-icon">
                   {spanNameIcon(entry.event)}
@@ -389,7 +433,9 @@ export function TraceViewer({ traceId: initialTraceId, onClose, pushToast }: Tra
                   <div className="trace-explorer-row-event">{entry.event}</div>
                   <div className="trace-explorer-row-detail">{entry.detail}</div>
                 </div>
-                <div className="trace-explorer-row-time">{entry.timestamp}</div>
+                <div className="trace-explorer-row-time">
+                  {resolvingTraceId === entry.timestamp + entry.event + entry.detail ? "Resolving…" : entry.timestamp}
+                </div>
               </div>
             ))}
           </div>

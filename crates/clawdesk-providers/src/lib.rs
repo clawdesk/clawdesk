@@ -8,13 +8,25 @@
 //! Structured `ProviderError` variants replace regex-classified error strings.
 
 pub mod anthropic;
+pub mod azure;
 pub mod bedrock;
 pub mod capability;
+pub mod cohere;
+pub mod compatible;
+pub mod copilot;
 pub mod gemini;
+pub mod glm;
 pub mod negotiator;
 pub mod ollama;
 pub mod openai;
+pub mod openrouter;
+pub mod profile_rotation;
 pub mod registry;
+pub mod reliable;
+pub mod router;
+pub mod telnyx;
+pub mod tool_call_accumulator;
+pub mod vertex;
 
 use async_trait::async_trait;
 use clawdesk_types::error::ProviderError;
@@ -178,6 +190,11 @@ pub struct StreamChunk {
     pub finish_reason: Option<FinishReason>,
     /// Populated only on the final chunk.
     pub usage: Option<TokenUsage>,
+    /// Tool calls parsed from streaming (populated on the final chunk when
+    /// finish_reason == ToolUse). Eliminates the need for a redundant
+    /// `complete()` call after streaming.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// Port: LLM provider interface.
@@ -212,6 +229,7 @@ pub trait Provider: Send + Sync + 'static {
                 done: true,
                 finish_reason: Some(resp.finish_reason),
                 usage: Some(resp.usage),
+                tool_calls: Vec::new(),
             })
             .await;
         Ok(())

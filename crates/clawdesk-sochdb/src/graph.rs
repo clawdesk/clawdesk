@@ -14,11 +14,7 @@ impl GraphStore for SochStore {
             serde_json::to_vec(&properties).map_err(|e| StorageError::SerializationFailed {
                 detail: e.to_string(),
             })?;
-        self.db
-            .put(key.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put(&key, &bytes)?;
         Ok(())
     }
 
@@ -40,20 +36,12 @@ impl GraphStore for SochStore {
             serde_json::to_vec(&edge).map_err(|e| StorageError::SerializationFailed {
                 detail: e.to_string(),
             })?;
-        self.db
-            .put(fwd_key.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put(&fwd_key, &bytes)?;
 
         // Write reverse index so delete_node can find incoming edges.
         // Value = the forward key so we can delete it during cleanup.
         let rev_key = format!("graph/edges_to/{}/{}/{}", to, label, from);
-        self.db
-            .put(rev_key.as_bytes(), fwd_key.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put(&rev_key, fwd_key.as_bytes())?;
 
         Ok(())
     }
@@ -69,18 +57,14 @@ impl GraphStore for SochStore {
         };
 
         let results = self
-            .db
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&prefix)?;
 
         let mut neighbors = Vec::new();
         for (_key, value) in &results {
             if let Ok(edge) = serde_json::from_slice::<GraphEdge>(value) {
                 // Load the neighbor node
                 let node_key = format!("graph/nodes/{}", edge.to);
-                if let Ok(Some(node_bytes)) = self.db.get(node_key.as_bytes()) {
+                if let Ok(Some(node_bytes)) = self.get(&node_key) {
                     if let Ok(props) = serde_json::from_slice(&node_bytes) {
                         neighbors.push(GraphNode {
                             id: edge.to,
@@ -127,39 +111,25 @@ impl GraphStore for SochStore {
         // Delete all outgoing edges from this node
         let out_prefix = format!("graph/edges/{}/", id);
         let out_edges = self
-            .db
-            .scan(out_prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&out_prefix)?;
         for (edge_key, _) in &out_edges {
-            self.db.delete(edge_key).map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            self.delete(edge_key)?;
         }
 
         // Delete all incoming edges (scan the reverse index)
         let in_prefix = format!("graph/edges_to/{}/", id);
         let in_edges = self
-            .db
-            .scan(in_prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&in_prefix)?;
         for (rev_key, value) in &in_edges {
             // The reverse index value holds the forward edge key
             let fwd_key = String::from_utf8_lossy(value);
-            let _ = self.db.delete(fwd_key.as_bytes());
-            let _ = self.db.delete(rev_key);
+            let _ = self.delete(&fwd_key);
+            let _ = self.delete(rev_key);
         }
 
         // Delete the node itself
         let key = format!("graph/nodes/{}", id);
-        self.db
-            .delete(key.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.delete(&key)?;
         Ok(true)
     }
 }

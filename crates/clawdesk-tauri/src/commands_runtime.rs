@@ -1,4 +1,4 @@
-//! Durable runtime commands — crash-recoverable workflow execution (Task 12).
+//! Durable runtime commands — crash-recoverable workflow execution.
 
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
@@ -75,7 +75,7 @@ pub async fn resume_durable_run(
     let runner = state.durable_runner.as_ref()
         .ok_or("Durable runtime not initialized (requires SochDB)")?;
     let rid = clawdesk_runtime::types::RunId(run_id);
-    let (new_rid, output) = runner.resume(&rid)
+    let (new_rid, _output) = runner.resume(&rid)
         .await
         .map_err(|e| format!("Resume failed: {:?}", e))?;
     Ok(DurableRunInfo {
@@ -84,3 +84,72 @@ pub async fn resume_durable_run(
         worker_id: "desktop-primary".into(),
     })
 }
+
+/// List active durable runs.
+#[tauri::command]
+pub async fn list_durable_runs(
+    state: State<'_, AppState>,
+) -> Result<Vec<DurableRunInfo>, String> {
+    let runner = state.durable_runner.as_ref()
+        .ok_or("Durable runtime not initialized")?;
+    // We can query the checkpoint store directly for run indices.
+    let cp_store = clawdesk_runtime::checkpoint::CheckpointStore::new(state.soch_store.clone());
+    let mut runs = Vec::new();
+    
+    // Load runs by state (running, suspended, failed)
+    for s in &["running", "suspended", "failed"] {
+        if let Ok(ids) = cp_store.load_runs_by_state(s).await {
+            for id in ids {
+                let rinfo = DurableRunInfo {
+                    run_id: id.0,
+                    state: s.to_string(),
+                    worker_id: "desktop-primary".into(),
+                };
+                runs.push(rinfo);
+            }
+        }
+    }
+    // Also check pending runs
+    if let Ok(ids) = cp_store.load_runs_by_state("pending").await {
+        for id in ids {
+            runs.push(DurableRunInfo {
+                run_id: id.0,
+                state: "pending".to_string(),
+                worker_id: "none".into(),
+            });
+        }
+    }
+    
+    Ok(runs)
+}
+
+/// List checkpoints for a run (latest ones).
+#[tauri::command]
+pub async fn list_checkpoints(
+    run_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let cp_store = clawdesk_runtime::checkpoint::CheckpointStore::new(state.soch_store.clone());
+    let rid = clawdesk_runtime::types::RunId(run_id);
+    match cp_store.load_checkpoint(&rid).await {
+        Ok(Some(cp)) => {
+            if let Ok(val) = serde_json::to_value(cp) {
+                Ok(vec![val])
+            } else {
+                Ok(vec![])
+            }
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+/// Get entries from the Dead Letter Queue.
+#[tauri::command]
+pub async fn get_dlq(
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let dlq = clawdesk_runtime::dead_letter::DeadLetterQueue::new(state.soch_store.clone());
+    let entries = dlq.list().await.map_err(|e| format!("Failed to load DLQ: {:?}", e))?;
+    entries.into_iter().map(|e| serde_json::to_value(e).map_err(|err| err.to_string())).collect()
+}
+

@@ -40,12 +40,7 @@ impl CheckpointStore {
                 detail: e.to_string(),
             })?;
 
-        self.store
-            .db()
-            .put(key.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.store.put(&key, &bytes)?;
 
         debug!(%run_id, "checkpoint saved");
         Ok(())
@@ -57,7 +52,7 @@ impl CheckpointStore {
         run_id: &RunId,
     ) -> Result<Option<Checkpoint>, RuntimeError> {
         let key = Self::checkpoint_key(run_id);
-        match self.store.db().get(key.as_bytes()) {
+        match self.store.get(&key) {
             Ok(Some(bytes)) => {
                 let cp = serde_json::from_slice(&bytes).map_err(|e| {
                     RuntimeError::CheckpointCorrupted {
@@ -67,17 +62,14 @@ impl CheckpointStore {
                 Ok(Some(cp))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(StorageError::OpenFailed {
-                detail: e.to_string(),
-            }
-            .into()),
+            Err(e) => Err(e.into()),
         }
     }
 
     /// Delete the checkpoint for a run (cleanup).
     pub async fn delete_checkpoint(&self, run_id: &RunId) -> Result<(), RuntimeError> {
         let key = Self::checkpoint_key(run_id);
-        let _ = self.store.db().delete(key.as_bytes());
+        let _ = self.store.delete(&key);
         Ok(())
     }
 
@@ -91,31 +83,16 @@ impl CheckpointStore {
                 detail: e.to_string(),
             })?;
 
-        self.store
-            .db()
-            .put(key.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.store.put(&key, &bytes)?;
 
         // Update secondary index: state → run_id.
         let idx_key = format!("runtime:index:state:{}:{}", run.state.label(), run.id);
-        self.store
-            .db()
-            .put(idx_key.as_bytes(), run.id.0.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.store.put(&idx_key, run.id.0.as_bytes())?;
 
         // Update worker index if running.
         if let Some(ref worker_id) = run.worker_id {
             let widx = format!("runtime:index:worker:{}:{}", worker_id, run.id);
-            self.store
-                .db()
-                .put(widx.as_bytes(), run.id.0.as_bytes())
-                .map_err(|e| StorageError::OpenFailed {
-                    detail: e.to_string(),
-                })?;
+            self.store.put(&widx, run.id.0.as_bytes())?;
         }
 
         Ok(())
@@ -124,7 +101,7 @@ impl CheckpointStore {
     /// Load a WorkflowRun by ID.
     pub async fn load_run(&self, run_id: &RunId) -> Result<Option<WorkflowRun>, RuntimeError> {
         let key = Self::run_key(run_id);
-        match self.store.db().get(key.as_bytes()) {
+        match self.store.get(&key) {
             Ok(Some(bytes)) => {
                 let run = serde_json::from_slice(&bytes).map_err(|e| {
                     RuntimeError::CheckpointCorrupted {
@@ -134,10 +111,7 @@ impl CheckpointStore {
                 Ok(Some(run))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(StorageError::OpenFailed {
-                detail: e.to_string(),
-            }
-            .into()),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -149,11 +123,7 @@ impl CheckpointStore {
         let prefix = format!("runtime:index:state:{}:", state_label);
         let entries = self
             .store
-            .db()
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&prefix)?;
 
         let run_ids = entries
             .iter()
@@ -175,11 +145,7 @@ impl CheckpointStore {
         let prefix = format!("runtime:index:worker:{}:", worker_id);
         let entries = self
             .store
-            .db()
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&prefix)?;
 
         let run_ids = entries
             .iter()

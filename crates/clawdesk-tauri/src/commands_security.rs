@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 // ═══════════════════════════════════════════════════════════
-// OAuth2 + PKCE (Task 16)
+// OAuth2 + PKCE
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
@@ -182,7 +182,7 @@ pub async fn remove_auth_profile(
 }
 
 // ═══════════════════════════════════════════════════════════
-// Execution Approval (Task 17)
+// Execution Approval
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
@@ -294,7 +294,7 @@ pub async fn get_approval_status(
 }
 
 // ═══════════════════════════════════════════════════════════
-// ACL Engine (Task 23)
+// ACL Engine
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
@@ -407,7 +407,7 @@ pub async fn revoke_acl_rules(
 }
 
 // ═══════════════════════════════════════════════════════════
-// Scoped Tokens (Task 24)
+// Scoped Tokens
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]

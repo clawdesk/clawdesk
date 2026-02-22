@@ -1,7 +1,7 @@
-import { useCallback, type CSSProperties } from "react";
+import { useCallback, useState, type CSSProperties } from "react";
 import { Icon } from "../components/Icon";
 
-export type ShellNavKey = "chat" | "skills" | "automations" | "settings";
+export type ShellNavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "settings" | "logs";
 
 interface ShellNavItem {
   key: ShellNavKey;
@@ -10,61 +10,49 @@ interface ShellNavItem {
   icon: string;
 }
 
-interface ShellStatus {
-  level: "ok" | "warn" | "error";
-  summary: string;
+export interface ShellNavGroup {
+  label: string;
+  items: ShellNavItem[];
 }
 
 interface ExtendedCSSProperties extends CSSProperties {
   WebkitAppRegion?: "drag" | "no-drag";
 }
 
-function statusChip(level: ShellStatus["level"]): string {
-  if (level === "ok") return "status-dot status-ok";
-  if (level === "warn") return "status-dot status-warn";
-  return "status-dot status-error";
-}
-
 export function AppShell({
   sidebarCollapsed,
   compactSidebar,
   activeNav,
+  navGroups,
   navItems,
   onNavigate,
   onToggleSidebar,
   onOpenPalette,
-  status,
-  onToggleStatus,
-  safeMode,
-  onToggleSafeMode,
-  onOpenApprovals,
-  approvalCount,
   onOpenSettings,
-  showSafeModeBanner,
+  onToggleTerminal,
   children,
   inspector,
   drawerAsModal,
   onOpenInspectorModal,
+  inspectorOpen,
+  onToggleInspector,
 }: {
   sidebarCollapsed: boolean;
   compactSidebar: boolean;
   activeNav: ShellNavKey;
+  navGroups: ShellNavGroup[];
   navItems: ShellNavItem[];
   onNavigate: (nav: ShellNavKey) => void;
   onToggleSidebar: () => void;
   onOpenPalette: () => void;
-  status: ShellStatus;
-  onToggleStatus: () => void;
-  safeMode: boolean;
-  onToggleSafeMode: () => void;
-  onOpenApprovals: () => void;
-  approvalCount: number;
   onOpenSettings: () => void;
-  showSafeModeBanner: boolean;
+  onToggleTerminal: () => void;
   children: React.ReactNode;
   inspector: React.ReactNode;
   drawerAsModal: boolean;
   onOpenInspectorModal: () => void;
+  inspectorOpen: boolean;
+  onToggleInspector: () => void;
 }) {
   const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
   const dragStyle: ExtendedCSSProperties | undefined = isMac
@@ -110,20 +98,36 @@ export function AppShell({
         </div>
 
         <nav className="nav-list" aria-label="Primary">
-          {navItems.map((item) => (
-            <button
-              key={item.key}
-              className={`nav-item ${activeNav === item.key ? "active" : ""}`}
-              onClick={() => onNavigate(item.key)}
-              title={item.label}
-              data-nav-label={item.label}
-              aria-current={activeNav === item.key ? "page" : undefined}
-            >
-              <span className="nav-icon-wrap">
-                <Icon name={item.icon} />
-              </span>
-              {!sidebarCollapsed && <span className="nav-label">{item.label}</span>}
-            </button>
+          {navGroups.map((group) => (
+            <div key={group.label} className="nav-group">
+              {!sidebarCollapsed && (
+                <div className="nav-group-label">
+                  <span className="nav-group-label__text">{group.label}</span>
+                </div>
+              )}
+              <div className="nav-group__items">
+                {group.items.map((item) => (
+                  <button
+                    key={item.key}
+                    className={`nav-item ${activeNav === item.key ? "active" : ""}`}
+                    onClick={() => onNavigate(item.key)}
+                    title={`${item.label} (${isMac ? "⌘" : "Ctrl+"}${item.shortcut})`}
+                    data-nav-label={item.label}
+                    aria-current={activeNav === item.key ? "page" : undefined}
+                  >
+                    <span className="nav-icon-wrap">
+                      <Icon name={item.icon} />
+                    </span>
+                    {!sidebarCollapsed && (
+                      <span className="nav-label">
+                        {item.label}
+                        <kbd className="nav-shortcut">{isMac ? "⌘" : "^"}{item.shortcut}</kbd>
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
       </aside>
@@ -157,43 +161,21 @@ export function AppShell({
           </button>
 
           <div className="top-actions" style={noDragStyle}>
-            <button className="status-button" onClick={onToggleStatus}>
-              <span className={statusChip(status.level)} />
-              <span>{status.summary}</span>
+            <button className="icon-button" onClick={onToggleTerminal} aria-label="Terminal" title="Toggle Terminal (⌘J)">
+              <Icon name="terminal" />
             </button>
-
-            <button
-              className={`safe-toggle-pill ${safeMode ? "on" : "off"}`}
-              title="Safe Mode prevents sending/writing/executing without approval."
-              onClick={onToggleSafeMode}
-              aria-pressed={safeMode}
-              aria-label={safeMode ? "Safe Mode ON" : "Safe Mode OFF"}
-            >
-              <Icon name={safeMode ? "safe-on" : "safe-off"} />
-              <span>{safeMode ? "Safe" : "Active"}</span>
-            </button>
-
-            <button className="icon-button" onClick={onOpenApprovals} aria-label="Approvals inbox">
-              <Icon name="bell" />
-              {approvalCount > 0 && <span className="badge">{approvalCount}</span>}
-            </button>
-
             <button className="icon-button" onClick={onOpenSettings} aria-label="Settings">
               <Icon name="settings" />
             </button>
           </div>
         </header>
 
-        {showSafeModeBanner && (
-          <div className="banner warning">
-            Safe Mode is OFF. Sending, writing, and execution actions can run with fewer gates.
-          </div>
-        )}
+        <div className={`workspace ${!inspectorOpen ? "inspector-closed" : ""}`}>
+          <main className={`main-content ${activeNav === "chat" ? "chat-mode" : ""}`}>
+            {children}
+          </main>
 
-        <div className="workspace">
-          <main className="main-content">{children}</main>
-
-          {!drawerAsModal && (
+          {!drawerAsModal && inspectorOpen && (
             <aside className="inspector" role="complementary" aria-label="Inspector">
               {inspector}
             </aside>

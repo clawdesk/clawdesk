@@ -2,10 +2,10 @@
 //!
 //! ## Security rationale
 //!
-//! OpenClaw's `SOUL.md` is read-write by the agent. This was the vector for
-//! the Zenity persistence attack: an attacker injects instructions via a
-//! webpage, the agent writes them to `SOUL.md`, and the backdoor persists
-//! across restarts because `SOUL.md` is loaded into every subsequent prompt.
+//! A read-write `SOUL.md` pattern is vulnerable: an attacker injects
+//! instructions via a webpage, the agent writes them to `SOUL.md`, and the
+//! backdoor persists across restarts because `SOUL.md` is loaded into every
+//! subsequent prompt. (Cf. Zenity persistence attack.)
 //!
 //! `IdentityContract` eliminates this entire attack class by design:
 //! - The identity is **read-only** from the agent's perspective.

@@ -1,4 +1,4 @@
-//! A2A Protocol commands — agent discovery, task delegation (Task 15).
+//! A2A Protocol commands — agent discovery, task delegation.
 
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
@@ -112,3 +112,123 @@ pub async fn get_self_agent_card(state: State<'_, AppState>) -> Result<serde_jso
 
     serde_json::to_value(&card).map_err(|e| e.to_string())
 }
+
+#[derive(Debug, Deserialize)]
+pub struct TaskSendRequest {
+    pub skill_id: Option<String>,
+    pub input: serde_json::Value,
+    pub target_agent: Option<String>,
+    pub required_capabilities: Option<Vec<String>>,
+}
+
+#[tauri::command]
+pub async fn send_a2a_task(
+    requester_id: String,
+    req: TaskSendRequest,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    use clawdesk_acp::{Task, TaskEvent};
+    
+    let target = req.target_agent.unwrap_or_else(|| "self".to_string());
+    
+    let mut task = Task::new(&requester_id, &target, req.input);
+    task.skill_id = req.skill_id;
+    let task_id = task.id.as_str().to_string();
+    
+    let response = serde_json::json!({
+        "task_id": task_id,
+        "state": task.state,
+        "output": task.output,
+        "error": task.error,
+        "progress": task.progress,
+        "artifacts": task.artifacts,
+    });
+    
+    state.a2a_tasks.write().await.insert(task_id, task);
+    
+    Ok(response)
+}
+
+#[tauri::command]
+pub async fn get_a2a_task(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let tasks = state.a2a_tasks.read().await;
+    let task = tasks.get(&task_id).ok_or_else(|| format!("Task {} not found", task_id))?;
+    
+    Ok(serde_json::json!({
+        "task_id": task.id.as_str(),
+        "state": task.state,
+        "output": task.output,
+        "error": task.error,
+        "progress": task.progress,
+        "artifacts": task.artifacts,
+    }))
+}
+
+#[tauri::command]
+pub async fn list_a2a_tasks(
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let tasks = state.a2a_tasks.read().await;
+    let mut result = Vec::new();
+    for task in tasks.values() {
+        result.push(serde_json::json!({
+            "task_id": task.id.as_str(),
+            "state": task.state,
+            "output": task.output,
+            "error": task.error,
+            "progress": task.progress,
+            "artifacts": task.artifacts,
+        }));
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn cancel_a2a_task(
+    task_id: String,
+    reason: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    use clawdesk_acp::TaskEvent;
+    
+    let mut tasks = state.a2a_tasks.write().await;
+    let task = tasks.get_mut(&task_id).ok_or_else(|| format!("Task {} not found", task_id))?;
+    
+    task.apply_event(TaskEvent::Cancel { reason }).map_err(|e| e.to_string())?;
+    
+    Ok(serde_json::json!({
+        "task_id": task.id.as_str(),
+        "state": task.state,
+        "output": task.output,
+        "error": task.error,
+        "progress": task.progress,
+        "artifacts": task.artifacts,
+    }))
+}
+
+#[tauri::command]
+pub async fn provide_a2a_task_input(
+    task_id: String,
+    input: serde_json::Value,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    use clawdesk_acp::TaskEvent;
+    
+    let mut tasks = state.a2a_tasks.write().await;
+    let task = tasks.get_mut(&task_id).ok_or_else(|| format!("Task {} not found", task_id))?;
+    
+    task.apply_event(TaskEvent::ProvideInput { input }).map_err(|e| e.to_string())?;
+    
+    Ok(serde_json::json!({
+        "task_id": task.id.as_str(),
+        "state": task.state,
+        "output": task.output,
+        "error": task.error,
+        "progress": task.progress,
+        "artifacts": task.artifacts,
+    }))
+}
+

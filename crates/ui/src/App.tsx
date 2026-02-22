@@ -32,13 +32,17 @@ import { buildRouteHash, parseRouteHash } from "./lib/routes";
 import { classifyError } from "./lib/error-recovery";
 import { subscribeAppEvents } from "./stores/event-bus";
 import { translateRisk } from "./lib/risk-translator";
-import { AppShell } from "./shell/AppShell";
+import { AppShell, type ShellNavGroup } from "./shell/AppShell";
 import { ChatPage } from "./pages/ChatPage";
+import { OverviewPage } from "./pages/OverviewPage";
 import { SkillsPage } from "./pages/SkillsPage";
 import { AutomationsPage } from "./pages/AutomationsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { LogsPage } from "./pages/LogsPage";
+import { A2APage } from "./pages/A2APage";
+import { RuntimePage } from "./pages/RuntimePage";
 
-type NavKey = "chat" | "skills" | "automations" | "settings";
+type NavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "settings" | "logs";
 type RiskLevel = "low" | "medium" | "high";
 type StatusLevel = "ok" | "warn" | "error";
 type InspectorTab = "plan" | "approvals" | "proof" | "undo" | "trace" | "memory" | "graph";
@@ -49,11 +53,20 @@ type Provenance = "built-in" | "created by you" | "from team" | "from internet";
 type MessageRole = "user" | "assistant";
 type StepStatus = "idle" | "running" | "ok" | "skipped" | "stopped";
 
+interface ThreadMessageMeta {
+  model: string;
+  tokenCost: number;
+  costUsd: number;
+  durationMs: number;
+  skills: string[];
+}
+
 interface ThreadMessage {
   id: string;
   role: MessageRole;
   text: string;
   time: string;
+  meta?: ThreadMessageMeta;
   result?: string;
 }
 
@@ -217,7 +230,7 @@ type AgentEventType =
 
 interface FrontendAgentEventPayload {
   agent_id: string;
-  event: { type: AgentEventType; [key: string]: unknown };
+  event: { type: AgentEventType;[key: string]: unknown };
 }
 
 interface ApprovalPendingPayload {
@@ -238,15 +251,27 @@ interface RoutineExecutedPayload {
 
 interface IncomingMessagePayload {
   agent_id?: string;
+  chat_id?: string;
   preview?: string;
   timestamp?: string;
 }
 
 const NAV_ITEMS: { key: NavKey; label: string; shortcut: string; icon: string }[] = [
   { key: "chat", label: "Chat", shortcut: "1", icon: "ask" },
-  { key: "skills", label: "Skills", shortcut: "2", icon: "library" },
-  { key: "automations", label: "Automations", shortcut: "3", icon: "routines" },
-  { key: "settings", label: "Settings", shortcut: "4", icon: "settings" },
+  { key: "overview", label: "Overview", shortcut: "2", icon: "bar-chart" },
+  { key: "a2a", label: "A2A Directory", shortcut: "3", icon: "users" },
+  { key: "runtime", label: "Runtime", shortcut: "4", icon: "activity" },
+  { key: "skills", label: "Skills", shortcut: "5", icon: "library" },
+  { key: "automations", label: "Automations", shortcut: "6", icon: "routines" },
+  { key: "settings", label: "Settings", shortcut: "7", icon: "settings" },
+  { key: "logs", label: "Logs", shortcut: "8", icon: "scroll-text" },
+];
+
+const NAV_GROUPS: ShellNavGroup[] = [
+  { label: "", items: [NAV_ITEMS[0], NAV_ITEMS[1]] },
+  { label: "Cluster", items: [NAV_ITEMS[2], NAV_ITEMS[3]] },
+  { label: "Build", items: [NAV_ITEMS[4], NAV_ITEMS[5]] },
+  { label: "System", items: [NAV_ITEMS[6], NAV_ITEMS[7]] },
 ];
 
 const INITIAL_THREADS: ThreadItem[] = [];
@@ -291,26 +316,43 @@ function formatLastActivity(isoTimestamp: string): string {
   });
 }
 
+function toThreadMessageMeta(metadata: BackendChatMessage["metadata"]): ThreadMessageMeta | undefined {
+  if (!metadata) return undefined;
+  return {
+    model: metadata.model,
+    tokenCost: metadata.token_cost,
+    costUsd: metadata.cost_usd,
+    durationMs: metadata.duration_ms,
+    skills: metadata.skills_activated,
+  };
+}
+
+function formatModelLabel(model: string): string {
+  const parts = model.split("-");
+  return parts.slice(0, 2).join("-") || model;
+}
+
+function formatDurationLabel(durationMs: number): string {
+  if (durationMs >= 1000) return `${(durationMs / 1000).toFixed(1)}s`;
+  return `${Math.max(0, Math.round(durationMs))}ms`;
+}
+
 function toThreadMessages(messages: BackendChatMessage[]): ThreadMessage[] {
   return messages.map((message) => {
     const role: MessageRole = message.role === "assistant" ? "assistant" : "user";
-    let result: string | undefined;
-    if (message.metadata) {
-      result = `${message.metadata.model} · ${message.metadata.token_cost} tokens · $${message.metadata.cost_usd.toFixed(4)} · ${message.metadata.duration_ms}ms`;
-    }
     return {
       id: message.id,
       role,
       text: message.content,
       time: formatLastActivity(message.timestamp),
-      result,
+      meta: toThreadMessageMeta(message.metadata),
     };
   });
 }
 
 function toThreadFromSession(session: SessionSummary): ThreadItem {
   return {
-    id: session.agent_id,
+    id: session.chat_id,
     agentId: session.agent_id,
     title: session.title,
     lastActivity: formatLastActivity(session.last_activity),
@@ -323,7 +365,7 @@ function toThreadFromSession(session: SessionSummary): ThreadItem {
 
 function createThreadForAgent(agentId: string, agent: DesktopAgent | null, patch?: Partial<ThreadItem>): ThreadItem {
   const base: ThreadItem = {
-    id: agentId,
+    id: patch?.id ?? `thread_${agentId}_${Date.now()}`,
     agentId,
     title: agent ? `${agent.name} session` : "Conversation",
     lastActivity: "No messages yet",
@@ -465,6 +507,7 @@ export default function App() {
     initialRouteRef.current.threadId ?? INITIAL_THREADS[0]?.id ?? ""
   );
   const [messageInput, setMessageInput] = useState("");
+  const [threadSearch, setThreadSearch] = useState("");
   const [currentPlan, setCurrentPlan] = useState<PlanCard>(INITIAL_PLAN);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("plan");
   const [timeline, setTimeline] = useState<TimelineItem[]>(INITIAL_TIMELINE);
@@ -522,6 +565,7 @@ export default function App() {
   const [proofArchiveOpen, setProofArchiveOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inspectorModalOpen, setInspectorModalOpen] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(false);
 
   // ── Backend-connected state ──────────────────────────────
   const [backendAgents, setBackendAgents] = useState<DesktopAgent[]>([]);
@@ -563,6 +607,17 @@ export default function App() {
       return true;
     }
   });
+
+  const [inspectorOpen, setInspectorOpen] = useState<boolean>(() => {
+    try {
+      const stored = window.localStorage.getItem("clawdesk.inspector.open");
+      if (stored === null) return false;
+      return stored === "1";
+    } catch {
+      return false;
+    }
+  });
+
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => {
     try {
@@ -576,6 +631,30 @@ export default function App() {
     () => threads.find((thread) => thread.id === activeThreadId) ?? threads[0] ?? null,
     [threads, activeThreadId]
   );
+
+  const agentNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const agent of backendAgents) {
+      map.set(agent.id, agent.name);
+    }
+    return map;
+  }, [backendAgents]);
+
+  const activeAgent = useMemo<DesktopAgent | null>(
+    () => (selectedAgentId ? backendAgents.find((agent) => agent.id === selectedAgentId) ?? null : null),
+    [backendAgents, selectedAgentId]
+  );
+
+  const filteredThreads = useMemo(() => {
+    const query = threadSearch.trim().toLowerCase();
+    if (!query) return threads;
+    return threads.filter((thread) => {
+      if (thread.title.toLowerCase().includes(query)) return true;
+      const agentName = thread.agentId ? agentNameById.get(thread.agentId)?.toLowerCase() : "";
+      if (agentName?.includes(query)) return true;
+      return thread.messages.some((message) => message.text.toLowerCase().includes(query));
+    });
+  }, [agentNameById, threadSearch, threads]);
 
   const selectedRoutine = useMemo<RoutineItem | null>(
     () => routines.find((routine) => routine.id === selectedRoutineId) ?? routines[0] ?? null,
@@ -597,10 +676,17 @@ export default function App() {
       if (activeThreadId !== "") setActiveThreadIdState("");
       return;
     }
-    if (!threads.some((thread) => thread.id === activeThreadId)) {
+
+    if (activeThreadId === "" || !threads.some((t) => t.id === activeThreadId)) {
       setActiveThreadIdState(threads[0].id);
     }
   }, [threads, activeThreadId]);
+
+  // Init theme
+  useEffect(() => {
+    const theme = window.localStorage.getItem("clawdesk.theme") || "system";
+    document.documentElement.setAttribute("data-theme", theme);
+  }, []);
 
   useEffect(() => {
     if (routines.length === 0) {
@@ -659,6 +745,14 @@ export default function App() {
     }
   }, [isSidebarCollapsed]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("clawdesk.inspector.open", inspectorOpen ? "1" : "0");
+    } catch {
+      // Ignore persistence failures.
+    }
+  }, [inspectorOpen]);
+
   const navigate = useCallback(
     (nextNav: NavKey, options?: { threadId?: string; replace?: boolean }) => {
       const nextThreadId =
@@ -695,33 +789,66 @@ export default function App() {
 
   async function completeOnboarding(result: {
     provider: string;
+    model: string;
     apiKey: string;
     templateName: string;
-    firstPrompt: string;
+    storedInVault: boolean;
+    enabledSkills: string[];
+    channelSetups: { channelId: string; config: Record<string, string> }[];
   }) {
+    // Always save settings first — even if agent creation fails
+    if (result.provider) {
+      window.localStorage.setItem("clawdesk.provider", result.provider);
+    }
+    if (result.model) {
+      window.localStorage.setItem("clawdesk.model", result.model);
+    }
+    if (result.apiKey) {
+      window.localStorage.setItem("clawdesk.api_key", result.apiKey);
+      window.localStorage.setItem("clawdesk.api_key.configured", "1");
+    }
+    window.localStorage.setItem("clawdesk.onboarding.complete", "1");
+    setOnboardingOpen(false);
+
     try {
-      if (result.provider) {
-        window.localStorage.setItem("clawdesk.provider", result.provider);
-      }
-      if (result.apiKey) {
-        window.localStorage.setItem("clawdesk.api_key.configured", "1");
-      }
+      // Create agent from selected template
       const template = AGENT_TEMPLATES.find((item) => item.name === result.templateName);
       if (template) {
         await createBackendAgent(template);
       }
-      window.localStorage.setItem("clawdesk.onboarding.complete", "1");
-      setOnboardingOpen(false);
+
+      // Activate selected skills (skip errors — skills can be toggled later)
+      for (const skillId of result.enabledSkills) {
+        try { await api.activateSkill(skillId); } catch { /* skip */ }
+      }
+      // Refresh skills list after activation
+      api.listSkills().then((s) => setBackendSkills(s)).catch(() => { });
+
+      // Connect configured channels (skip errors — channels can be set up later)
+      for (const { channelId, config } of result.channelSetups) {
+        try { await api.updateChannel(channelId, config); } catch { /* skip */ }
+      }
+      // Refresh channels after setup
+      if (result.channelSetups.length > 0) {
+        api.listChannels().then((c) => setBackendChannels(c)).catch(() => { });
+      }
+
       navigate("chat");
-      setMessageInput(result.firstPrompt);
       pushToast("ClawDesk setup completed.");
     } catch (error) {
-      const mapped = classifyError(error);
-      pushToast(mapped.userMessage);
+      // Settings are saved even on error. Just warn about the agent.
+      navigate("chat");
+      pushToast("Settings saved. Agent creation will retry when backend is available.");
     }
   }
 
-  const runQuickCheck = useCallback(async () => {
+  function resetOnboarding() {
+    window.localStorage.removeItem("clawdesk.onboarding.complete");
+    setOnboardingOpen(true);
+  }
+
+  const runQuickCheck = useCallback(async (opts?: { showModal?: boolean }) => {
+    const showModal = opts?.showModal ?? true;
     // Only flag account problems when accounts have actually been loaded from backend
     const hasLoadedAccounts = accounts.length > 0;
     const needsSignIn = hasLoadedAccounts && accounts.some((account) => account.status === "needs_sign_in");
@@ -731,20 +858,20 @@ export default function App() {
       const health = await api.getHealth();
       setBackendHealth(health);
       // Refresh all backend data on quick check
-      api.listSkills().then((s) => setBackendSkills(s)).catch(() => {});
-      api.listAgents().then((a) => setBackendAgents(a)).catch(() => {});
-      api.listChannels().then((c) => setBackendChannels(c)).catch(() => {});
+      api.listSkills().then((s) => setBackendSkills(s)).catch(() => { });
+      api.listAgents().then((a) => setBackendAgents(a)).catch(() => { });
+      api.listChannels().then((c) => setBackendChannels(c)).catch(() => { });
       api.listPipelines().then((p) => {
         setBackendPipelines(p);
         setRoutines(p.map(routineFromPipeline));
-      }).catch(() => {});
-      api.getMetrics().then((m) => setBackendMetrics(m)).catch(() => {});
-      api.getSecurityStatus().then((s) => setBackendSecurity(s)).catch(() => {});
-      api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => {});
-      api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => {});
-      api.getMemoryStats().then((s) => setBackendMemoryStats(s)).catch(() => {});
-      api.listNotifications().then((n) => setBackendNotifications(n)).catch(() => {});
-      api.listCanvases().then((c) => setBackendCanvases(c)).catch(() => {});
+      }).catch(() => { });
+      api.getMetrics().then((m) => setBackendMetrics(m)).catch(() => { });
+      api.getSecurityStatus().then((s) => setBackendSecurity(s)).catch(() => { });
+      api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => { });
+      api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => { });
+      api.getMemoryStats().then((s) => setBackendMemoryStats(s)).catch(() => { });
+      api.listNotifications().then((n) => setBackendNotifications(n)).catch(() => { });
+      api.listCanvases().then((c) => setBackendCanvases(c)).catch(() => { });
 
       // Fetch fresh auth profiles and determine actual account health
       let freshNeedsSignIn = needsSignIn;
@@ -765,16 +892,18 @@ export default function App() {
           detail: "Some connected services need sign-in or permission review.",
           fix: needsSignIn ? "Reconnect Email" : "Review permissions",
         });
-        setQuickCheck({
-          title: "What’s wrong",
-          why: "Some connected accounts can’t run actions reliably.",
-          options: [
-            "Reconnect Messages account",
-            "Reconnect Email account",
-            "Pause routines until connected",
-            "Try again",
-          ],
-        });
+        if (showModal) {
+          setQuickCheck({
+            title: "What’s wrong",
+            why: "Some connected accounts can’t run actions reliably.",
+            options: [
+              "Reconnect Messages account",
+              "Reconnect Email account",
+              "Pause routines until connected",
+              "Try again",
+            ],
+          });
+        }
       } else {
         setStatus({
           level: "ok",
@@ -782,11 +911,7 @@ export default function App() {
           detail: "Engine reachable. Accounts are healthy.",
           fix: "No action needed",
         });
-        setQuickCheck({
-          title: "All clear",
-          why: "No blocking issues found.",
-          options: ["Try again", "Show details"],
-        });
+        setQuickCheck(null);
       }
     } catch {
       setStatus({
@@ -795,16 +920,18 @@ export default function App() {
         detail: "The local engine did not respond to health check.",
         fix: "Restart local engine",
       });
-      setQuickCheck({
-        title: "What’s wrong",
-        why: "The app can’t contact the local assistant engine.",
-        options: ["Restart local engine", "Turn on Safe Mode", "Try again"],
-      });
+      if (showModal) {
+        setQuickCheck({
+          title: "What’s wrong",
+          why: "The app can’t contact the local assistant engine.",
+          options: ["Restart local engine", "Turn on Safe Mode", "Try again"],
+        });
+      }
     }
   }, [accounts]);
 
   useEffect(() => {
-    runQuickCheck();
+    runQuickCheck({ showModal: false });
   }, [runQuickCheck]);
 
   useEffect(() => {
@@ -898,7 +1025,7 @@ export default function App() {
             sessions.value.map(async (session) => {
               const baseThread = toThreadFromSession(session);
               try {
-                const messages = await api.getSessionMessages(session.agent_id);
+                const messages = await api.getChatMessages(session.chat_id);
                 return { ...baseThread, messages: toThreadMessages(messages) };
               } catch {
                 return baseThread;
@@ -1106,11 +1233,11 @@ export default function App() {
             prev.map((routine) =>
               routine.id === pipelineId
                 ? {
-                    ...routine,
-                    lastResult: historyEntry.result,
-                    lastReason: historyEntry.reason,
-                    history: [historyEntry, ...routine.history],
-                  }
+                  ...routine,
+                  lastResult: historyEntry.result,
+                  lastReason: historyEntry.reason,
+                  history: [historyEntry, ...routine.history],
+                }
                 : routine
             )
           );
@@ -1124,21 +1251,22 @@ export default function App() {
               const existing = existingById.get(mapped.id);
               return existing
                 ? {
-                    ...mapped,
-                    enabled: existing.enabled,
-                    history: existing.history,
-                    lastResult: existing.lastResult,
-                    lastReason: existing.lastReason,
-                  }
+                  ...mapped,
+                  enabled: existing.enabled,
+                  history: existing.history,
+                  lastResult: existing.lastResult,
+                  lastReason: existing.lastReason,
+                }
                 : mapped;
             });
           });
-        }).catch(() => {});
+        }).catch(() => { });
         pushToast(`${pipelineName} ${success ? "completed" : "failed"}.`);
       },
       onIncomingMessage: (payload) => {
         const data = payload as IncomingMessagePayload | null;
         const agentId = data && typeof data.agent_id === "string" ? data.agent_id : "";
+        const chatId = data && typeof data.chat_id === "string" ? data.chat_id : "";
         const preview =
           data && typeof data.preview === "string" && data.preview.length > 0
             ? data.preview
@@ -1152,13 +1280,22 @@ export default function App() {
           return;
         }
         upsertThreadForAgent(agentId, {
+          id: chatId || undefined,
           title: preview.length > 44 ? `${preview.slice(0, 44)}...` : preview,
           lastActivity: formatLastActivity(timestamp),
         });
-        hydrateThreadMessages(agentId, preview, timestamp).catch(() => {
-          // Best-effort thread refresh for incoming messages.
-        });
-        pushToast(preview);
+        // Skip full message hydration when ChatPage is active —
+        // ChatPage has its own incoming:message listener and manages messages[].
+        if (chatId && activeNav !== "chat") {
+          hydrateThreadMessages(chatId, preview, timestamp).catch(() => {
+            // Best-effort thread refresh for incoming messages.
+          });
+        }
+        // Only show toast for incoming messages when NOT in the chat tab
+        // (ChatPage displays the message inline; no need for a popup too)
+        if (activeNav !== "chat") {
+          pushToast(preview);
+        }
       },
       onSystemAlert: (alert) => {
         if (alert?.message) pushToast(alert.message);
@@ -1246,9 +1383,9 @@ export default function App() {
                 messages: thread.messages.map((message) =>
                   message.id === streamingMessageId
                     ? {
-                        ...message,
-                        result: `${event.name} ${success ? "completed" : "failed"} · ${durationMs}ms`,
-                      }
+                      ...message,
+                      result: `${event.name} ${success ? "completed" : "failed"} · ${durationMs}ms`,
+                    }
                     : message
                 ),
               };
@@ -1267,10 +1404,10 @@ export default function App() {
                 messages: thread.messages.map((message) =>
                   message.id === streamingMessageId
                     ? {
-                        ...message,
-                        text: message.text || errorText,
-                        result: "Error",
-                      }
+                      ...message,
+                      text: message.text || errorText,
+                      result: "Error",
+                    }
                     : message
                 ),
               };
@@ -1337,9 +1474,10 @@ export default function App() {
         event.preventDefault();
         stopExecution();
       }
-      if (meta && ["1", "2", "3", "4", "5"].includes(event.key)) {
+      if (meta && ["1", "2", "3", "4", "5", "6"].includes(event.key)) {
         event.preventDefault();
-        navigate(NAV_ITEMS[Number(event.key) - 1].key);
+        const idx = Number(event.key) - 1;
+        if (idx < NAV_ITEMS.length) navigate(NAV_ITEMS[idx].key);
       }
       if (event.key === "Escape") {
         setPaletteOpen(false);
@@ -1365,30 +1503,31 @@ export default function App() {
   function upsertThreadForAgent(agentId: string, patch?: Partial<ThreadItem>) {
     const agent = backendAgents.find((item) => item.id === agentId) ?? null;
     setThreads((prev) => {
-      if (prev.some((thread) => thread.id === agentId)) {
+      const existing = prev.find((thread) => thread.agentId === agentId);
+      if (existing) {
         if (!patch) return prev;
         return prev.map((thread) =>
-          thread.id === agentId ? { ...thread, ...patch } : thread
+          thread.id === existing.id ? { ...thread, ...patch } : thread
         );
       }
       return [createThreadForAgent(agentId, agent, patch), ...prev];
     });
   }
 
-  async function hydrateThreadMessages(agentId: string, fallbackPreview?: string, fallbackTimestamp?: string) {
-    if (!agentId) return;
+  async function hydrateThreadMessages(threadId: string, fallbackPreview?: string, fallbackTimestamp?: string) {
+    if (!threadId) return;
     try {
-      const backendMessages = await api.getSessionMessages(agentId);
+      const backendMessages = await api.getChatMessages(threadId);
       const mappedMessages = toThreadMessages(backendMessages);
       const lastMessage = mappedMessages[mappedMessages.length - 1];
       setThreads((prev) =>
         prev.map((thread) =>
-          thread.id === agentId
+          thread.id === threadId
             ? {
-                ...thread,
-                lastActivity: lastMessage?.time ?? thread.lastActivity,
-                messages: mappedMessages,
-              }
+              ...thread,
+              lastActivity: lastMessage?.time ?? thread.lastActivity,
+              messages: mappedMessages,
+            }
             : thread
         )
       );
@@ -1397,7 +1536,7 @@ export default function App() {
       const timeLabel = fallbackTimestamp ? formatLastActivity(fallbackTimestamp) : nowLabel();
       setThreads((prev) =>
         prev.map((thread) => {
-          if (thread.id !== agentId) return thread;
+          if (thread.id !== threadId) return thread;
           const tail = thread.messages[thread.messages.length - 1];
           if (tail?.role === "assistant" && tail.text === fallbackPreview) {
             return { ...thread, lastActivity: timeLabel };
@@ -1441,7 +1580,9 @@ export default function App() {
     const plan = buildPlanFromRequest(text, targetLabel);
     setCurrentPlan(plan);
 
-    const threadId = agentId;
+    // Resolve thread by agentId (thread.id is now chat_id, not agentId)
+    const existingThread = threads.find((t) => t.agentId === agentId);
+    const threadId = existingThread?.id ?? `thread_${agentId}_${Date.now()}`;
     const cacheNamespace = `agent:${agentId}`;
     const userMessage: ThreadMessage = {
       id: makeId("message"),
@@ -1451,7 +1592,7 @@ export default function App() {
     };
 
     setThreads((prev) => {
-      const index = prev.findIndex((thread) => thread.id === threadId);
+      const index = prev.findIndex((thread) => thread.agentId === agentId);
       if (index === -1) {
         return [
           {
@@ -1468,13 +1609,13 @@ export default function App() {
         ];
       }
       return prev.map((thread) =>
-        thread.id === threadId
+        thread.agentId === agentId
           ? {
-              ...thread,
-              title: text.length > 44 ? `${text.slice(0, 44)}...` : text,
-              lastActivity: "Just now",
-              messages: [...thread.messages, userMessage],
-            }
+            ...thread,
+            title: text.length > 44 ? `${text.slice(0, 44)}...` : text,
+            lastActivity: "Just now",
+            messages: [...thread.messages, userMessage],
+          }
           : thread
       );
     });
@@ -1580,9 +1721,28 @@ export default function App() {
     }
 
     try {
-      const response = await api.sendMessage(agentId, text);
+      const userModel = window.localStorage.getItem("clawdesk.model") || undefined;
+      // BUG FIX: Pass threadId as chatId so the backend reuses the same session
+      // across messages. Without this, every message created a new chat session
+      // and the LLM had no conversation history (could not remember context).
+      const response = await api.sendMessage(agentId, text, userModel, threadId);
       assistantText = response.message.content;
+
+      // Remap temp thread ID → backend chat_id after first send
+      const realChatId = response.chat_id;
+      if (realChatId && realChatId !== threadId) {
+        setThreads((prev) =>
+          prev.map((thread) =>
+            thread.id === threadId ? { ...thread, id: realChatId } : thread
+          )
+        );
+        if (activeThreadId === threadId) {
+          selectThread(realChatId, { replace: true });
+        }
+      }
+
       const meta = response.message.metadata;
+      const messageMeta = toThreadMessageMeta(meta);
       if (meta) {
         resultLabel = `${meta.model} · ${meta.token_cost} tokens · $${meta.cost_usd.toFixed(4)} · ${meta.duration_ms}ms`;
         if (meta.skills_activated.length > 0) {
@@ -1598,16 +1758,16 @@ export default function App() {
         }
       }
 
-      api.getMetrics().then((m) => setBackendMetrics(m)).catch(() => {});
-      api.listAgents().then((a) => setBackendAgents(a)).catch(() => {});
+      api.getMetrics().then((m) => setBackendMetrics(m)).catch(() => { });
+      api.listAgents().then((a) => setBackendAgents(a)).catch(() => { });
       api.listSessions().then(async (sessions) => {
         const session = sessions.find((s) => s.agent_id === agentId);
         if (!session) return;
         try {
-          const messages = await api.getSessionMessages(session.agent_id);
+          const messages = await api.getChatMessages(session.chat_id);
           setThreads((prev) =>
             prev.map((thread) =>
-              thread.id === session.agent_id
+              thread.agentId === agentId
                 ? { ...toThreadFromSession(session), messages: toThreadMessages(messages) }
                 : thread
             )
@@ -1615,22 +1775,22 @@ export default function App() {
         } catch {
           // Ignore refresh failures.
         }
-      }).catch(() => {});
+      }).catch(() => { });
 
       api.rememberMemory({
         content: `User: ${text}\nAssistant: ${assistantText}`,
         source: `chat:${agentId}:${threadId}`,
-      }).catch(() => {});
-      api.recallMemories({ query: text, max_results: 5 }).then((hits) => setBackendMemoryHits(hits)).catch(() => {});
-      api.getMemoryStats().then((s) => setBackendMemoryStats(s)).catch(() => {});
+      }).catch(() => { });
+      api.recallMemories({ query: text, max_results: 5 }).then((hits) => setBackendMemoryHits(hits)).catch(() => { });
+      api.getMemoryStats().then((s) => setBackendMemoryStats(s)).catch(() => { });
 
       const rawMeta = response.message.metadata as Record<string, unknown> | null;
       if (rawMeta?.trace_id) {
         const traceId = rawMeta.trace_id as string;
-        api.traceGetRun(traceId).then((run) => setBackendTraceRun(run)).catch(() => {});
-        api.traceGetSpans(traceId).then((spans) => setBackendTraceSpans(spans)).catch(() => {});
+        api.traceGetRun(traceId).then((run) => setBackendTraceRun(run)).catch(() => { });
+        api.traceGetSpans(traceId).then((spans) => setBackendTraceSpans(spans)).catch(() => { });
       }
-      api.graphGetNodesByType("agent", 10).then((nodes) => setBackendGraphNodes(nodes)).catch(() => {});
+      api.graphGetNodesByType("agent", 10).then((nodes) => setBackendGraphNodes(nodes)).catch(() => { });
 
       api.cacheStore(
         text,
@@ -1639,7 +1799,7 @@ export default function App() {
         undefined,
         [`session:${threadId}`],
         3600
-      ).catch(() => {});
+      ).catch(() => { });
 
       setThreads((prev) =>
         prev.map((thread) => {
@@ -1649,7 +1809,12 @@ export default function App() {
             lastActivity: "Just now",
             messages: thread.messages.map((message) =>
               message.id === streamedMessageId
-                ? { ...message, text: assistantText, result: resultLabel }
+                ? {
+                  ...message,
+                  text: assistantText,
+                  result: messageMeta ? undefined : resultLabel,
+                  meta: messageMeta,
+                }
                 : message
             ),
           };
@@ -1736,7 +1901,7 @@ export default function App() {
     ]);
     setStepStatus({});
     setInspectorTab("plan");
-    pushToast("Agent response received.");
+    // Removed: redundant "Agent response received" toast (the chat already shows the response inline)
   }
 
   function initializeExecution() {
@@ -1869,10 +2034,10 @@ export default function App() {
 
     // Wire to backend approval system
     if (nextStatus === "approved") {
-      api.approveRequest(item.id, "user").catch(() => {});
+      api.approveRequest(item.id, "user").catch(() => { });
       pushToast("Approval granted.");
     } else {
-      api.denyRequest(item.id, "user", "Denied by user").catch(() => {});
+      api.denyRequest(item.id, "user", "Denied by user").catch(() => { });
       pushToast("Approval denied. No action taken.");
     }
 
@@ -1964,11 +2129,11 @@ export default function App() {
         prev.map((routine) =>
           routine.id === selected.id
             ? {
-                ...routine,
-                lastResult: "ok",
-                lastReason: "Pipeline run succeeded",
-                history: [historyEntry, ...routine.history],
-              }
+              ...routine,
+              lastResult: "ok",
+              lastReason: "Pipeline run succeeded",
+              history: [historyEntry, ...routine.history],
+            }
             : routine
         )
       );
@@ -1997,11 +2162,11 @@ export default function App() {
         prev.map((routine) =>
           routine.id === selected.id
             ? {
-                ...routine,
-                lastResult: "failed",
-                lastReason: mapped.userMessage,
-                history: [historyEntry, ...routine.history],
-              }
+              ...routine,
+              lastResult: "failed",
+              lastReason: mapped.userMessage,
+              history: [historyEntry, ...routine.history],
+            }
             : routine
         )
       );
@@ -2033,7 +2198,7 @@ export default function App() {
         )
       );
       // Refresh auth profiles
-      api.listAuthProfiles().then((profiles) => setBackendAuthProfiles(profiles)).catch(() => {});
+      api.listAuthProfiles().then((profiles) => setBackendAuthProfiles(profiles)).catch(() => { });
     }).catch(() => {
       // Fallback: just mark reconnected locally
       setAccounts((prev) =>
@@ -2053,7 +2218,7 @@ export default function App() {
       const result = await api.checkPermission(
         "account", id, "service", account.name.toLowerCase(), "read"
       );
-      pushToast(`${account.name} connection test: ${result.decision === "allow" ? "OK" : "Denied"} (${result.reason ?? "no reason"})`);  
+      pushToast(`${account.name} connection test: ${result.decision === "allow" ? "OK" : "Denied"} (${result.reason ?? "no reason"})`);
     } catch {
       pushToast(`${account.name} connection test: OK (backend check unavailable)`);
     }
@@ -2084,15 +2249,38 @@ export default function App() {
   }
 
   // ── Backend Agent Management ─────────────────────────────
-  async function createBackendAgent(template: typeof AGENT_TEMPLATES[number]) {
+  function resolveUserModel(templateModel: string): string {
     try {
+      // Use the exact model the user selected in Preferences / Onboarding
+      const savedModel = window.localStorage.getItem("clawdesk.model");
+      if (savedModel) return savedModel;
+      // Fallback: infer from provider if model was never explicitly set
+      const provider = (window.localStorage.getItem("clawdesk.provider") || "Ollama (Local)").toLowerCase();
+      if (provider.includes("openai")) return "gpt-4o";
+      if (provider.includes("google")) return "gemini-2.5-pro";
+      if (provider.includes("ollama")) return "lfm2.5-thinking:latest";
+      if (provider.includes("anthropic")) return "claude-sonnet-4-20250514";
+    } catch { /* localStorage unavailable */ }
+    return templateModel;
+  }
+
+  async function createBackendAgent(template: typeof AGENT_TEMPLATES[number]) {
+    // Dedup guard: skip if an agent with this exact name already exists
+    const existing = backendAgents.find((a) => a.name === template.name);
+    if (existing) {
+      setSelectedAgentId(existing.id);
+      pushToast(`Agent "${template.name}" already exists.`);
+      return;
+    }
+    try {
+      const model = resolveUserModel(template.model);
       const agent = await api.createAgent({
         name: template.name,
         icon: template.icon,
         color: template.color,
         persona: template.persona,
         skills: template.skills,
-        model: template.model,
+        model,
       });
       setBackendAgents((prev) => [...prev, agent]);
       setSelectedAgentId(agent.id);
@@ -2166,7 +2354,29 @@ export default function App() {
 
   // ── OpenClaw Config Import ─────────────────────────────
   async function importOpenClaw() {
-    const configJson = window.prompt("Paste OpenClaw JSON config:");
+    let configJson: string | null = null;
+
+    // Try file picker (HTML input), fallback to prompt
+    try {
+      configJson = await new Promise<string | null>((resolve) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".json";
+        input.onchange = () => {
+          const file = input.files?.[0];
+          if (!file) { resolve(null); return; }
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => resolve(null);
+          reader.readAsText(file);
+        };
+        input.oncancel = () => resolve(null);
+        input.click();
+      });
+    } catch {
+      configJson = window.prompt("Paste OpenClaw JSON config:");
+    }
+
     if (!configJson) return;
     try {
       const result = await api.importOpenClawConfig(configJson);
@@ -2232,13 +2442,13 @@ export default function App() {
         id: "cmd_refresh_plugins",
         label: "Refresh Plugins",
         group: "Backend",
-        run: () => { api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => {}); pushToast("Plugins refreshed."); },
+        run: () => { api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => { }); pushToast("Plugins refreshed."); },
       },
       {
         id: "cmd_refresh_peers",
         label: "Discover Peers",
         group: "Backend",
-        run: () => { api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => {}); pushToast("Peers refreshed."); },
+        run: () => { api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => { }); pushToast("Peers refreshed."); },
       },
       {
         id: "cmd_memory_stats",
@@ -2291,25 +2501,35 @@ export default function App() {
     ];
 
     const searchCorpus = [
-      ...threads.map((thread) => ({ id: thread.id, label: thread.title, group: "Requests", run: () => {
-        selectThread(thread.id);
-      } })),
-      ...proofs.slice(0, 12).map((proof) => ({ id: proof.proofId, label: proof.summary, group: "Proof", run: () => {
-        navigate("chat");
-        setProofArchiveOpen(true);
-      } })),
-      ...routines.map((routine) => ({ id: routine.id, label: routine.name, group: "Routines", run: () => {
-        navigate("automations");
-        setSelectedRoutineId(routine.id);
-      } })),
-      ...accounts.map((account) => ({ id: account.id, label: account.name, group: "Accounts", run: () => {
-        navigate("settings");
-        setSelectedAccountId(account.id);
-      } })),
-      ...recipes.map((recipe) => ({ id: recipe.id, label: recipe.name, group: "Library", run: () => {
-        navigate("skills");
-        setSelectedRecipeId(recipe.id);
-      } })),
+      ...threads.map((thread) => ({
+        id: thread.id, label: thread.title, group: "Requests", run: () => {
+          selectThread(thread.id);
+        }
+      })),
+      ...proofs.slice(0, 12).map((proof) => ({
+        id: proof.proofId, label: proof.summary, group: "Proof", run: () => {
+          navigate("chat");
+          setProofArchiveOpen(true);
+        }
+      })),
+      ...routines.map((routine) => ({
+        id: routine.id, label: routine.name, group: "Routines", run: () => {
+          navigate("automations");
+          setSelectedRoutineId(routine.id);
+        }
+      })),
+      ...accounts.map((account) => ({
+        id: account.id, label: account.name, group: "Accounts", run: () => {
+          navigate("settings");
+          setSelectedAccountId(account.id);
+        }
+      })),
+      ...recipes.map((recipe) => ({
+        id: recipe.id, label: recipe.name, group: "Library", run: () => {
+          navigate("skills");
+          setSelectedRecipeId(recipe.id);
+        }
+      })),
     ];
 
     return [...base, ...searchCorpus];
@@ -2452,8 +2672,8 @@ export default function App() {
                   <div>
                     <div className="row-title">Today's Cost: ${backendMetrics.today_cost.toFixed(4)}</div>
                     <div className="row-sub">
-                      Input: {backendMetrics.today_input_tokens.toLocaleString()} tokens •{" "}
-                      Output: {backendMetrics.today_output_tokens.toLocaleString()} tokens
+                      Input: {(backendMetrics.today_input_tokens ?? 0).toLocaleString()} tokens •{" "}
+                      Output: {(backendMetrics.today_output_tokens ?? 0).toLocaleString()} tokens
                     </div>
                   </div>
                 </div>
@@ -2486,7 +2706,7 @@ export default function App() {
                   <div>
                     <div className="row-title">{agent.icon} {agent.name}</div>
                     <div className="row-sub">
-                      {agent.model} • {agent.msg_count} msgs • {agent.tokens_used.toLocaleString()}/{agent.token_budget.toLocaleString()} tokens • {agent.status}
+                      {agent.model} • {agent.msg_count} msgs • {(agent.tokens_used ?? 0).toLocaleString()}/{(agent.token_budget ?? 0).toLocaleString()} tokens • {agent.status}
                     </div>
                   </div>
                   <div className="row-actions">
@@ -2516,7 +2736,7 @@ export default function App() {
                       const isActive = plugin.state === "active";
                       const action = isActive ? api.disablePlugin : api.enablePlugin;
                       action(plugin.id).then(() => {
-                        api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => {});
+                        api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => { });
                         pushToast(`Plugin ${isActive ? "disabled" : "enabled"}.`);
                       }).catch(() => pushToast("Failed to toggle plugin."));
                     }}>
@@ -2534,7 +2754,7 @@ export default function App() {
             <div className="section-head">
               <h2>Discovered Peers ({backendPeers.length})</h2>
               <button className="btn subtle" onClick={() => {
-                api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => {});
+                api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => { });
               }}>Refresh</button>
             </div>
             <div className="list-rows">
@@ -2561,7 +2781,7 @@ export default function App() {
               <h2>Canvases ({backendCanvases.length})</h2>
               <button className="btn subtle" onClick={() => {
                 api.createCanvas({ title: "New Canvas" }).then(() => {
-                  api.listCanvases().then((c) => setBackendCanvases(c)).catch(() => {});
+                  api.listCanvases().then((c) => setBackendCanvases(c)).catch(() => { });
                   pushToast("Canvas created.");
                 }).catch(() => pushToast("Failed to create canvas."));
               }}>New</button>
@@ -2576,7 +2796,7 @@ export default function App() {
                   <div className="row-actions">
                     <button className="btn subtle" onClick={() => {
                       api.exportCanvasMarkdown(canvas.id).then((md) => {
-                        api.writeClipboard(md).then(() => pushToast("Canvas markdown copied to clipboard.")).catch(() => {});
+                        api.writeClipboard(md).then(() => pushToast("Canvas markdown copied to clipboard.")).catch(() => { });
                       }).catch(() => pushToast("Failed to export canvas."));
                     }}>Export</button>
                   </div>
@@ -2612,7 +2832,10 @@ export default function App() {
       <div className="view ask-layout">
         <aside className="thread-list">
           <div className="thread-list-head">
-            <h2>Threads</h2>
+            <div className="thread-list-title-wrap">
+              <h2>Threads</h2>
+              <span>{filteredThreads.length}/{threads.length}</span>
+            </div>
             <button className="btn subtle" onClick={() => {
               if (selectedAgentId) {
                 selectThread(selectedAgentId, { replace: true });
@@ -2625,23 +2848,48 @@ export default function App() {
               New
             </button>
           </div>
-          <div className="thread-items">
-            {threads.map((thread) => (
+          <div className="thread-search">
+            <input
+              value={threadSearch}
+              onChange={(event) => setThreadSearch(event.target.value)}
+              placeholder="Search threads..."
+              aria-label="Search threads"
+            />
+            {threadSearch.trim().length > 0 && (
               <button
-                key={thread.id}
-                className={`thread-item ${activeThread?.id === thread.id ? "active" : ""}`}
-                onClick={() => selectThread(thread.id)}
-                aria-current={activeThread?.id === thread.id ? "true" : undefined}
+                className="btn ghost thread-search-clear"
+                onClick={() => setThreadSearch("")}
+                aria-label="Clear thread search"
               >
-                <div className="thread-title">{thread.title}</div>
-                <div className="thread-meta">{thread.lastActivity}</div>
-                <div className="thread-flags">
-                  {thread.pendingApprovals > 0 && <span className="chip chip-risk">Approvals</span>}
-                  {thread.routineGenerated && <span className="chip">Routine</span>}
-                  {thread.hasProofOutputs && <span className="chip">Proof</span>}
-                </div>
+                Clear
               </button>
-            ))}
+            )}
+          </div>
+          <div className="thread-items">
+            {filteredThreads.length === 0 ? (
+              <div className="thread-empty">No threads match your search.</div>
+            ) : (
+              filteredThreads.map((thread) => (
+                <button
+                  key={thread.id}
+                  className={`thread-item ${activeThread?.id === thread.id ? "active" : ""}`}
+                  onClick={() => selectThread(thread.id)}
+                  aria-current={activeThread?.id === thread.id ? "true" : undefined}
+                >
+                  <div className="thread-row">
+                    <div className="thread-title">{thread.title}</div>
+                    {thread.pendingApprovals > 0 && <span className="thread-alert-dot" aria-hidden="true" />}
+                  </div>
+                  <div className="thread-meta">{thread.lastActivity}</div>
+                  <div className="thread-flags">
+                    {thread.messages.length > 0 && <span className="chip">{thread.messages.length} msgs</span>}
+                    {thread.pendingApprovals > 0 && <span className="chip chip-risk">Approvals</span>}
+                    {thread.routineGenerated && <span className="chip">Routine</span>}
+                    {thread.hasProofOutputs && <span className="chip">Proof</span>}
+                  </div>
+                </button>
+              ))
+            )}
           </div>
         </aside>
 
@@ -2649,9 +2897,10 @@ export default function App() {
           <div className="chat-head">
             <div>
               <h2>{activeThread?.title ?? "New conversation"}</h2>
-              <p>
-                {selectedAgentId
-                  ? `Agent: ${backendAgents.find((a) => a.id === selectedAgentId)?.name ?? "Unknown"} • ${backendAgents.find((a) => a.id === selectedAgentId)?.model ?? ""}`
+              <p className="chat-head-subline">
+                <span className={`chat-status-dot ${isSending ? "busy" : activeAgent ? "ok" : "warn"}`} aria-hidden="true" />
+                {activeAgent
+                  ? `${activeAgent.name} • ${activeAgent.model}${activeAgent.skills.length > 0 ? ` • ${activeAgent.skills.length} skills` : ""}`
                   : "No backend agent selected"}
                 {isSending && " • Sending..."}
               </p>
@@ -2661,7 +2910,7 @@ export default function App() {
                 <select
                   value={selectedAgentId ?? ""}
                   onChange={(e) => setSelectedAgentId(e.target.value || null)}
-                  style={{ fontSize: "0.8rem", padding: "4px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--panel-strong)" }}
+                  className="agent-picker"
                 >
                   {backendAgents.map((a) => (
                     <option key={a.id} value={a.id}>{a.icon} {a.name} ({a.model})</option>
@@ -2692,9 +2941,28 @@ export default function App() {
             ) : (
               activeThread.messages.map((message) => (
                 <div key={message.id} className={`bubble ${message.role === "user" ? "bubble-user" : "bubble-assistant"}`}>
+                  <div className="bubble-head">
+                    <span className="bubble-author">
+                      {message.role === "user" ? "You" : (activeAgent?.name ?? "Assistant")}
+                    </span>
+                    <span className="bubble-time">{message.time}</span>
+                  </div>
                   <div className="bubble-text">{message.text}</div>
-                  <div className="bubble-meta">{message.time}</div>
-                  {message.result && (
+                  {message.meta && (
+                    <div className="bubble-chips">
+                      <span className="chip chip-meta">{formatModelLabel(message.meta.model)}</span>
+                      <span className="chip chip-meta">{message.meta.tokenCost.toLocaleString()} tokens</span>
+                      <span className="chip chip-meta">${message.meta.costUsd.toFixed(4)}</span>
+                      <span className="chip chip-meta">{formatDurationLabel(message.meta.durationMs)}</span>
+                      {message.meta.skills.slice(0, 3).map((skill, index) => (
+                        <span key={`${message.id}_${skill}_${index}`} className="chip chip-meta">{skill}</span>
+                      ))}
+                      {message.meta.skills.length > 3 && (
+                        <span className="chip chip-meta">+{message.meta.skills.length - 3}</span>
+                      )}
+                    </div>
+                  )}
+                  {message.result && !message.meta && (
                     <div className="result-card">
                       <span>Result</span>
                       <p>{message.result}</p>
@@ -2931,12 +3199,12 @@ export default function App() {
                             prev.map((account) =>
                               account.id === selectedAccount.id
                                 ? {
-                                    ...account,
-                                    capabilities: {
-                                      ...account.capabilities,
-                                      [key]: !account.capabilities[key],
-                                    },
-                                  }
+                                  ...account,
+                                  capabilities: {
+                                    ...account.capabilities,
+                                    [key]: !account.capabilities[key],
+                                  },
+                                }
                                 : account
                             )
                           )
@@ -2958,9 +3226,9 @@ export default function App() {
                           prev.map((account) =>
                             account.id === selectedAccount.id
                               ? {
-                                  ...account,
-                                  boundaries: { ...account.boundaries, folders: event.target.value },
-                                }
+                                ...account,
+                                boundaries: { ...account.boundaries, folders: event.target.value },
+                              }
                               : account
                           )
                         )
@@ -2976,9 +3244,9 @@ export default function App() {
                           prev.map((account) =>
                             account.id === selectedAccount.id
                               ? {
-                                  ...account,
-                                  boundaries: { ...account.boundaries, recipients: event.target.value },
-                                }
+                                ...account,
+                                boundaries: { ...account.boundaries, recipients: event.target.value },
+                              }
                               : account
                           )
                         )
@@ -2994,9 +3262,9 @@ export default function App() {
                           prev.map((account) =>
                             account.id === selectedAccount.id
                               ? {
-                                  ...account,
-                                  boundaries: { ...account.boundaries, channels: event.target.value },
-                                }
+                                ...account,
+                                boundaries: { ...account.boundaries, channels: event.target.value },
+                              }
                               : account
                           )
                         )
@@ -3142,59 +3410,302 @@ export default function App() {
 
   function renderInspectorContent() {
     if (activeNav !== "chat") {
-      if (activeNav === "automations") {
-        if (!selectedRoutine) {
-          return (
-            <div className="inspector-content">
-              <h3>Routine Inspector</h3>
-              <p>No routine selected.</p>
-            </div>
-          );
-        }
+      if (activeNav === "overview") {
         return (
           <div className="inspector-content">
-            <h3>Routine Inspector</h3>
-            <p>{selectedRoutine.name}</p>
-            <p>{selectedRoutine.scheduleLabel}</p>
-            <p>{selectedRoutine.lastReason}</p>
+            <h3>Quick Status</h3>
+            <div className="row-card" style={{ marginTop: 8 }}>
+              <div>
+                <div className="row-title">{backendHealth ? "Connected" : "Offline"}</div>
+                <div className="row-sub">{backendHealth ? `v${backendHealth.version} · ${Math.floor(backendHealth.uptime_secs / 60)}m uptime` : "Waiting..."}</div>
+              </div>
+            </div>
+            {backendMetrics && (
+              <div style={{ marginTop: 12 }}>
+                <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Today</h4>
+                <div className="row-card">
+                  <div>
+                    <div className="row-title" style={{ fontSize: 16, color: "var(--brand)" }}>${(backendMetrics.today_cost || 0).toFixed(2)}</div>
+                    <div className="row-sub">{((backendMetrics.today_input_tokens ?? 0) + (backendMetrics.today_output_tokens ?? 0)).toLocaleString()} tokens</div>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div style={{ marginTop: 12 }}>
+              <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Resources</h4>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                <span className="chip">{backendAgents.length} agents</span>
+                <span className="chip">{backendChannels.length} channels</span>
+                <span className="chip">{backendPlugins.length} plugins</span>
+                <span className="chip">{backendPeers.length} peers</span>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+
+
+      if (activeNav === "logs") {
+        return (
+          <div className="inspector-content">
+            <h3>Log Viewer</h3>
+            <p style={{ color: "var(--text-soft)", marginTop: 8 }}>
+              Live log stream from all gateway subsystems. Use level filters to focus on warnings and errors.
+            </p>
+            <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 4 }}>
+              <button className="btn subtle" style={{ justifyContent: "flex-start", textAlign: "left" }} onClick={() => pushToast("Log export not available in this context")}>
+                Export Logs
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      if (activeNav === "automations") {
+        // Show the selected pipeline details or a helpful empty state
+        const selectedPipeline = backendPipelines.length > 0 ? backendPipelines[0] : null;
+        return (
+          <div className="inspector-content">
+            <h3>Automation Inspector</h3>
+
+            {selectedPipeline ? (
+              <>
+                <div className="row-card">
+                  <div>
+                    <div className="row-title">{selectedPipeline.name}</div>
+                    <div className="row-sub">{selectedPipeline.description}</div>
+                    <div className="row-sub" style={{ marginTop: 4 }}>
+                      {selectedPipeline.steps.length} steps · {selectedPipeline.edges.length} edges
+                    </div>
+                  </div>
+                </div>
+
+                {/* Pipeline flow visualization */}
+                <div style={{ marginTop: 8 }}>
+                  <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Pipeline Flow</h4>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {selectedPipeline.steps.map((step, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ width: 20, height: 20, borderRadius: "50%", background: step.node_type === "input" ? "var(--brand)" : step.node_type === "output" ? "#22c55e" : "var(--brand-soft)", display: "grid", placeItems: "center", fontSize: 10, color: "#fff", flexShrink: 0 }}>
+                          {i + 1}
+                        </span>
+                        <span style={{ fontSize: 13 }}>{step.label}</span>
+                        <span className="chip" style={{ fontSize: 10 }}>{step.node_type}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p style={{ color: "var(--text-soft)" }}>No pipelines yet. Create one from a template or design your own.</p>
+            )}
+
+            {/* Routine run history */}
+            {selectedRoutine && (
+              <div style={{ marginTop: 12 }}>
+                <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Run History</h4>
+                <div className="row-card">
+                  <div>
+                    <div className="row-title">{selectedRoutine.name}</div>
+                    <div className="row-sub">
+                      {selectedRoutine.enabled ? "✅ Enabled" : "⏸ Disabled"} · {selectedRoutine.scheduleLabel}
+                    </div>
+                    <div className="row-sub">
+                      Next: {selectedRoutine.nextRun} · Last: {selectedRoutine.lastResult}
+                    </div>
+                  </div>
+                </div>
+                {selectedRoutine.history.length > 0 ? (
+                  selectedRoutine.history.slice(0, 5).map((h, i) => (
+                    <div key={i} className="row-card" style={{ marginTop: 4 }}>
+                      <div>
+                        <div className="row-sub">
+                          <span className={`chip ${h.result === "ok" ? "" : "chip-risk"}`}>{h.result}</span>
+                          {" "}{h.at}
+                        </div>
+                        <div className="row-sub">{h.reason}</div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p style={{ fontSize: 12, color: "var(--text-soft)", marginTop: 4 }}>No runs yet.</p>
+                )}
+              </div>
+            )}
+
+            {/* Quick actions */}
+            <div style={{ marginTop: 12 }}>
+              <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Quick Actions</h4>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <button className="btn subtle" style={{ justifyContent: "flex-start", textAlign: "left" }} onClick={() => api.listPipelines().then((p) => setBackendPipelines(p)).catch(() => { })}>
+                  🔄 Refresh Pipelines
+                </button>
+                <button className="btn subtle" style={{ justifyContent: "flex-start", textAlign: "left" }} onClick={() => pushToast("Viewing pipeline logs...")}>
+                  📋 View Logs
+                </button>
+              </div>
+            </div>
           </div>
         );
       }
 
       if (activeNav === "settings") {
-        if (!selectedAccount) {
-          return (
-            <div className="inspector-content">
-              <h3>Account Inspector</h3>
-              <p>No account selected.</p>
-            </div>
-          );
-        }
+        const provider = window.localStorage.getItem("clawdesk.provider") || "—";
+        const model = window.localStorage.getItem("clawdesk.model") || "—";
+        const apiConfigured = window.localStorage.getItem("clawdesk.api_key.configured") === "1";
         return (
           <div className="inspector-content">
-            <h3>Account Inspector</h3>
-            <p>{selectedAccount.name}</p>
-            <p>{accountStatusLabel(selectedAccount.status)}</p>
-            <p>Last used: {selectedAccount.lastUsed}</p>
+            <h3>System Overview</h3>
+
+            {/* Connection status */}
+            <div className="row-card" style={{ marginTop: 8 }}>
+              <div>
+                <div className="row-title">
+                  {backendHealth ? "✅ Connected" : "⏳ Connecting..."}
+                </div>
+                <div className="row-sub">
+                  {backendHealth
+                    ? `v${backendHealth.version} · Uptime: ${Math.floor(backendHealth.uptime_secs / 60)}m`
+                    : "Waiting for backend..."}
+                </div>
+              </div>
+            </div>
+
+            {/* Config summary */}
+            <div style={{ marginTop: 12 }}>
+              <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Configuration</h4>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div className="row-card">
+                  <div>
+                    <div className="row-sub">Provider</div>
+                    <div className="row-title" style={{ fontSize: 13 }}>{provider}</div>
+                  </div>
+                </div>
+                <div className="row-card">
+                  <div>
+                    <div className="row-sub">Model</div>
+                    <div className="row-title" style={{ fontSize: 13 }}>{model}</div>
+                  </div>
+                </div>
+                <div className="row-card">
+                  <div>
+                    <div className="row-sub">API Key</div>
+                    <div className="row-title" style={{ fontSize: 13 }}>{apiConfigured ? "✅ Configured" : "⚠️ Not set"}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Resources */}
+            <div style={{ marginTop: 12 }}>
+              <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Resources</h4>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div className="row-card">
+                  <div>
+                    <div className="row-sub">Agents</div>
+                    <div className="row-title" style={{ fontSize: 13 }}>{backendAgents.length}</div>
+                  </div>
+                </div>
+                <div className="row-card">
+                  <div>
+                    <div className="row-sub">Channels</div>
+                    <div className="row-title" style={{ fontSize: 13 }}>{backendChannels.length}</div>
+                  </div>
+                </div>
+                <div className="row-card">
+                  <div>
+                    <div className="row-sub">Plugins</div>
+                    <div className="row-title" style={{ fontSize: 13 }}>{backendPlugins.length}</div>
+                  </div>
+                </div>
+                <div className="row-card">
+                  <div>
+                    <div className="row-sub">Peers</div>
+                    <div className="row-title" style={{ fontSize: 13 }}>{backendPeers.length}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Cost today */}
+            {backendMetrics && (
+              <div style={{ marginTop: 12 }}>
+                <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Usage Today</h4>
+                <div className="row-card">
+                  <div>
+                    <div className="row-title" style={{ fontSize: 16, color: "var(--brand)" }}>
+                      ${(backendMetrics.today_cost || 0).toFixed(2)}
+                    </div>
+                    <div className="row-sub">
+                      {(backendMetrics.today_input_tokens ?? 0).toLocaleString()} in / {(backendMetrics.today_output_tokens ?? 0).toLocaleString()} out
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Security */}
+            {backendSecurity && (
+              <div style={{ marginTop: 12 }}>
+                <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Security</h4>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  <span className="chip">{backendSecurity.auth_mode}</span>
+                  <span className="chip">{backendSecurity.tunnel_active ? "Tunnel ✅" : "Tunnel off"}</span>
+                  <span className="chip">{backendSecurity.identity_contracts} contracts</span>
+                  <span className="chip">{backendSecurity.scanner_patterns} scan patterns</span>
+                </div>
+              </div>
+            )}
           </div>
         );
       }
 
       if (activeNav === "skills") {
-        if (!selectedRecipe) {
-          return (
-            <div className="inspector-content">
-              <h3>Recipe Inspector</h3>
-              <p>No recipe selected.</p>
-            </div>
-          );
-        }
         return (
           <div className="inspector-content">
-            <h3>Recipe Inspector</h3>
-            <p>{selectedRecipe.name}</p>
-            <p>{selectedRecipe.provenance}</p>
-            <p>{selectedRecipe.restrictedMode ? "Restricted mode ON" : "Restricted mode OFF"}</p>
+            <h3>Skills Overview</h3>
+
+            <div style={{ marginTop: 8 }}>
+              <div className="row-card">
+                <div>
+                  <div className="row-title">{backendSkills.length} Skills Loaded</div>
+                  <div className="row-sub">
+                    {backendSkills.filter((s) => s.verified).length} builtin · {backendSkills.filter((s) => !s.verified).length} custom
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {selectedRecipe && (
+              <div style={{ marginTop: 12 }}>
+                <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Selected Recipe</h4>
+                <div className="row-card">
+                  <div>
+                    <div className="row-title">{selectedRecipe.name}</div>
+                    <div className="row-sub">{String(selectedRecipe.provenance)}</div>
+                    <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      {selectedRecipe.permissions.map((p) => (
+                        <span key={p} className="chip">{p}</span>
+                      ))}
+                      <span className={`chip ${selectedRecipe.restrictedMode ? "" : "chip-risk"}`}>
+                        {selectedRecipe.restrictedMode ? "🔒 Restricted" : "⚡ Full access"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Skill categories */}
+            <div style={{ marginTop: 12 }}>
+              <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-soft)", marginBottom: 6 }}>Quick Actions</h4>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <button className="btn subtle" style={{ justifyContent: "flex-start", textAlign: "left" }} onClick={() => api.listSkills().then((s) => setBackendSkills(s)).catch(() => { })}>
+                  🔄 Refresh Skills
+                </button>
+              </div>
+            </div>
           </div>
         );
       }
@@ -3301,7 +3812,7 @@ export default function App() {
 
               <div className="plan-actions">
                 <button className="btn primary" onClick={() => setInspectorTab("plan")}>Preview</button>
-                <button className="btn primary" onClick={runStepByStep}>Run step-by-step</button>
+                <button className="btn subtle" onClick={runStepByStep}>Run step-by-step</button>
                 <button className="btn subtle" onClick={runAll}>Run all</button>
                 <button className="btn ghost" onClick={() => pushToast("Plan canceled.")}>Cancel</button>
               </div>
@@ -3397,7 +3908,7 @@ export default function App() {
                     </div>
                     {backendTraceRun.cost_millicents != null && backendTraceRun.cost_millicents > 0 && (
                       <div className="row-sub">
-                        Cost: ${(backendTraceRun.cost_millicents / 100000).toFixed(4)}
+                        Cost: {((backendTraceRun.cost_millicents || 0) / 100000).toFixed(4)}
                       </div>
                     )}
                   </div>
@@ -3440,7 +3951,7 @@ export default function App() {
                   </div>
                 </div>
                 <button className="btn subtle" onClick={() => {
-                  api.getMemoryStats().then((s) => setBackendMemoryStats(s)).catch(() => {});
+                  api.getMemoryStats().then((s) => setBackendMemoryStats(s)).catch(() => { });
                 }}>Refresh</button>
               </div>
             )}
@@ -3454,7 +3965,7 @@ export default function App() {
                         {(hit.content ?? "").length > 120 ? `${(hit.content ?? "").slice(0, 120)}...` : hit.content ?? "No content"}
                       </div>
                       <div className="row-sub">
-                        Score: {hit.score.toFixed(3)}
+                        Score: {(hit.score || 0).toFixed(3)}
                         {hit.source && ` • source: ${hit.source}`}
                         {hit.timestamp && ` • ${hit.timestamp}`}
                       </div>
@@ -3487,7 +3998,7 @@ export default function App() {
                       <div className="row-sub">Type: {node.node_type}</div>
                     </div>
                     <button className="btn subtle" onClick={() => {
-                      api.graphGetEdges(node.id).then((edges) => setBackendGraphEdges(edges)).catch(() => {});
+                      api.graphGetEdges(node.id).then((edges) => setBackendGraphEdges(edges)).catch(() => { });
                     }}>Edges</button>
                   </div>
                 ))}
@@ -3510,10 +4021,10 @@ export default function App() {
             )}
             <div className="row-actions" style={{ marginTop: 12 }}>
               <button className="btn subtle" onClick={() => {
-                api.graphGetNodesByType("agent", 20).then((n) => setBackendGraphNodes(n)).catch(() => {});
+                api.graphGetNodesByType("agent", 20).then((n) => setBackendGraphNodes(n)).catch(() => { });
               }}>Load Agent Nodes</button>
               <button className="btn subtle" onClick={() => {
-                api.graphGetNodesByType("message", 20).then((n) => setBackendGraphNodes(n)).catch(() => {});
+                api.graphGetNodesByType("message", 20).then((n) => setBackendGraphNodes(n)).catch(() => { });
               }}>Load Message Nodes</button>
             </div>
           </div>
@@ -3539,26 +4050,41 @@ export default function App() {
   }
 
   return (
-    <div>
+    <div style={{ width: "100%", height: "100%", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+      {/* Persistence health warning banner */}
+      {backendHealth && !backendHealth.storage_healthy && (
+        <div
+          style={{
+            background: "#b91c1c",
+            color: "#fff",
+            padding: "6px 16px",
+            fontSize: 13,
+            fontWeight: 500,
+            textAlign: "center",
+            flexShrink: 0,
+            zIndex: 9999,
+          }}
+        >
+          ⚠ Storage is running in ephemeral mode — your chat history will NOT survive a restart.
+          Check disk permissions for <code style={{ background: "rgba(0,0,0,0.2)", padding: "1px 4px", borderRadius: 3 }}>~/.clawdesk/sochdb/</code>
+        </div>
+      )}
       <AppShell
         sidebarCollapsed={sidebarCollapsed}
         compactSidebar={compactSidebar}
         activeNav={activeNav}
+        navGroups={NAV_GROUPS}
         navItems={NAV_ITEMS}
         onNavigate={navigate}
         onToggleSidebar={() => setIsSidebarCollapsed((prev) => !prev)}
         onOpenPalette={() => setPaletteOpen(true)}
-        status={status}
-        onToggleStatus={() => setStatusPopoverOpen((prev) => !prev)}
-        safeMode={safeMode}
-        onToggleSafeMode={() => setSafeMode((prev) => !prev)}
-        onOpenApprovals={() => setApprovalsInboxOpen(true)}
-        approvalCount={pendingApprovals.length}
         onOpenSettings={() => navigate("settings")}
-        showSafeModeBanner={!safeMode}
         inspector={renderInspectorContent()}
         drawerAsModal={drawerAsModal}
         onOpenInspectorModal={() => setInspectorModalOpen(true)}
+        inspectorOpen={inspectorOpen}
+        onToggleInspector={() => setInspectorOpen((prev) => !prev)}
+        onToggleTerminal={() => setShowTerminal((prev) => !prev)}
       >
         {activeNav === "chat" && (
           <ChatPage
@@ -3568,22 +4094,47 @@ export default function App() {
             onSelectAgent={setSelectedAgentId}
             onCreateAgent={(t) => createBackendAgent(t)}
             pushToast={pushToast}
+            showTerminal={showTerminal}
+            setShowTerminal={setShowTerminal}
           />
         )}
+        {activeNav === "overview" && (
+          <OverviewPage
+            health={backendHealth}
+            agents={backendAgents}
+            channels={backendChannels}
+            security={backendSecurity}
+            metrics={backendMetrics}
+            observability={backendObservability}
+            plugins={backendPlugins}
+            peers={backendPeers}
+            pushToast={pushToast}
+          />
+        )}
+
+        {activeNav === "a2a" && (
+          <A2APage pushToast={pushToast} />
+        )}
+
+        {activeNav === "runtime" && (
+          <RuntimePage pushToast={pushToast} />
+        )}
+
         {activeNav === "skills" && (
           <SkillsPage
             skills={backendSkills}
-            onRefreshSkills={() => api.listSkills().then((s) => setBackendSkills(s)).catch(() => {})}
+            onRefreshSkills={() => api.listSkills().then((s) => setBackendSkills(s)).catch(() => { })}
             pushToast={pushToast}
           />
         )}
         {activeNav === "automations" && (
           <AutomationsPage
             pipelines={backendPipelines}
-            onRefreshPipelines={() => api.listPipelines().then((p) => setBackendPipelines(p)).catch(() => {})}
+            onRefreshPipelines={() => api.listPipelines().then((p) => setBackendPipelines(p)).catch(() => { })}
             pushToast={pushToast}
           />
         )}
+
         {activeNav === "settings" && (
           <SettingsPage
             agents={backendAgents}
@@ -3597,9 +4148,15 @@ export default function App() {
             authProfiles={backendAuthProfiles}
             onCreateAgent={(t) => createBackendAgent(t)}
             onDeleteAgent={(id) => deleteBackendAgent(id)}
-            onRefreshChannels={() => api.listChannels().then((c) => setBackendChannels(c)).catch(() => {})}
-            onRefreshPlugins={() => api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => {})}
-            onRefreshPeers={() => api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => {})}
+            onRefreshChannels={() => api.listChannels().then((c) => setBackendChannels(c)).catch(() => { })}
+            onRefreshPlugins={() => api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => { })}
+            onRefreshPeers={() => api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => { })}
+            onResetOnboarding={resetOnboarding}
+            pushToast={pushToast}
+          />
+        )}
+        {activeNav === "logs" && (
+          <LogsPage
             pushToast={pushToast}
           />
         )}
@@ -3871,6 +4428,8 @@ export default function App() {
       <OnboardingWizard
         open={onboardingOpen}
         health={backendHealth}
+        skills={backendSkills}
+        channels={backendChannels}
         onComplete={completeOnboarding}
       />
 

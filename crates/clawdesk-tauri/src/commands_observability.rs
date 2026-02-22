@@ -1,4 +1,4 @@
-//! Observability commands — config + metrics (Task 19).
+//! Observability commands — config + metrics.
 
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};

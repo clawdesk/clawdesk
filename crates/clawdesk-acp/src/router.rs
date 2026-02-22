@@ -25,6 +25,7 @@ use rustc_hash::FxHashMap;
 use tracing::{debug, info};
 
 /// Agent directory — registry of known agents and their cards.
+#[derive(Clone)]
 pub struct AgentDirectory {
     pub(crate) agents: FxHashMap<String, AgentEntry>,
 }

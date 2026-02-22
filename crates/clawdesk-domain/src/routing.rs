@@ -62,6 +62,96 @@ pub fn route_message(
     }
 }
 
+// ── GAP-4: Channel binding resolver ──────────────────────────
+
+/// A channel binding entry describing which agent handles messages
+/// for a specific channel/account/group/thread combination.
+#[derive(Debug, Clone)]
+pub struct ChannelBindingEntry {
+    /// Agent ID that owns this binding.
+    pub agent_id: String,
+    /// Channel type (e.g., "telegram", "slack", "discord").
+    pub channel: String,
+    /// Account/workspace identifier.
+    pub account: String,
+    /// Optional group filter (e.g., Telegram group chat ID).
+    pub group: Option<String>,
+    /// Optional thread filter.
+    pub thread: Option<String>,
+}
+
+impl ChannelBindingEntry {
+    /// Compute binding specificity — more specific bindings win.
+    /// Score: 1 point each for channel, account (always present),
+    /// +1 for group, +1 for thread.
+    pub fn specificity(&self) -> usize {
+        let mut score = 2; // channel + account always present
+        if self.group.is_some() {
+            score += 1;
+        }
+        if self.thread.is_some() {
+            score += 1;
+        }
+        score
+    }
+
+    /// Check whether this binding matches an inbound message's channel
+    /// and session key.
+    pub fn matches(&self, channel: ChannelId, session_identifier: &str) -> bool {
+        // Channel name must match (case-insensitive)
+        let channel_str = format!("{}", channel);
+        if !self.channel.eq_ignore_ascii_case(&channel_str) {
+            return false;
+        }
+
+        // Account must be a substring of the session identifier
+        // (e.g., account "mybot" matches session "mybot:123")
+        if !session_identifier.contains(&self.account) {
+            return false;
+        }
+
+        // Group filter: if set, must appear in the session identifier
+        if let Some(ref group) = self.group {
+            if !session_identifier.contains(group.as_str()) {
+                return false;
+            }
+        }
+
+        // Thread filter: if set, must appear in the session identifier
+        if let Some(ref thread) = self.thread {
+            if !session_identifier.contains(thread.as_str()) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+/// Resolve which agent should handle a message based on channel bindings.
+///
+/// Evaluates all bindings against the message's channel and session key,
+/// returning the agent_id of the most specific match. If no binding
+/// matches, returns `None` (the caller should fall back to default routing).
+pub fn resolve_binding(
+    bindings: &[ChannelBindingEntry],
+    channel: ChannelId,
+    session_identifier: &str,
+) -> Option<String> {
+    let mut best: Option<(&ChannelBindingEntry, usize)> = None;
+
+    for binding in bindings {
+        if binding.matches(channel, session_identifier) {
+            let spec = binding.specificity();
+            if best.as_ref().map_or(true, |(_, best_spec)| spec > *best_spec) {
+                best = Some((binding, spec));
+            }
+        }
+    }
+
+    best.map(|(b, _)| b.agent_id.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +196,64 @@ mod tests {
         };
         let decision = route_message(&msg, &config);
         assert!(matches!(decision, RoutingDecision::Drop { .. }));
+    }
+
+    #[test]
+    fn test_binding_resolver_exact_match() {
+        let bindings = vec![
+            ChannelBindingEntry {
+                agent_id: "agent-a".into(),
+                channel: "telegram".into(),
+                account: "mybot".into(),
+                group: None,
+                thread: None,
+            },
+            ChannelBindingEntry {
+                agent_id: "agent-b".into(),
+                channel: "discord".into(),
+                account: "server1".into(),
+                group: Some("general".into()),
+                thread: None,
+            },
+        ];
+        let result = resolve_binding(&bindings, ChannelId::Telegram, "mybot:123");
+        assert_eq!(result, Some("agent-a".to_string()));
+    }
+
+    #[test]
+    fn test_binding_resolver_most_specific_wins() {
+        let bindings = vec![
+            ChannelBindingEntry {
+                agent_id: "generic".into(),
+                channel: "telegram".into(),
+                account: "bot".into(),
+                group: None,
+                thread: None,
+            },
+            ChannelBindingEntry {
+                agent_id: "specific".into(),
+                channel: "telegram".into(),
+                account: "bot".into(),
+                group: Some("vip".into()),
+                thread: None,
+            },
+        ];
+        let result = resolve_binding(&bindings, ChannelId::Telegram, "bot:vip:456");
+        assert_eq!(result, Some("specific".to_string()));
+    }
+
+    #[test]
+    fn test_binding_resolver_no_match() {
+        let bindings = vec![
+            ChannelBindingEntry {
+                agent_id: "agent-a".into(),
+                channel: "slack".into(),
+                account: "workspace1".into(),
+                group: None,
+                thread: None,
+            },
+        ];
+        let result = resolve_binding(&bindings, ChannelId::Telegram, "mybot:123");
+        assert_eq!(result, None);
     }
 }

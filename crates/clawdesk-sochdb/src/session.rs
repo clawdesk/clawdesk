@@ -19,7 +19,7 @@ impl SessionStore for SochStore {
         let path = format!("sessions/{}/state", key.as_str());
         debug!(%path, "loading session");
 
-        match self.db.get(path.as_bytes()) {
+        match self.get(&path) {
             Ok(Some(bytes)) => {
                 let session: Session =
                     serde_json::from_slice(&bytes).map_err(|e| StorageError::SerializationFailed {
@@ -28,9 +28,7 @@ impl SessionStore for SochStore {
                 Ok(Some(session))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(StorageError::OpenFailed {
-                detail: e.to_string(),
-            }),
+            Err(e) => Err(e),
         }
     }
 
@@ -40,11 +38,7 @@ impl SessionStore for SochStore {
             detail: e.to_string(),
         })?;
 
-        self.db
-            .put(path.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put(&path, &bytes)?;
 
         debug!(%path, "session saved");
         Ok(())
@@ -57,17 +51,12 @@ impl SessionStore for SochStore {
         // Scan all session keys — only process `/state` entries to avoid
         // deserializing messages, summaries, and other session sub-keys.
         let results = self
-            .db
-            .scan(b"sessions/")
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan("sessions/")?;
 
         let mut summaries = Vec::new();
         for (key, value) in &results {
             // Only process session state entries (sessions/{id}/state).
-            let key_str = String::from_utf8_lossy(key);
-            if !key_str.ends_with("/state") {
+            if !key.ends_with("/state") {
                 continue;
             }
             if let Ok(session) = serde_json::from_slice::<Session>(value) {
@@ -87,7 +76,7 @@ impl SessionStore for SochStore {
 
     async fn delete_session(&self, key: &SessionKey) -> Result<bool, StorageError> {
         let path = format!("sessions/{}/state", key.as_str());
-        match self.db.delete(path.as_bytes()) {
+        match self.delete(&path) {
             Ok(()) => Ok(true),
             Err(e) => {
                 warn!(%path, error = %e, "failed to delete session");

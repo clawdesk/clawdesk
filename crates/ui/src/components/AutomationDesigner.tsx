@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import * as api from "../api";
 import type { PipelineDescriptor, PipelineNodeDescriptor } from "../types";
 import { Icon } from "./Icon";
@@ -39,6 +39,29 @@ function makeStepId() {
   return `step_${++stepCounter}_${Date.now().toString(36)}`;
 }
 
+/** Map a backend PipelineNodeDescriptor to a designer PipelineStep */
+function nodeToStep(node: PipelineNodeDescriptor): PipelineStep {
+  const kind: PipelineStep["kind"] =
+    node.node_type === "agent" ? "prompt"
+    : node.node_type === "gate" ? "condition"
+    : node.node_type === "parallel" ? "loop"
+    : node.node_type === "input" ? "prompt"
+    : "tool";
+  const defaultConfig: Record<string, string> =
+    kind === "prompt" ? { prompt: "" }
+    : kind === "condition" ? { expression: "", thenLabel: "Yes", elseLabel: "No" }
+    : kind === "loop" ? { count: "3", condition: "" }
+    : { tool: "", args: "{}" };
+  return { id: makeStepId(), name: node.label, kind, config: defaultConfig };
+}
+
+/** Convert existing pipeline steps, skipping Input/Output bookend nodes */
+function loadExistingSteps(pipeline: PipelineDescriptor): PipelineStep[] {
+  return pipeline.steps
+    .filter((s) => s.node_type !== "input" && s.node_type !== "output")
+    .map(nodeToStep);
+}
+
 // ── Props ─────────────────────────────────────────────────────
 
 export interface AutomationDesignerProps {
@@ -59,22 +82,28 @@ export function AutomationDesigner({
   const [tab, setTab] = useState<DesignerTab>("steps");
   const [name, setName] = useState(existingPipeline?.name ?? "");
   const [description, setDescription] = useState(existingPipeline?.description ?? "");
-  const [steps, setSteps] = useState<PipelineStep[]>([]);
+  const [steps, setSteps] = useState<PipelineStep[]>(
+    existingPipeline ? loadExistingSteps(existingPipeline) : []
+  );
   const [schedule, setSchedule] = useState("0 9 * * *");
   const [scheduleDays, setScheduleDays] = useState<boolean[]>([false, true, true, true, true, true, false]);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [testLog, setTestLog] = useState<string[]>([]);
   const [selectedStepIdx, setSelectedStepIdx] = useState<number | null>(null);
+  const [lastAddedId, setLastAddedId] = useState<string | null>(null);
+  const [dragOverCanvas, setDragOverCanvas] = useState(false);
+  const stepsListRef = useRef<HTMLDivElement>(null);
 
   // ── Step management ───────────────────────────────────────
 
   const addStep = useCallback((kind: PipelineStep["kind"]) => {
     const meta = STEP_KINDS.find((s) => s.kind === kind)!;
+    const id = makeStepId();
     setSteps((prev) => [
       ...prev,
       {
-        id: makeStepId(),
+        id,
         name: meta.label,
         kind,
         config: kind === "prompt" ? { prompt: "" }
@@ -85,6 +114,16 @@ export function AutomationDesigner({
           : { url: "", method: "POST", body: "{}" },
       },
     ]);
+    setLastAddedId(id);
+    setSelectedStepIdx(null);
+    // Clear highlight after animation
+    setTimeout(() => setLastAddedId(null), 800);
+    // Scroll to bottom of steps list
+    setTimeout(() => {
+      if (stepsListRef.current) {
+        stepsListRef.current.scrollTop = stepsListRef.current.scrollHeight;
+      }
+    }, 50);
   }, []);
 
   const removeStep = useCallback((idx: number) => {
@@ -244,8 +283,18 @@ export function AutomationDesigner({
               {/* Step palette */}
               <div className="automation-step-palette">
                 <h4>Add Step</h4>
+                <p style={{ fontSize: 11, color: "var(--text-soft)", marginBottom: 4 }}>Click or drag to canvas →</p>
                 {STEP_KINDS.map((sk) => (
-                  <button key={sk.kind} className="automation-step-kind-btn" onClick={() => addStep(sk.kind)}>
+                  <button
+                    key={sk.kind}
+                    className="automation-step-kind-btn"
+                    onClick={() => addStep(sk.kind)}
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData("application/x-step-kind", sk.kind);
+                      e.dataTransfer.effectAllowed = "copy";
+                    }}
+                  >
                     <span className="automation-step-kind-icon">{sk.icon}</span>
                     <div>
                       <div className="automation-step-kind-label">{sk.label}</div>
@@ -255,18 +304,35 @@ export function AutomationDesigner({
                 ))}
               </div>
 
-              {/* Steps list */}
-              <div className="automation-steps-list">
+              {/* Steps list / drop target */}
+              <div
+                className={`automation-steps-list${dragOverCanvas ? " drag-over" : ""}`}
+                ref={stepsListRef}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "copy";
+                  setDragOverCanvas(true);
+                }}
+                onDragLeave={() => setDragOverCanvas(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOverCanvas(false);
+                  const kind = e.dataTransfer.getData("application/x-step-kind") as PipelineStep["kind"];
+                  if (kind) addStep(kind);
+                }}
+              >
                 {steps.length === 0 ? (
-                  <div className="empty-state centered">
-                    <p>No steps yet. Add steps from the palette on the left.</p>
+                  <div className={`automation-empty-canvas${dragOverCanvas ? " drag-over" : ""}`}>
+                    <div className="automation-empty-icon">📋</div>
+                    <p>No steps yet</p>
+                    <p className="automation-empty-hint">Click a step type on the left, or drag it here</p>
                   </div>
                 ) : (
                   steps.map((step, idx) => (
                     <div
                       key={step.id}
-                      className={`automation-step-card${selectedStepIdx === idx ? " selected" : ""}`}
-                      onClick={() => setSelectedStepIdx(idx)}
+                      className={`automation-step-card${selectedStepIdx === idx ? " selected" : ""}${lastAddedId === step.id ? " just-added" : ""}`}
+                      onClick={() => setSelectedStepIdx(selectedStepIdx === idx ? null : idx)}
                     >
                       <div className="automation-step-card-header">
                         <span className="automation-step-card-num">{idx + 1}</span>

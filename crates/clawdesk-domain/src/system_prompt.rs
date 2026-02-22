@@ -149,6 +149,64 @@ impl SystemPromptBuilder {
         })
     }
 
+    /// Add memory usage directive — behavioral instructions for memory tools.
+    ///
+    /// Instructs the LLM when and how to use `memory_search` and `memory_store`:
+    /// - Search before answering about prior context, decisions, preferences
+    /// - Store important facts, outcomes, and user preferences proactively
+    /// - Cite memory recall results when used
+    ///
+    /// ~120 tokens, High priority (ensures directive is included alongside skills).
+    pub fn memory_directive(&mut self) -> &mut Self {
+        let content = "\
+## Memory Protocol
+
+You have access to persistent memory via two tools:
+
+**memory_search(query, max_results)** — Search stored memories.
+  • Use BEFORE answering questions about: prior conversations, user preferences, past decisions, project history, or anything discussed previously.
+  • If results are returned, incorporate them into your response.
+  • If no results found and you're uncertain, say so rather than guessing.
+
+**memory_store(content, tags)** — Save information for future recall.
+  • Store: user preferences, key decisions, project context, important facts, task outcomes.
+  • Write self-contained entries — include enough context to be useful when recalled later.
+  • Tag entries for categorization (e.g. \"preference\", \"decision\", \"project:name\").
+  • Do NOT store trivial or ephemeral information.";
+
+        self.add_section(PromptSection {
+            name: "memory_directive".into(),
+            content: content.to_string(),
+            priority: SectionPriority::High,
+            estimated_tokens: 120,
+        })
+    }
+
+    /// Add skill selection protocol — instructs the LLM how to choose skills.
+    ///
+    /// Tells the LLM to scan the skill inventory, select the most specific match,
+    /// and follow that skill's instructions when handling a request.
+    ///
+    /// ~80 tokens, High priority.
+    pub fn skill_protocol(&mut self) -> &mut Self {
+        let content = "\
+## Skill Selection Protocol
+
+When handling a request:
+1. Scan <skill_inventory> for skills whose triggers match the user's intent.
+2. If a matching skill is found, follow its instructions precisely.
+3. Prefer the most specific skill over general-purpose ones.
+4. If multiple skills match, pick the one with the highest relevance to the exact request.
+5. If no skill matches, respond using your general knowledge and available tools.";
+
+        self.add_section(PromptSection {
+            name: "skill_protocol".into(),
+            content: content.to_string(),
+            priority: SectionPriority::High,
+            estimated_tokens: 80,
+        })
+    }
+
     /// Build the system prompt within token budget.
     ///
     /// Uses greedy knapsack: sort by priority/size ratio (descending),

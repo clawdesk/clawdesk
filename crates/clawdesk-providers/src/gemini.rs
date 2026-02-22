@@ -125,21 +125,54 @@ impl GeminiProvider {
             })
         });
 
-        let contents: Vec<serde_json::Value> = messages
-            .iter()
-            .map(|m| {
-                let role = match m.role {
-                    MessageRole::User => "user",
-                    MessageRole::Assistant => "model",
-                    MessageRole::System => "user", // Gemini handles system separately.
-                    MessageRole::Tool => "function",
-                };
-                serde_json::json!({
-                    "role": role,
-                    "parts": [{ "text": m.content.to_string() }]
-                })
-            })
-            .collect();
+        let mut contents: Vec<serde_json::Value> = Vec::new();
+        let mut current_role = String::new();
+        let mut current_parts: Vec<serde_json::Value> = Vec::new();
+
+        for m in messages {
+            let role = match m.role {
+                MessageRole::Assistant => "model",
+                _ => "user", // Encode System, User, and Tool as 'user' for Gemini to satisfy alternating turns
+            };
+
+            let text = if m.role == MessageRole::Tool {
+                let content_str = m.content.to_string();
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content_str) {
+                    if let (Some(name), Some(content)) = (
+                        val.get("name").and_then(|n| n.as_str()),
+                        val.get("content").and_then(|c| c.as_str()),
+                    ) {
+                        format!("Tool '{}' returned:\n{}", name, content)
+                    } else {
+                        content_str
+                    }
+                } else {
+                    content_str
+                }
+            } else {
+                m.content.to_string()
+            };
+
+            if role == current_role {
+                current_parts.push(serde_json::json!({ "text": text }));
+            } else {
+                if !current_role.is_empty() {
+                    contents.push(serde_json::json!({
+                        "role": current_role,
+                        "parts": current_parts
+                    }));
+                }
+                current_role = role.to_string();
+                current_parts = vec![serde_json::json!({ "text": text })];
+            }
+        }
+
+        if !current_role.is_empty() {
+            contents.push(serde_json::json!({
+                "role": current_role,
+                "parts": current_parts
+            }));
+        }
 
         (system_instruction, contents)
     }
@@ -158,7 +191,8 @@ struct GeminiResponse {
 
 #[derive(Debug, Deserialize)]
 struct GeminiCandidate {
-    content: GeminiContent,
+    #[serde(default)]
+    content: Option<GeminiContent>,
     #[serde(rename = "finishReason")]
     finish_reason: Option<String>,
 }
@@ -303,25 +337,30 @@ impl Provider for GeminiProvider {
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
 
-        for part in &candidate.content.parts {
-            if let Some(ref text) = part.text {
-                text_parts.push(text.clone());
-            }
-            if let Some(ref fc) = part.function_call {
-                tool_calls.push(ToolCall {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name: fc.name.clone(),
-                    arguments: fc.args.clone(),
-                });
+        if let Some(content) = &candidate.content {
+            for part in &content.parts {
+                if let Some(ref text) = part.text {
+                    text_parts.push(text.clone());
+                }
+                if let Some(ref fc) = part.function_call {
+                    tool_calls.push(ToolCall {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: fc.name.clone(),
+                        arguments: fc.args.clone(),
+                    });
+                }
             }
         }
 
-        let finish_reason = match candidate.finish_reason.as_deref() {
+        let mut finish_reason = match candidate.finish_reason.as_deref() {
             Some("STOP") => FinishReason::Stop,
             Some("MAX_TOKENS") => FinishReason::MaxTokens,
             Some("SAFETY") => FinishReason::ContentFilter,
             _ => FinishReason::Stop,
         };
+        if !tool_calls.is_empty() {
+            finish_reason = FinishReason::ToolUse;
+        }
 
         let usage = api_response.usage_metadata.unwrap_or(GeminiUsage {
             prompt_token_count: None,
@@ -414,33 +453,59 @@ impl Provider for GeminiProvider {
 
                 if let Some(candidates) = chunk_json.candidates {
                     for candidate in &candidates {
-                        for part in &candidate.content.parts {
-                            if let Some(ref text) = part.text {
-                                let is_done = candidate.finish_reason.is_some();
-                                let usage = if is_done {
-                                    chunk_json.usage_metadata.as_ref().map(|u| TokenUsage {
-                                        input_tokens: u.prompt_token_count.unwrap_or(0),
-                                        output_tokens: u.candidates_token_count.unwrap_or(0),
-                                        cache_read_tokens: None,
-                                        cache_write_tokens: None,
-                                    })
-                                } else {
-                                    None
-                                };
+                        let is_done = candidate.finish_reason.is_some();
+                        let usage = if is_done {
+                            chunk_json.usage_metadata.as_ref().map(|u| TokenUsage {
+                                input_tokens: u.prompt_token_count.unwrap_or(0),
+                                output_tokens: u.candidates_token_count.unwrap_or(0),
+                                cache_read_tokens: None,
+                                cache_write_tokens: None,
+                            })
+                        } else {
+                            None
+                        };
 
-                                let _ = chunk_tx
-                                    .send(StreamChunk {
-                                        delta: text.clone(),
-                                        done: is_done,
-                                        finish_reason: if is_done {
-                                            Some(FinishReason::Stop)
-                                        } else {
-                                            None
-                                        },
-                                        usage,
-                                    })
-                                    .await;
+                        let mut text_parts = String::new();
+                        let mut tool_calls = Vec::new();
+
+                        if let Some(ref content) = candidate.content {
+                            for part in &content.parts {
+                                if let Some(ref text) = part.text {
+                                    text_parts.push_str(text);
+                                }
+                                if let Some(ref fc) = part.function_call {
+                                    tool_calls.push(ToolCall {
+                                        id: uuid::Uuid::new_v4().to_string(),
+                                        name: fc.name.clone(),
+                                        arguments: fc.args.clone(),
+                                    });
+                                }
                             }
+                        }
+
+                        let mut finish_reason = None;
+                        if is_done {
+                            finish_reason = match candidate.finish_reason.as_deref() {
+                                Some("STOP") => Some(FinishReason::Stop),
+                                Some("MAX_TOKENS") => Some(FinishReason::MaxTokens),
+                                Some("SAFETY") => Some(FinishReason::ContentFilter),
+                                _ => Some(FinishReason::Stop),
+                            };
+                            if !tool_calls.is_empty() {
+                                finish_reason = Some(FinishReason::ToolUse);
+                            }
+                        }
+
+                        if !text_parts.is_empty() || !tool_calls.is_empty() || is_done {
+                            let _ = chunk_tx
+                                .send(StreamChunk {
+                                    delta: text_parts,
+                                    done: is_done,
+                                    finish_reason,
+                                    usage,
+                                    tool_calls,
+                                })
+                                .await;
                         }
                     }
                 }
@@ -456,7 +521,7 @@ impl Provider for GeminiProvider {
             "{}/models?key={}",
             GEMINI_API_URL, self.api_key
         );
-        self.client
+        let response = self.client
             .get(&url)
             .send()
             .await
@@ -464,6 +529,21 @@ impl Provider for GeminiProvider {
                 provider: "gemini".into(),
                 detail: e.to_string(),
             })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            if status == 401 || status == 403 {
+                return Err(ProviderError::AuthFailure {
+                    provider: "gemini".into(),
+                    profile_id: "default".into(),
+                });
+            }
+            return Err(ProviderError::ServerError {
+                provider: "gemini".into(),
+                status,
+            });
+        }
+
         Ok(())
     }
 }

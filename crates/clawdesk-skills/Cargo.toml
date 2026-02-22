@@ -19,8 +19,10 @@ uuid = { workspace = true }
 rustc-hash = { workspace = true }
 im = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }
 toml = { workspace = true }
 serde_yaml = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+include_dir = "0.7"

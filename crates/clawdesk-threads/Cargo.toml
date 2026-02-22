@@ -1,0 +1,27 @@
+[package]
+name = "clawdesk-threads"
+description = "Namespaced chat-thread persistence on SochDB — per-thread ACID storage with secondary indexes"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+sochdb = { workspace = true }
+sochdb-core = { workspace = true }
+sochdb-storage = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = "3"

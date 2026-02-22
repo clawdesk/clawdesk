@@ -5,6 +5,7 @@ import type {
   AgentEventEnvelope,
   IncomingMessageEvent,
   ApprovalPendingEvent,
+  PipelineStepEvent,
 } from "../types";
 
 export interface AppEventHandlers {
@@ -15,6 +16,8 @@ export interface AppEventHandlers {
   onSystemAlert?: (payload: { level?: string; title?: string; message?: string }) => void;
   onAgentEvent?: (payload: AgentEventEnvelope) => void;
   onApprovalPending?: (payload: ApprovalPendingEvent) => void;
+  onPipelineStepStart?: (payload: PipelineStepEvent) => void;
+  onPipelineStepEnd?: (payload: PipelineStepEvent) => void;
 }
 
 export async function subscribeAppEvents(handlers: AppEventHandlers): Promise<() => void> {
@@ -26,6 +29,8 @@ export async function subscribeAppEvents(handlers: AppEventHandlers): Promise<()
     listen<{ level?: string; title?: string; message?: string }>("system:alert", (event) => handlers.onSystemAlert?.(event.payload)),
     listen<AgentEventEnvelope>("agent-event", (event) => handlers.onAgentEvent?.(event.payload)),
     listen<ApprovalPendingEvent>("approval:pending", (event) => handlers.onApprovalPending?.(event.payload)),
+    listen<PipelineStepEvent>("pipeline:step_start", (event) => handlers.onPipelineStepStart?.(event.payload)),
+    listen<PipelineStepEvent>("pipeline:step_end", (event) => handlers.onPipelineStepEnd?.(event.payload)),
   ]);
 
   return () => {

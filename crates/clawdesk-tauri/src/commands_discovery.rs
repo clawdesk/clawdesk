@@ -1,4 +1,4 @@
-//! Network discovery commands — mDNS, SPAKE2 pairing (Task 18).
+//! Network discovery commands — mDNS, SPAKE2 pairing.
 
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};

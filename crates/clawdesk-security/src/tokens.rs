@@ -2,7 +2,7 @@
 //!
 //! # Why scoped tokens?
 //!
-//! OpenClaw's single `gateway.auth.token` is all-or-nothing: once exfiltrated
+//! A single all-or-nothing `gateway.auth.token` is dangerous: once exfiltrated
 //! (CVE-2026-25253), it gives full `operator.admin` access. A stolen chat token
 //! should NOT grant config changes, tool execution, or tunnel management.
 //!

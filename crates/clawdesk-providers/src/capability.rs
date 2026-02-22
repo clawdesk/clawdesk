@@ -7,20 +7,20 @@
 //! ## Capability matrix
 //!
 //! ```text
-//! Bit  Capability         Anthropic  OpenAI  Gemini  Ollama  Bedrock
-//!  0   TextCompletion        ✓         ✓       ✓       ✓       ✓
-//!  1   Streaming             ✓         ✓       ✓       ✓       ✓
-//!  2   ToolUse               ✓         ✓       ✓       ✗       ✓
-//!  3   Vision                ✓         ✓       ✓       ✗       △
-//!  4   Embeddings            ✗         ✓       ✓       ✓       ✓
-//!  5   JsonMode              ✗         ✓       ✓       ✓       ✗
-//!  6   SystemPrompt          ✓         ✓       ✓       ✓       ✓
-//!  7   ExtendedThinking      ✓         ✓       ✗       ✗       ✗
-//!  8   StructuredOutput      ✗         ✓       ✓       ✗       ✗
-//!  9   Caching               ✓         ✗       ✗       ✗       ✗
-//! 10   BatchAPI              ✗         ✓       ✗       ✗       ✗
-//! 11   CodeExecution         ✗         ✓       ✓       ✗       ✗
-//! 12   ImageGeneration       ✗         ✓       ✓       ✗       ✗
+//! Bit  Capability         Anthropic  OpenAI  Gemini  Ollama  Bedrock  Azure  Cohere  Vertex  OpenRouter  Copilot  Telnyx  GLM
+//!  0   TextCompletion        ✓         ✓       ✓       ✓       ✓       ✓      ✓       ✓        ✓          ✓       ✓      ✓
+//!  1   Streaming             ✓         ✓       ✓       ✓       ✓       ✓      ✓       ✓        ✓          ✓       ✗      ✗
+//!  2   ToolUse               ✓         ✓       ✓       ✗       ✓       ✓      ✓       ✓        ✓          ✓       ✗      ✗
+//!  3   Vision                ✓         ✓       ✓       ✗       ✓       ✓      ✗       ✓        ✓          ✗       ✗      ✗
+//!  4   Embeddings            ✗         ✓       ✓       ✓       ✓       ✓      ✗       ✓        ✗          ✗       ✗      ✗
+//!  5   JsonMode              ✗         ✓       ✓       ✓       ✗       ✓      ✗       ✓        ✗          ✗       ✗      ✗
+//!  6   SystemPrompt          ✓         ✓       ✓       ✓       ✓       ✓      ✓       ✓        ✓          ✓       ✓      ✓
+//!  7   ExtendedThinking      ✓         ✓       ✗       ✗       ✗       ✗      ✗       ✗        ✓          ✗       ✗      ✗
+//!  8   StructuredOutput      ✗         ✓       ✓       ✗       ✗       ✓      ✗       ✓        ✗          ✗       ✗      ✗
+//!  9   Caching               ✓         ✗       ✗       ✗       ✗       ✗      ✗       ✗        ✗          ✗       ✗      ✗
+//! 10   BatchAPI              ✗         ✓       ✗       ✗       ✗       ✗      ✗       ✗        ✗          ✗       ✗      ✗
+//! 11   CodeExecution         ✗         ✓       ✓       ✗       ✗       ✗      ✗       ✓        ✗          ✗       ✗      ✗
+//! 12   ImageGeneration       ✗         ✓       ✓       ✗       ✗       ✗      ✗       ✓        ✗          ✗       ✗      ✗
 //! ```
 //!
 //! Matching: `provider_caps & request_caps == request_caps` — single AND + CMP.
@@ -208,6 +208,79 @@ pub const BEDROCK_CAPS: ProviderCaps = ProviderCaps::from_bits(
         | ProviderCaps::TOOL_USE.bits()
         | ProviderCaps::VISION.bits()
         | ProviderCaps::EMBEDDINGS.bits()
+        | ProviderCaps::SYSTEM_PROMPT.bits(),
+);
+
+/// Azure OpenAI capabilities.
+pub const AZURE_CAPS: ProviderCaps = ProviderCaps::from_bits(
+    ProviderCaps::TEXT_COMPLETION.bits()
+        | ProviderCaps::STREAMING.bits()
+        | ProviderCaps::TOOL_USE.bits()
+        | ProviderCaps::VISION.bits()
+        | ProviderCaps::EMBEDDINGS.bits()
+        | ProviderCaps::JSON_MODE.bits()
+        | ProviderCaps::SYSTEM_PROMPT.bits()
+        | ProviderCaps::STRUCTURED_OUTPUT.bits(),
+);
+
+/// Cohere Command-R capabilities.
+pub const COHERE_CAPS: ProviderCaps = ProviderCaps::from_bits(
+    ProviderCaps::TEXT_COMPLETION.bits()
+        | ProviderCaps::STREAMING.bits()
+        | ProviderCaps::TOOL_USE.bits()
+        | ProviderCaps::SYSTEM_PROMPT.bits(),
+);
+
+/// Google Vertex AI capabilities (Gemini models via GCP).
+pub const VERTEX_CAPS: ProviderCaps = ProviderCaps::from_bits(
+    ProviderCaps::TEXT_COMPLETION.bits()
+        | ProviderCaps::STREAMING.bits()
+        | ProviderCaps::TOOL_USE.bits()
+        | ProviderCaps::VISION.bits()
+        | ProviderCaps::EMBEDDINGS.bits()
+        | ProviderCaps::JSON_MODE.bits()
+        | ProviderCaps::SYSTEM_PROMPT.bits()
+        | ProviderCaps::STRUCTURED_OUTPUT.bits()
+        | ProviderCaps::CODE_EXECUTION.bits()
+        | ProviderCaps::IMAGE_GENERATION.bits(),
+);
+
+/// OpenRouter capabilities (aggregator — exposes the union of downstream providers).
+pub const OPENROUTER_CAPS: ProviderCaps = ProviderCaps::from_bits(
+    ProviderCaps::TEXT_COMPLETION.bits()
+        | ProviderCaps::STREAMING.bits()
+        | ProviderCaps::TOOL_USE.bits()
+        | ProviderCaps::VISION.bits()
+        | ProviderCaps::SYSTEM_PROMPT.bits()
+        | ProviderCaps::EXTENDED_THINKING.bits(),
+);
+
+/// GitHub Copilot capabilities.
+pub const COPILOT_CAPS: ProviderCaps = ProviderCaps::from_bits(
+    ProviderCaps::TEXT_COMPLETION.bits()
+        | ProviderCaps::STREAMING.bits()
+        | ProviderCaps::TOOL_USE.bits()
+        | ProviderCaps::SYSTEM_PROMPT.bits(),
+);
+
+/// Telnyx capabilities (basic text only).
+pub const TELNYX_CAPS: ProviderCaps = ProviderCaps::from_bits(
+    ProviderCaps::TEXT_COMPLETION.bits()
+        | ProviderCaps::SYSTEM_PROMPT.bits(),
+);
+
+/// GLM / ZhipuAI capabilities.
+pub const GLM_CAPS: ProviderCaps = ProviderCaps::from_bits(
+    ProviderCaps::TEXT_COMPLETION.bits()
+        | ProviderCaps::SYSTEM_PROMPT.bits(),
+);
+
+/// Generic OpenAI-compatible provider base capabilities.
+/// Actual capabilities depend on the specific provider.
+pub const COMPATIBLE_CAPS: ProviderCaps = ProviderCaps::from_bits(
+    ProviderCaps::TEXT_COMPLETION.bits()
+        | ProviderCaps::STREAMING.bits()
+        | ProviderCaps::TOOL_USE.bits()
         | ProviderCaps::SYSTEM_PROMPT.bits(),
 );
 

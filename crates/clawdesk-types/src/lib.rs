@@ -21,6 +21,7 @@ pub mod channel;
 pub mod config;
 pub mod cron;
 pub mod error;
+pub mod failover;
 pub mod media;
 pub mod message;
 pub mod plugin;

@@ -1,9 +1,17 @@
 //! Memory manager — coordinates embedding, storage, and retrieval.
+//!
+//! Integrates chunking, temporal decay, and MMR diversity
+//! re-ranking into the remember/recall pipeline.
 
+use crate::chunker::{chunk_text, sha256_hex, ChunkerConfig};
 use crate::embedding::EmbeddingProvider;
 use crate::hybrid::{HybridSearcher, SearchStrategy};
+use crate::mmr::{mmr_rerank, MmrCandidate, MmrConfig};
 use crate::pipeline::BatchPipeline;
-use clawdesk_storage::vector_store::{CollectionConfig, DistanceMetric, VectorSearchResult, VectorStore};
+use crate::temporal_decay::{apply_temporal_decay, TemporalDecayConfig};
+use clawdesk_storage::vector_store::{
+    CollectionConfig, DistanceMetric, VectorSearchResult, VectorStore,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -32,6 +40,12 @@ pub struct MemoryConfig {
     pub max_results: usize,
     /// Minimum relevance score.
     pub min_relevance: f32,
+    /// Chunking configuration for long texts.
+    pub chunker: ChunkerConfig,
+    /// Temporal decay configuration.
+    pub temporal_decay: TemporalDecayConfig,
+    /// MMR diversity re-ranking configuration.
+    pub mmr: MmrConfig,
 }
 
 impl Default for MemoryConfig {
@@ -42,6 +56,9 @@ impl Default for MemoryConfig {
             auto_embed: true,
             max_results: 10,
             min_relevance: 0.3,
+            chunker: ChunkerConfig::default(),
+            temporal_decay: TemporalDecayConfig::default(),
+            mmr: MmrConfig::default(),
         }
     }
 }
@@ -107,6 +124,9 @@ impl<S: VectorStore> MemoryManager<S> {
     }
 
     /// Store a memory with automatic embedding.
+    ///
+    /// Long texts are chunked and each chunk is stored with a
+    /// content-hash dedup key so duplicate writes are idempotent.
     pub async fn remember(
         &self,
         content: &str,
@@ -115,25 +135,83 @@ impl<S: VectorStore> MemoryManager<S> {
     ) -> Result<String, String> {
         self.ensure_collection().await?;
 
-        let embed_result = self
-            .embedding
-            .embed(content)
+        let chunks = chunk_text(content, &self.config.chunker);
+
+        if chunks.is_empty() {
+            return Err("content produced no chunks".into());
+        }
+
+        // Single-chunk fast path (most common).
+        if chunks.len() == 1 {
+            let chunk = &chunks[0];
+            let embed_result = self
+                .embedding
+                .embed(&chunk.text)
+                .await
+                .map_err(|e| format!("embed: {e}"))?;
+
+            let id = uuid::Uuid::new_v4().to_string();
+            let content_hash = sha256_hex(&chunk.text);
+            let mut enriched_meta = metadata;
+            enriched_meta["source"] = serde_json::json!(format!("{:?}", source));
+            enriched_meta["content"] = serde_json::json!(&chunk.text);
+            enriched_meta["timestamp"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+            enriched_meta["content_hash"] = serde_json::json!(content_hash);
+
+            self.store
+                .insert(
+                    &self.config.collection_name,
+                    &id,
+                    &embed_result.vector,
+                    Some(enriched_meta),
+                )
+                .await
+                .map_err(|e| format!("insert: {e}"))?;
+
+            debug!(id = %id, len = chunk.text.len(), "memory stored (single chunk)");
+            return Ok(id);
+        }
+
+        // Multi-chunk path: embed in batch and insert all chunks.
+        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+        let batch_result = self
+            .pipeline
+            .embed_all(&texts)
             .await
-            .map_err(|e| format!("embed: {e}"))?;
+            .map_err(|e| format!("batch embed: {e}"))?;
 
-        let id = uuid::Uuid::new_v4().to_string();
-        let mut enriched_meta = metadata;
-        enriched_meta["source"] = serde_json::json!(format!("{:?}", source));
-        enriched_meta["content"] = serde_json::json!(content);
-        enriched_meta["timestamp"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+        let now = chrono::Utc::now().to_rfc3339();
+        let collection = &self.config.collection_name;
+        let mut ids = Vec::with_capacity(chunks.len());
 
-        self.store
-            .insert(&self.config.collection_name, &id, &embed_result.vector, Some(enriched_meta))
-            .await
-            .map_err(|e| format!("insert: {e}"))?;
+        for (i, (chunk, emb)) in chunks.iter().zip(batch_result.embeddings.iter()).enumerate() {
+            let id = uuid::Uuid::new_v4().to_string();
+            let content_hash = sha256_hex(&chunk.text);
+            let mut enriched_meta = metadata.clone();
+            enriched_meta["source"] = serde_json::json!(format!("{:?}", source));
+            enriched_meta["content"] = serde_json::json!(&chunk.text);
+            enriched_meta["timestamp"] = serde_json::json!(&now);
+            enriched_meta["content_hash"] = serde_json::json!(content_hash);
+            enriched_meta["chunk_index"] = serde_json::json!(i);
+            enriched_meta["total_chunks"] = serde_json::json!(chunks.len());
+            enriched_meta["original_length"] = serde_json::json!(content.len());
 
-        debug!(id = %id, len = content.len(), "memory stored");
-        Ok(id)
+            self.store
+                .insert(collection, &id, &emb.vector, Some(enriched_meta))
+                .await
+                .map_err(|e| format!("insert chunk {i}: {e}"))?;
+
+            ids.push(id);
+        }
+
+        debug!(
+            chunks = chunks.len(),
+            original_len = content.len(),
+            "memory stored (chunked)"
+        );
+
+        // Return first chunk ID as the primary identifier.
+        Ok(ids.into_iter().next().unwrap())
     }
 
     /// Batch-store memories.
@@ -178,6 +256,9 @@ impl<S: VectorStore> MemoryManager<S> {
     }
 
     /// Recall relevant memories.
+    ///
+    /// Pipeline: vector+BM25 hybrid search → temporal decay →
+    /// MMR diversity re-ranking → min-relevance filter.
     pub async fn recall(
         &self,
         query: &str,
@@ -191,26 +272,78 @@ impl<S: VectorStore> MemoryManager<S> {
             .await
             .map_err(|e| format!("embed query: {e}"))?;
 
+        // Fetch more candidates than requested — temporal decay and MMR will
+        // prune/reorder, so we need headroom.
         let top_k = max_results.unwrap_or(self.config.max_results);
+        let fetch_k = (top_k * 3).max(20); // 3x headroom
 
-        let results = self
+        let mut results = self
             .searcher
             .search(
                 &self.config.collection_name,
                 &query_result.vector,
                 query,
-                top_k,
+                fetch_k,
                 self.config.search_strategy,
             )
             .await?;
 
-        // Filter by minimum relevance.
-        let filtered: Vec<_> = results
+        // ── Stage 1: Temporal decay ────────────────────────────────
+        if self.config.temporal_decay.enabled {
+            let mut scored: Vec<(String, f32, serde_json::Value)> = results
+                .iter()
+                .map(|r| (r.id.clone(), r.score, r.metadata.clone()))
+                .collect();
+
+            apply_temporal_decay(&mut scored, &self.config.temporal_decay);
+
+            // Write decayed scores back
+            for (i, (_, decayed_score, _)) in scored.iter().enumerate() {
+                if i < results.len() {
+                    results[i].score = *decayed_score;
+                }
+            }
+            // Re-sort by decayed score (apply_temporal_decay already sorts,
+            // but map-back may not preserve order).
+            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        // ── Stage 2: MMR diversity re-ranking ──────────────────────
+        let candidates: Vec<MmrCandidate> = results
+            .iter()
+            .map(|r| MmrCandidate {
+                id: r.id.clone(),
+                score: r.score,
+                content: r.content.clone().unwrap_or_default(),
+                metadata: r.metadata.clone(),
+            })
+            .collect();
+
+        let mmr_config = MmrConfig {
+            lambda: self.config.mmr.lambda,
+            top_k,
+        };
+
+        let mmr_results = mmr_rerank(&candidates, &mmr_config);
+
+        // Rebuild VectorSearchResult from MMR output, preserving order.
+        let reranked: Vec<VectorSearchResult> = mmr_results
+            .into_iter()
+            .map(|m| VectorSearchResult {
+                id: m.id,
+                score: m.score,
+                metadata: m.metadata,
+                content: Some(m.content),
+            })
+            .collect();
+
+        // ── Stage 3: Minimum relevance filter ──────────────────────
+        let filtered: Vec<_> = reranked
             .into_iter()
             .filter(|r| r.score >= self.config.min_relevance)
             .collect();
 
-        debug!(query = %query, results = filtered.len(), "memory recall");
+        debug!(query = %query, results = filtered.len(), "memory recall (decay+mmr)");
         Ok(filtered)
     }
 

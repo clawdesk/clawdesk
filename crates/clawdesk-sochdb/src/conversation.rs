@@ -29,7 +29,8 @@ use tracing::debug;
 
 use crate::SochStore;
 
-/// Maximum number of messages kept verbatim in the hot tier.
+/// Default number of messages kept verbatim in the hot tier.
+/// Can be overridden per-channel via `compact_session_with_limit()`.
 const HOT_TIER_SIZE: usize = 200;
 
 #[async_trait]
@@ -45,11 +46,7 @@ impl ConversationStore for SochStore {
             detail: e.to_string(),
         })?;
 
-        self.db
-            .put(path.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put(&path, &bytes)?;
 
         debug!(%key, %ts, "message appended");
         Ok(())
@@ -87,11 +84,7 @@ impl ConversationStore for SochStore {
 
         // Write all entries back-to-back so they land in one group-commit batch.
         for (path, bytes) in &entries {
-            self.db
-                .put(path.as_bytes(), bytes)
-                .map_err(|e| StorageError::OpenFailed {
-                    detail: e.to_string(),
-                })?;
+            self.put(path, bytes)?;
         }
 
         debug!(%key, count = msgs.len(), "batch messages appended");
@@ -111,11 +104,7 @@ impl ConversationStore for SochStore {
     ) -> Result<Vec<AgentMessage>, StorageError> {
         let prefix = format!("sessions/{}/messages/", key.as_str());
         let results = self
-            .db
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&prefix)?;
 
         // Take only the last `limit` entries (already sorted by key = timestamp).
         // SochDB's prefix scan returns entries in key order (ascending timestamp),
@@ -241,11 +230,7 @@ impl SochStore {
     ) -> Result<Vec<String>, StorageError> {
         let prefix = format!("sessions/{}/summaries/", key.as_str());
         let results = self
-            .db
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&prefix)?;
 
         let mut summaries = Vec::new();
         for (_k, v) in &results {
@@ -260,11 +245,7 @@ impl SochStore {
     pub async fn message_count(&self, key: &SessionKey) -> Result<usize, StorageError> {
         let prefix = format!("sessions/{}/messages/", key.as_str());
         let results = self
-            .db
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&prefix)?;
         Ok(results.len())
     }
 
@@ -282,20 +263,30 @@ impl SochStore {
         key: &SessionKey,
         summarizer: Option<&dyn Fn(&str) -> String>,
     ) -> Result<usize, StorageError> {
+        self.compact_session_with_limit(key, summarizer, HOT_TIER_SIZE).await
+    }
+
+    /// GAP-3: Compact with a per-channel history limit.
+    ///
+    /// Like `compact_session`, but allows the caller to override the hot-tier
+    /// size. This is used by channels that need smaller context windows
+    /// (e.g., SMS with 50 messages, Telegram with 100).
+    pub async fn compact_session_with_limit(
+        &self,
+        key: &SessionKey,
+        summarizer: Option<&dyn Fn(&str) -> String>,
+        hot_tier_size: usize,
+    ) -> Result<usize, StorageError> {
         let prefix = format!("sessions/{}/messages/", key.as_str());
         let results = self
-            .db
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(&prefix)?;
 
         let total = results.len();
-        if total <= HOT_TIER_SIZE {
+        if total <= hot_tier_size {
             return Ok(0);
         }
 
-        let cold_count = total - HOT_TIER_SIZE;
+        let cold_count = total - hot_tier_size;
         let cold_entries = &results[..cold_count];
 
         // Build summary text from cold-tier messages.
@@ -329,21 +320,17 @@ impl SochStore {
         // Store the summary.
         let ts = chrono::Utc::now().timestamp_millis();
         let summary_key = format!("sessions/{}/summaries/{}", key.as_str(), ts);
-        self.db
-            .put(summary_key.as_bytes(), summary.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put(&summary_key, summary.as_bytes())?;
 
         // Delete compacted messages.
         for (k, _v) in cold_entries {
-            let _ = self.db.delete(k);
+            let _ = self.delete(k);
         }
 
         debug!(
             %key,
             cold_count,
-            remaining = HOT_TIER_SIZE,
+            remaining = hot_tier_size,
             "conversation compacted"
         );
         Ok(cold_count)

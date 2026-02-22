@@ -2,9 +2,16 @@
 //!
 //! Combines conversation history, vector search results, and system prompts
 //! into a context payload that fits within the model's token budget.
+//!
+//! ## Zero-Copy Design
+//!
+//! `PromptRope` stores prompt fragments as `Cow<'a, str>` references,
+//! deferring concatenation until final IO. Context assembly is O(K)
+//! where K is the number of fragments, not O(N) total bytes.
 
 use clawdesk_providers::ChatMessage;
 use clawdesk_types::estimate_tokens;
+use std::borrow::Cow;
 use tracing::debug;
 
 /// Token budget configuration for context assembly.
@@ -37,6 +44,103 @@ pub struct AssembledContext {
     pub system_prompt: String,
     pub messages: Vec<ChatMessage>,
     pub estimated_tokens: usize,
+}
+
+// ---------------------------------------------------------------------------
+// PromptRope — zero-copy prompt construction
+// ---------------------------------------------------------------------------
+
+/// A rope-like structure that holds prompt fragments as borrowed or owned
+/// strings, assembling them into a contiguous buffer only at final use.
+///
+/// Avoids O(N) memcpy intermediates during context construction — each
+/// `append` is O(1) (push a Cow pointer). Final `flatten()` is the single
+/// allocation.
+#[derive(Debug, Clone)]
+pub struct PromptRope<'a> {
+    fragments: Vec<Cow<'a, str>>,
+    /// Running byte count estimate (not a token count).
+    byte_len: usize,
+}
+
+impl<'a> PromptRope<'a> {
+    /// New empty rope.
+    pub fn new() -> Self {
+        Self {
+            fragments: Vec::new(),
+            byte_len: 0,
+        }
+    }
+
+    /// Pre-allocate for an expected number of fragments.
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            fragments: Vec::with_capacity(n),
+            byte_len: 0,
+        }
+    }
+
+    /// Append a borrowed string slice — zero-copy.
+    #[inline]
+    pub fn append_borrowed(&mut self, s: &'a str) {
+        self.byte_len += s.len();
+        self.fragments.push(Cow::Borrowed(s));
+    }
+
+    /// Append an owned String (e.g., from format!).
+    #[inline]
+    pub fn append_owned(&mut self, s: String) {
+        self.byte_len += s.len();
+        self.fragments.push(Cow::Owned(s));
+    }
+
+    /// Append a newline separator.
+    #[inline]
+    pub fn newline(&mut self) {
+        self.fragments.push(Cow::Borrowed("\n"));
+        self.byte_len += 1;
+    }
+
+    /// Number of fragments.
+    pub fn fragment_count(&self) -> usize {
+        self.fragments.len()
+    }
+
+    /// Estimated byte length (sum of all fragment lengths).
+    pub fn byte_len(&self) -> usize {
+        self.byte_len
+    }
+
+    /// Estimated token count (heuristic: bytes / 4).
+    pub fn estimated_tokens(&self) -> usize {
+        self.byte_len / 4
+    }
+
+    /// Flatten into a single contiguous String. This is the ONLY allocation.
+    pub fn flatten(&self) -> String {
+        let mut out = String::with_capacity(self.byte_len);
+        for frag in &self.fragments {
+            out.push_str(frag);
+        }
+        out
+    }
+
+    /// Return fragments as IoSlice-compatible references for vectored IO.
+    /// Useful when the downstream transport supports writev/sendmsg.
+    pub fn as_slices(&self) -> Vec<&[u8]> {
+        self.fragments.iter().map(|f| f.as_bytes()).collect()
+    }
+
+    /// Iterate over fragments without allocating.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.fragments.iter().map(|f| f.as_ref())
+    }
+}
+
+impl<'a> Default for PromptRope<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Assembles context for LLM calls from multiple sources.

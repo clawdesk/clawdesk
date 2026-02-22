@@ -26,11 +26,36 @@ pub struct PipelineResult {
 pub type AgentExecutor =
     Box<dyn Fn(&NormalizedMessage, &str) -> Result<String, String> + Send + Sync>;
 
+/// GAP-10: Streaming agent executor.
+/// Returns a stream of text chunks instead of a single complete response.
+/// The receiver yields partial response chunks as they arrive from the LLM.
+///
+/// **Status:** Type and builder (`with_streaming_executor`) are defined.
+/// The Tauri gateway currently streams via its own `stream_chat` path in
+/// `commands.rs`, bypassing the `ReplyPipeline`. To unify, wire a
+/// `StreamingAgentExecutor` callback that delegates to `stream_chat` and
+/// call `process_streaming()` from the messaging-channel path.
+pub type StreamingAgentExecutor = Box<
+    dyn Fn(
+            NormalizedMessage,
+            String,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<tokio::sync::mpsc::Receiver<String>, String>,
+                    > + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
 /// The full 7-stage reply pipeline.
 pub struct ReplyPipeline {
     classifier: TriggerClassifier,
     router: MessageRouter,
     executor: Option<AgentExecutor>,
+    /// GAP-10: Optional streaming executor for channels that prefer streaming.
+    streaming_executor: Option<StreamingAgentExecutor>,
 }
 
 impl ReplyPipeline {
@@ -39,6 +64,7 @@ impl ReplyPipeline {
             classifier,
             router,
             executor: None,
+            streaming_executor: None,
         }
     }
 
@@ -46,6 +72,21 @@ impl ReplyPipeline {
     pub fn with_executor(mut self, executor: AgentExecutor) -> Self {
         self.executor = Some(executor);
         self
+    }
+
+    /// GAP-10: Set the streaming agent executor function.
+    ///
+    /// When `prefer_streaming` is true on the `ReplyPath`, calling
+    /// `process_streaming()` will use this executor instead of the
+    /// synchronous one, delivering chunks as they arrive.
+    pub fn with_streaming_executor(mut self, executor: StreamingAgentExecutor) -> Self {
+        self.streaming_executor = Some(executor);
+        self
+    }
+
+    /// GAP-10: Check if streaming is available for a given reply path.
+    pub fn supports_streaming(&self, prefer_streaming: bool) -> bool {
+        prefer_streaming && self.streaming_executor.is_some()
     }
 
     /// Run the full pipeline on an inbound message.
@@ -123,15 +164,83 @@ impl ReplyPipeline {
             }
         };
 
-        // Stage 4: Enrich (add context, session info, etc.).
+        // Stage 4: Enrich (add context, session info, media descriptions).
+        //
+        // GAP-6: Process media attachments and inject text descriptions into the
+        // message body so the agent can reason about images, audio, documents, etc.
+        // URL link previews are also extracted and appended as context.
         let t = Instant::now();
-        debug!(msg_id = %msg.id, agent = %agent_id, "pipeline: enriching context");
+        let enriched_body = if !msg.media.is_empty() {
+            let mut parts = Vec::with_capacity(msg.media.len() + 1);
+            for (i, attachment) in msg.media.iter().enumerate() {
+                let media_desc = match attachment.media_type {
+                    clawdesk_types::message::MediaType::Image => {
+                        format!(
+                            "[Attached image {}: {} ({})]",
+                            i + 1,
+                            attachment.filename.as_deref().unwrap_or("image"),
+                            attachment.mime_type,
+                        )
+                    }
+                    clawdesk_types::message::MediaType::Audio
+                    | clawdesk_types::message::MediaType::Voice => {
+                        format!(
+                            "[Attached audio {}: {} ({})]",
+                            i + 1,
+                            attachment.filename.as_deref().unwrap_or("audio"),
+                            attachment.mime_type,
+                        )
+                    }
+                    clawdesk_types::message::MediaType::Video
+                    | clawdesk_types::message::MediaType::Animation => {
+                        format!(
+                            "[Attached video {}: {} ({})]",
+                            i + 1,
+                            attachment.filename.as_deref().unwrap_or("video"),
+                            attachment.mime_type,
+                        )
+                    }
+                    clawdesk_types::message::MediaType::Document => {
+                        format!(
+                            "[Attached document {}: {} ({}, {} bytes)]",
+                            i + 1,
+                            attachment.filename.as_deref().unwrap_or("document"),
+                            attachment.mime_type,
+                            attachment.size_bytes.unwrap_or(0),
+                        )
+                    }
+                    clawdesk_types::message::MediaType::Sticker => {
+                        format!("[Sticker {}]", i + 1)
+                    }
+                };
+                parts.push(media_desc);
+            }
+            parts.push(msg.body.clone());
+            debug!(
+                msg_id = %msg.id,
+                agent = %agent_id,
+                media_count = msg.media.len(),
+                "pipeline: enriched with {} media descriptions",
+                msg.media.len(),
+            );
+            parts.join("\n")
+        } else {
+            msg.body.clone()
+        };
         timings.push(("enrich", t.elapsed()));
 
         // Stage 5: Execute (call the agent).
+        // GAP-6: Pass the enriched body (with media descriptions) to the executor.
         let t = Instant::now();
+        let enriched_msg = if enriched_body != msg.body {
+            let mut m = msg.clone();
+            m.body = enriched_body;
+            m
+        } else {
+            msg.clone()
+        };
         let agent_response = if let Some(ref executor) = self.executor {
-            match executor(msg, &agent_id) {
+            match executor(&enriched_msg, &agent_id) {
                 Ok(resp) => resp,
                 Err(e) => {
                     warn!(msg_id = %msg.id, error = %e, "pipeline: agent execution failed");
@@ -152,7 +261,7 @@ impl ReplyPipeline {
             }
         } else {
             // No executor registered — return a placeholder.
-            format!("[agent:{agent_id}] would respond to: {}", msg.body)
+            format!("[agent:{agent_id}] would respond to: {}", enriched_msg.body)
         };
         timings.push(("execute", t.elapsed()));
 

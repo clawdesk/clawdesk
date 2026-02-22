@@ -14,9 +14,13 @@
 //! A minimal channel implementation is ~50 lines. The compiler prevents
 //! calling capabilities that a channel doesn't implement.
 
+pub mod channel_bridge;
+pub mod channel_dock;
 pub mod health;
+pub mod inbound_adapter;
 pub mod rate_limit;
 pub mod registry;
+pub mod reply_formatter;
 
 use async_trait::async_trait;
 use clawdesk_types::{

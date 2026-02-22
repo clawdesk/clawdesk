@@ -46,6 +46,16 @@ struct AnthropicRequest {
     system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<AnthropicToolDef>,
+}
+
+/// Anthropic tool definition for function calling.
+#[derive(Debug, Serialize)]
+struct AnthropicToolDef {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +135,12 @@ impl Provider for AnthropicProvider {
 
         debug!(%model, messages = request.messages.len(), "calling Anthropic API");
 
+        let tools: Vec<AnthropicToolDef> = request.tools.iter().map(|t| AnthropicToolDef {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            input_schema: t.parameters.clone(),
+        }).collect();
+
         let api_request = AnthropicRequest {
             model: model.clone(),
             max_tokens: request.max_tokens.unwrap_or(8192),
@@ -138,6 +154,7 @@ impl Provider for AnthropicProvider {
                 .collect(),
             system: request.system_prompt.clone(),
             temperature: request.temperature,
+            tools,
         };
 
         let response = self
@@ -302,6 +319,18 @@ impl Provider for AnthropicProvider {
             body["temperature"] = serde_json::json!(temp);
         }
 
+        // Include tool definitions so Claude can make structured tool calls
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request.tools.iter().map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                })
+            }).collect();
+            body["tools"] = serde_json::json!(tools);
+        }
+
         let response = self
             .client
             .post(ANTHROPIC_API_URL)
@@ -334,6 +363,13 @@ impl Provider for AnthropicProvider {
         let mut buffer = String::new();
         let mut total_input_tokens: u64 = 0;
         let mut total_output_tokens: u64 = 0;
+
+        // ── Accumulate tool calls during streaming ──
+        // Track content blocks of type "tool_use" so we can return them
+        // on the final chunk, eliminating the redundant complete() call.
+        let mut current_tool_blocks: Vec<(String, String, String)> = Vec::new(); // (id, name, json_accum)
+        let mut current_block_type: Option<String> = None;
+        let mut current_block_index: Option<usize> = None;
 
         // reqwest chunk-based streaming — no extra feature flags needed
         let mut response = response;
@@ -369,21 +405,57 @@ impl Provider for AnthropicProvider {
                     .unwrap_or("");
 
                 match event_type {
-                    "content_block_delta" => {
-                        if let Some(delta_text) = event
-                            .get("delta")
-                            .and_then(|d| d.get("text"))
-                            .and_then(|t| t.as_str())
-                        {
-                            let _ = chunk_tx
-                                .send(StreamChunk {
-                                    delta: delta_text.to_string(),
-                                    done: false,
-                                    finish_reason: None,
-                                    usage: None,
-                                })
-                                .await;
+                    "content_block_start" => {
+                        // Track the type of the new content block.
+                        // For tool_use blocks, capture id + name for later assembly.
+                        if let Some(cb) = event.get("content_block") {
+                            let block_type = cb.get("type").and_then(|t| t.as_str()).unwrap_or("text");
+                            current_block_type = Some(block_type.to_string());
+                            if block_type == "tool_use" {
+                                let id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                current_tool_blocks.push((id, name, String::new()));
+                                current_block_index = Some(current_tool_blocks.len() - 1);
+                            } else {
+                                current_block_index = None;
+                            }
                         }
+                    }
+                    "content_block_delta" => {
+                        if let Some(delta) = event.get("delta") {
+                            let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match delta_type {
+                                "text_delta" => {
+                                    if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                        let _ = chunk_tx
+                                            .send(StreamChunk {
+                                                delta: text.to_string(),
+                                                done: false,
+                                                finish_reason: None,
+                                                usage: None,
+                                                tool_calls: Vec::new(),
+                                            })
+                                            .await;
+                                    }
+                                }
+                                "input_json_delta" => {
+                                    // Accumulate JSON fragments for the current tool_use block
+                                    if let (Some(idx), Some(json_frag)) = (
+                                        current_block_index,
+                                        delta.get("partial_json").and_then(|j| j.as_str()),
+                                    ) {
+                                        if let Some(block) = current_tool_blocks.get_mut(idx) {
+                                            block.2.push_str(json_frag);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    "content_block_stop" => {
+                        current_block_type = None;
+                        current_block_index = None;
                     }
                     "message_start" => {
                         // Extract input token count from message start
@@ -416,6 +488,20 @@ impl Provider for AnthropicProvider {
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
 
+                        // Build tool calls from accumulated blocks
+                        let tool_calls: Vec<ToolCall> = current_tool_blocks
+                            .drain(..)
+                            .filter_map(|(id, name, json_str)| {
+                                let arguments = if json_str.is_empty() {
+                                    serde_json::json!({})
+                                } else {
+                                    serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}))
+                                };
+                                if name.is_empty() { None }
+                                else { Some(ToolCall { id, name, arguments }) }
+                            })
+                            .collect();
+
                         let _ = chunk_tx
                             .send(StreamChunk {
                                 delta: String::new(),
@@ -427,10 +513,11 @@ impl Provider for AnthropicProvider {
                                     cache_read_tokens: None,
                                     cache_write_tokens: None,
                                 }),
+                                tool_calls,
                             })
                             .await;
                     }
-                    _ => {} // message_start, content_block_start/stop, message_stop — skip
+                    _ => {} // message_stop — skip
                 }
             }
         }

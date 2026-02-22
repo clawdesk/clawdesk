@@ -149,7 +149,7 @@ pub async fn forget_memory(
 /// Get memory system configuration / stats.
 #[tauri::command]
 pub async fn get_memory_stats(
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
 ) -> Result<MemoryStatsResponse, String> {
     // Report the config used to create the MemoryManager
     Ok(MemoryStatsResponse {

@@ -39,6 +39,123 @@ use sha2::{Sha256, Digest};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
+/// Well-known tool names that appear in OpenClaw skill prompts.
+/// These are agent-level tools that skills reference but don't own.
+const KNOWN_AGENT_TOOLS: &[&str] = &[
+    "web_search", "web_fetch", "file_read", "file_write", "file_list",
+    "bash", "sh", "code_execute", "code_run", "memory_search",
+    "memory_store", "task_store", "task_list", "system_check",
+    "curl", "grep", "find", "cat", "ls", "mkdir", "rm",
+];
+
+/// Extract tool bindings from an OpenClaw skill's prompt body and metadata.
+///
+/// OpenClaw skills don't declare tools in frontmatter — they reference them
+/// implicitly in the prompt body. We extract these references to populate
+/// `provided_tools` so the executor can wire them up.
+///
+/// Strategy:
+/// 1. `allowed-tools` frontmatter → explicit tool declarations
+/// 2. Backtick-wrapped tool names in body → `tool_name` pattern
+/// 3. `requires.bins` that aren't common system utils → CLI tool bindings
+fn extract_tool_bindings(
+    frontmatter: &OpenClawFrontmatter,
+    body: &str,
+    meta: &OpenClawMetadata,
+    skill_name: &str,
+) -> Vec<SkillToolBinding> {
+    let mut tools = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // 1. Explicit allowed-tools from frontmatter
+    if let Some(ref allowed) = frontmatter.allowed_tools {
+        for tool in allowed {
+            if seen.insert(tool.clone()) {
+                tools.push(SkillToolBinding {
+                    tool_name: tool.clone(),
+                    description: format!("Tool allowed by {} skill", skill_name),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                });
+            }
+        }
+    }
+
+    // 2. Scan prompt body for backtick-wrapped tool references
+    //    Pattern: `tool_name` where tool_name looks like a function/command
+    let mut i = 0;
+    let bytes = body.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'`' && (i + 1 < bytes.len()) && bytes[i + 1] != b'`' {
+            // Single backtick — find closing backtick
+            if let Some(end) = body[i + 1..].find('`') {
+                let candidate = &body[i + 1..i + 1 + end];
+                // Must look like a tool/command name: alphanumeric + underscores/hyphens, 2-30 chars
+                if candidate.len() >= 2
+                    && candidate.len() <= 30
+                    && candidate.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                    && candidate.chars().next().map_or(false, |c| c.is_alphabetic())
+                    && !KNOWN_AGENT_TOOLS.contains(&candidate)
+                    && seen.insert(candidate.to_string())
+                {
+                    tools.push(SkillToolBinding {
+                        tool_name: candidate.to_string(),
+                        description: format!("CLI tool referenced by {} skill", skill_name),
+                        parameters_schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "args": {"type": "string", "description": "Command arguments"}
+                            }
+                        }),
+                    });
+                }
+                i = i + 1 + end + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    // 3. Required bins that are skill-specific CLI tools (not common system utils)
+    let system_bins: std::collections::HashSet<&str> = [
+        "curl", "grep", "find", "cat", "ls", "mkdir", "rm", "cp", "mv",
+        "sed", "awk", "sort", "head", "tail", "wc", "tr", "cut",
+        "bash", "sh", "zsh", "python", "python3", "node", "npm",
+    ].into_iter().collect();
+
+    for bin in &meta.required_bins {
+        if !system_bins.contains(bin.as_str()) && seen.insert(bin.clone()) {
+            tools.push(SkillToolBinding {
+                tool_name: bin.clone(),
+                description: format!("Required binary for {} skill", skill_name),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "args": {"type": "string", "description": "Command arguments"}
+                    }
+                }),
+            });
+        }
+    }
+
+    // Also include anyBins as optional tool surfaces
+    for bin in &meta.any_bins {
+        if !system_bins.contains(bin.as_str()) && seen.insert(bin.clone()) {
+            tools.push(SkillToolBinding {
+                tool_name: bin.clone(),
+                description: format!("Optional binary for {} skill (one of several)", skill_name),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "args": {"type": "string", "description": "Command arguments"}
+                    }
+                }),
+            });
+        }
+    }
+
+    tools
+}
+
 // ─────────────────────────────────────────────────────────────
 // OpenClaw frontmatter types (deserialized from YAML)
 // ─────────────────────────────────────────────────────────────
@@ -448,10 +565,13 @@ pub fn adapt_skill(
         schema_version: 1,
     };
 
+    // ── Extract tool bindings ──
+    let provided_tools = extract_tool_bindings(frontmatter, &prompt_fragment, &meta, name);
+
     let skill = Skill {
         manifest,
         prompt_fragment,
-        provided_tools: vec![],
+        provided_tools,
         parameter_values: serde_json::Value::Null,
         source_path: None,
     };
@@ -1063,5 +1183,79 @@ metadata: { "openclaw": { "os": ["darwin"] } }
         let adapted = adapt_skill(&fm, &body, &AdapterConfig::default()).unwrap();
         assert_eq!(adapted.tier, AdaptationTier::NeedsRewrite);
         assert!(adapted.warnings.iter().any(|w| w.contains("OS-restricted")));
+    }
+
+    // ── Tool binding extraction tests ──
+
+    #[test]
+    fn tool_bindings_from_allowed_tools() {
+        let content = r#"````skill
+---
+name: test-tools
+description: Skill with allowed tools.
+allowed-tools: ["web_fetch", "custom_tool"]
+metadata: { "openclaw": { "emoji": "🔧" } }
+---
+
+# Test
+Use `web_fetch` and `custom_tool`.
+````"#;
+        let (fm, body) = parse_skill_md(content).unwrap();
+        let adapted = adapt_skill(&fm, &body, &AdapterConfig::default()).unwrap();
+        // allowed-tools should produce tool bindings
+        assert!(
+            adapted.skill.provided_tools.iter().any(|t| t.tool_name == "web_fetch"),
+            "should have web_fetch from allowed-tools"
+        );
+        assert!(
+            adapted.skill.provided_tools.iter().any(|t| t.tool_name == "custom_tool"),
+            "should have custom_tool from allowed-tools"
+        );
+    }
+
+    #[test]
+    fn tool_bindings_from_required_bins() {
+        let (fm, body) = parse_skill_md(WEATHER_SKILL).unwrap();
+        let adapted = adapt_skill(&fm, &body, &AdapterConfig::default()).unwrap();
+        // curl is a system binary, should NOT be a provided tool
+        assert!(
+            !adapted.skill.provided_tools.iter().any(|t| t.tool_name == "curl"),
+            "system binaries like curl should not be provided_tools"
+        );
+    }
+
+    #[test]
+    fn tool_bindings_from_skill_specific_bins() {
+        let content = r#"---
+name: himalaya-email
+description: Email client using himalaya.
+metadata: { "openclaw": { "requires": { "bins": ["himalaya"] } } }
+---
+
+# Email
+Use `himalaya` to send emails.
+"#;
+        let (fm, body) = parse_skill_md(content).unwrap();
+        let adapted = adapt_skill(&fm, &body, &AdapterConfig::default()).unwrap();
+        // himalaya is skill-specific, should be a provided tool
+        assert!(
+            adapted.skill.provided_tools.iter().any(|t| t.tool_name == "himalaya"),
+            "skill-specific binaries should be provided_tools"
+        );
+    }
+
+    #[test]
+    fn tool_bindings_from_any_bins() {
+        let (fm, body) = parse_skill_md(CODING_AGENT_SKILL).unwrap();
+        let adapted = adapt_skill(&fm, &body, &AdapterConfig::default()).unwrap();
+        // anyBins like claude, codex should appear as provided tools
+        assert!(
+            adapted.skill.provided_tools.iter().any(|t| t.tool_name == "claude"),
+            "anyBins should produce provided_tools"
+        );
+        assert!(
+            adapted.skill.provided_tools.iter().any(|t| t.tool_name == "codex"),
+            "anyBins should produce provided_tools"
+        );
     }
 }

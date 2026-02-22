@@ -535,12 +535,39 @@ impl Provider for OllamaProvider {
                     None
                 };
 
+                // Extract tool calls from the chunk (Ollama sends them in the final done=true chunk)
+                let mut tool_calls: Vec<ToolCall> = chunk_data.message.tool_calls
+                    .iter()
+                    .enumerate()
+                    .map(|(i, tc)| ToolCall {
+                        id: format!("ollama_tc_{}", i),
+                        name: tc.function.name.clone(),
+                        arguments: tc.function.arguments.clone(),
+                    })
+                    .collect();
+
+                // Fallback: some smaller models embed tool calls as JSON in content
+                if tool_calls.is_empty() && is_done && !request.tools.is_empty() {
+                    tool_calls = try_extract_tool_calls_from_content(&chunk_data.message.content);
+                }
+
+                let finish = if is_done {
+                    if !tool_calls.is_empty() {
+                        Some(FinishReason::ToolUse)
+                    } else {
+                        Some(FinishReason::Stop)
+                    }
+                } else {
+                    None
+                };
+
                 let _ = chunk_tx
                     .send(StreamChunk {
                         delta: chunk_data.message.content,
                         done: is_done,
-                        finish_reason: if is_done { Some(FinishReason::Stop) } else { None },
+                        finish_reason: finish,
                         usage,
+                        tool_calls,
                     })
                     .await;
 

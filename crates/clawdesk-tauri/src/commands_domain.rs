@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 // ═══════════════════════════════════════════════════════════
-// Context Guard (Task 27) — expose utilization + compaction info
+// Context Guard — expose utilization + compaction info
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize)]
@@ -44,7 +44,7 @@ pub async fn get_context_guard_status(
 }
 
 // ═══════════════════════════════════════════════════════════
-// Prompt Builder (Task 28) — expose last manifest
+// Prompt Builder — expose last manifest
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize)]
@@ -89,7 +89,7 @@ pub async fn get_prompt_manifest(
 }
 
 // ═══════════════════════════════════════════════════════════
-// Provider Negotiation (Task 26) — expose capability matrix
+// Provider Negotiation — expose capability matrix
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize)]
@@ -105,6 +105,7 @@ pub async fn list_provider_capabilities(
 ) -> Result<Vec<ProviderCapabilityInfo>, String> {
     let negotiator = state.negotiator.read().map_err(|e| e.to_string())?;
     let providers = negotiator.list_providers();
+    let all_models = negotiator.list_models();
     Ok(providers.iter().map(|name| {
         let caps = negotiator.capabilities(name);
         let cap_names = caps.map(|c| {
@@ -125,10 +126,15 @@ pub async fn list_provider_capabilities(
             if c.has(ProviderCaps::IMAGE_GENERATION) { names.push("image_generation"); }
             names.into_iter().map(|s| s.to_string()).collect::<Vec<_>>()
         }).unwrap_or_default();
+        let prefix_str = format!("{}/", name);
+        let provider_models: Vec<String> = all_models.iter()
+            .filter(|m| m.starts_with(&prefix_str) || m.as_str() == *name)
+            .map(|m| m.strip_prefix(&prefix_str).unwrap_or(m).to_string())
+            .collect();
         ProviderCapabilityInfo {
             provider: name.to_string(),
             capabilities: cap_names,
-            models: vec![], // models per provider
+            models: provider_models,
         }
     }).collect())
 }
@@ -182,7 +188,7 @@ pub async fn get_provider_routing(
 }
 
 // ═══════════════════════════════════════════════════════════
-// Skill Promotion (Task 25) — trust level + trigger info
+// Skill Promotion — trust level + trigger info
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize)]
@@ -239,6 +245,8 @@ pub async fn evaluate_skill_triggers(
         message_text,
         current_time: chrono::Utc::now(),
         requested_skill_ids: vec![],
+        triggered_this_turn: std::collections::HashSet::new(),
+        memory_signals: vec![],
     };
 
     let reg = state.skill_registry.read().map_err(|e| e.to_string())?;
@@ -253,4 +261,63 @@ pub async fn evaluate_skill_triggers(
             relevance: result.relevance,
         }
     }).collect())
+}
+
+// ═══════════════════════════════════════════════════════════
+// Audit Log — exposes AuditLogger to frontend
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FrontendLogEntry {
+    pub id: String,
+    pub timestamp: String,
+    pub level: String,
+    pub subsystem: String,
+    pub message: String,
+    pub category: String,
+    pub actor: String,
+    pub outcome: String,
+}
+
+/// Get recent audit log entries from the AuditLogger.
+///
+/// Maps the rich `AuditEntry` type to a simplified `FrontendLogEntry`
+/// structure that the LogsPage can render directly.
+#[tauri::command]
+pub async fn get_audit_logs(
+    limit: usize,
+    state: State<'_, AppState>,
+) -> Result<Vec<FrontendLogEntry>, String> {
+    let entries = state.audit_logger.recent(limit).await;
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            let level = match e.outcome {
+                clawdesk_types::security::AuditOutcome::Success => "info",
+                clawdesk_types::security::AuditOutcome::Denied => "warn",
+                clawdesk_types::security::AuditOutcome::Failed => "error",
+                clawdesk_types::security::AuditOutcome::Blocked => "warn",
+            };
+            let subsystem = format!("{:?}", e.category).to_lowercase();
+            let actor = match &e.actor {
+                clawdesk_types::security::AuditActor::Agent { id, .. } => format!("agent:{}", id),
+                clawdesk_types::security::AuditActor::User { sender_id, channel } => {
+                    format!("user:{}@{}", sender_id, channel)
+                }
+                clawdesk_types::security::AuditActor::System => "system".into(),
+                clawdesk_types::security::AuditActor::Plugin { name, .. } => format!("plugin:{}", name),
+                clawdesk_types::security::AuditActor::Cron { task_id } => format!("cron:{}", task_id),
+            };
+            FrontendLogEntry {
+                id: e.id,
+                timestamp: e.timestamp.to_rfc3339(),
+                level: level.into(),
+                subsystem,
+                message: format!("{} — {}", e.action, e.detail),
+                category: format!("{:?}", e.category),
+                actor,
+                outcome: format!("{:?}", e.outcome),
+            }
+        })
+        .collect())
 }

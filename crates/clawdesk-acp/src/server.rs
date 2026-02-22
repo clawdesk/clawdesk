@@ -3,6 +3,13 @@
 //! Provides the HTTP handlers for the A2A protocol that can be mounted
 //! into the gateway's Axum router.
 //!
+//! ## Concurrency model
+//!
+//! The agent **directory** uses Read-Copy-Update (RCU) via `ArcSwap`:
+//! readers get a lock-free snapshot (no `await`), writers clone-modify-swap
+//! serialized by a lightweight `Mutex`.  This eliminates reader contention
+//! on the hot path (every `send_task` / `list_agents` call).
+//!
 //! ## Endpoints
 //!
 //! | Method | Path                     | Description                    |
@@ -16,33 +23,69 @@
 //! | POST   | /a2a/agents/register     | Register an external agent     |
 
 use crate::agent_card::AgentCard;
+use crate::policy::{PolicyDecision, PolicyEngine};
 use crate::router::{AgentDirectory, AgentRouter};
+use crate::session_router::AgentSource;
 use crate::task::{Task, TaskEvent, TaskState};
+use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use std::sync::Arc;
+use tokio::sync::{Mutex as TokioMutex, RwLock};
 use tracing::info;
 
 /// Shared A2A state, passed to handlers.
 pub struct A2AState {
     /// This agent's card.
     pub self_card: AgentCard,
-    /// Directory of known agents.
-    pub directory: RwLock<AgentDirectory>,
+    /// Directory of known agents (RCU — readers never block).
+    pub directory: ArcSwap<AgentDirectory>,
     /// Router for capability-based delegation.
     pub router: AgentRouter,
     /// Active tasks (in-memory for now; production would use SochDB).
     pub tasks: RwLock<FxHashMap<String, Task>>,
+    /// A2A policy engine (controls delegation permissions and rate limits).
+    pub policy: TokioMutex<PolicyEngine>,
+    /// Agent source registry: agent_id → AgentSource.
+    pub agent_sources: RwLock<FxHashMap<String, AgentSource>>,
+    /// Serializes directory writes (readers remain lock-free).
+    directory_mu: tokio::sync::Mutex<()>,
 }
 
 impl A2AState {
     pub fn new(self_card: AgentCard) -> Self {
         Self {
             self_card,
-            directory: RwLock::new(AgentDirectory::new()),
+            directory: ArcSwap::from_pointee(AgentDirectory::new()),
             router: AgentRouter::new(),
             tasks: RwLock::new(FxHashMap::default()),
+            policy: TokioMutex::new(PolicyEngine::permissive()),
+            agent_sources: RwLock::new(FxHashMap::default()),
+            directory_mu: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Create with a specific policy configuration.
+    pub fn with_policy(self_card: AgentCard, policy: crate::policy::A2APolicy) -> Self {
+        Self {
+            self_card,
+            directory: ArcSwap::from_pointee(AgentDirectory::new()),
+            router: AgentRouter::new(),
+            tasks: RwLock::new(FxHashMap::default()),
+            policy: TokioMutex::new(PolicyEngine::new(policy)),
+            agent_sources: RwLock::new(FxHashMap::default()),
+            directory_mu: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// RCU write: clone the current directory, apply a mutation, swap in the
+    /// new version.  Serialized by `directory_mu` so concurrent writers see
+    /// each other's changes; readers never block.
+    pub async fn modify_directory<F: FnOnce(&mut AgentDirectory)>(&self, f: F) {
+        let _guard = self.directory_mu.lock().await;
+        let mut new_dir = (**self.directory.load()).clone();
+        f(&mut new_dir);
+        self.directory.store(Arc::new(new_dir));
     }
 }
 
@@ -116,16 +159,16 @@ impl A2AHandler {
     ) -> Result<TaskResponse, String> {
         // Determine the executor agent
         let executor_id = if let Some(target) = req.target_agent {
-            // Direct targeting
-            let dir = state.directory.read().await;
+            // Direct targeting — lock-free snapshot via ArcSwap
+            let dir = state.directory.load();
             if dir.get(&target).is_none() {
                 return Err(format!("target agent '{}' not found in directory", target));
             }
             target
         } else {
-            // Capability-based routing
+            // Capability-based routing — lock-free snapshot
             let caps = req.required_capabilities.unwrap_or_default();
-            let dir = state.directory.read().await;
+            let dir = state.directory.load();
             match state.router.route(&dir, &caps, &[requester_id.to_string()]) {
                 crate::router::RoutingDecision::Route { agent_id, .. } => agent_id,
                 crate::router::RoutingDecision::NoMatch { reason, .. } => {
@@ -134,11 +177,38 @@ impl A2AHandler {
             }
         };
 
+        // ── Policy enforcement ───────────────────────────────────────────
+        {
+            let source = state.agent_sources.read().await.get(&executor_id).cloned();
+            let mut policy = state.policy.lock().await;
+            let decision = policy.evaluate(
+                requester_id,
+                &executor_id,
+                req.skill_id.as_deref(),
+                source.as_ref(),
+            );
+            match decision {
+                PolicyDecision::Allow => {} // proceed
+                PolicyDecision::Deny { reason } => {
+                    return Err(format!("policy denied: {}", reason));
+                }
+                PolicyDecision::RateLimited { retry_after_secs } => {
+                    return Err(format!(
+                        "rate limited: retry after {} seconds",
+                        retry_after_secs
+                    ));
+                }
+            }
+        }
+
         // Create the task
         let mut task = Task::new(requester_id, &executor_id, req.input);
         task.skill_id = req.skill_id;
 
         let task_id = task.id.clone();
+        // Save values needed for RPC dispatch before the task is moved
+        let dispatch_input = task.input.clone();
+        let dispatch_skill_id = task.skill_id.clone();
         info!(
             task = %task_id,
             executor = %executor_id,
@@ -164,6 +234,67 @@ impl A2AHandler {
         // In a real implementation, we'd now dispatch the task to the executor
         // via HTTP POST to executor_id's A2A endpoint. For now, the task
         // is stored and can be polled.
+
+        // ── RPC dispatch (async, fire-and-forget) ─────────────────────────
+        // If the executor is a remote agent (has a known endpoint in the
+        // directory), spawn an async task to POST to their /a2a/tasks/send.
+        {
+            let dir = state.directory.load();
+            if let Some(entry) = dir.get(&executor_id) {
+                let endpoint_url = entry.card.endpoint.url.clone();
+                let task_id_clone = response.task_id.clone();
+                let input = dispatch_input;
+                let skill_id = dispatch_skill_id;
+                let self_id = state.self_card.id.clone();
+
+                // Don't dispatch to ourselves
+                if executor_id != self_id {
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::new();
+                        let send_url = format!(
+                            "{}/a2a/tasks/send",
+                            endpoint_url.trim_end_matches('/')
+                        );
+
+                        let dispatch_body = serde_json::json!({
+                            "input": input,
+                            "skill_id": skill_id,
+                            "requester_id": self_id,
+                        });
+
+                        match client
+                            .post(&send_url)
+                            .json(&dispatch_body)
+                            .timeout(std::time::Duration::from_secs(30))
+                            .send()
+                            .await
+                        {
+                            Ok(resp) if resp.status().is_success() => {
+                                info!(
+                                    task = %task_id_clone,
+                                    executor = %endpoint_url,
+                                    "dispatched task to remote agent"
+                                );
+                            }
+                            Ok(resp) => {
+                                tracing::warn!(
+                                    task = %task_id_clone,
+                                    status = %resp.status(),
+                                    "remote agent rejected task"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task = %task_id_clone,
+                                    error = %e,
+                                    "failed to dispatch task to remote agent"
+                                );
+                            }
+                        }
+                    });
+                }
+            }
+        }
 
         Ok(response)
     }
@@ -231,9 +362,9 @@ impl A2AHandler {
         })
     }
 
-    /// GET /a2a/agents — list all known agents.
+    /// GET /a2a/agents — list all known agents (lock-free snapshot).
     pub async fn list_agents(state: &A2AState) -> AgentListResponse {
-        let dir = state.directory.read().await;
+        let dir = state.directory.load();
         let agents = dir
             .agents
             .iter()
@@ -266,7 +397,7 @@ impl A2AHandler {
             active_tasks: 0,
         };
 
-        state.directory.write().await.register(card);
+        state.modify_directory(|dir| dir.register(card)).await;
         Ok(summary)
     }
 
@@ -297,11 +428,166 @@ impl A2AHandler {
             .await
             .map_err(|e| format!("invalid agent card: {}", e))?;
 
-        // Register the discovered agent
-        state.directory.write().await.register(card.clone());
+        // Register the discovered agent (RCU swap)
+        state.modify_directory(|dir| dir.register(card.clone())).await;
         info!(agent = %card.id, url = %base_url, "discovered and registered agent");
 
         Ok(card)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tool Permission Gate — classifies tools for A2A delegation safety.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Tool safety classification for A2A delegation.
+///
+/// When Agent A delegates to Agent B, the permission gate determines which
+/// of Agent B's tools can run without user confirmation.
+///
+/// ## Decision tree
+///
+/// ```text
+/// tool_name ─→ SAFE_TOOLS set?
+///   └─ yes → auto-approve
+///   └─ no  → DANGEROUS_TOOLS set?
+///       └─ yes → require user confirmation (or deny if unattended)
+///       └─ no  → default_policy (approve or deny based on config)
+/// ```
+#[derive(Debug, Clone)]
+pub struct ToolPermissionGate {
+    /// Tools that are always safe to execute without confirmation.
+    /// Read-only, search, informational tools.
+    pub safe_tools: Vec<String>,
+    /// Tools that require explicit user confirmation.
+    /// File writes, shell exec, external API calls, message sends.
+    pub dangerous_tools: Vec<String>,
+    /// Default policy for tools not in either set.
+    pub default_policy: ToolPermissionDefault,
+}
+
+/// What to do with tools that aren't classified as safe or dangerous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolPermissionDefault {
+    /// Auto-approve unknown tools (permissive).
+    Allow,
+    /// Require confirmation for unknown tools (conservative).
+    RequireConfirmation,
+    /// Deny unknown tools (strict).
+    Deny,
+}
+
+/// Result of tool permission evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolPermission {
+    /// Tool is safe — proceed without confirmation.
+    AutoApprove,
+    /// Tool needs user confirmation before execution.
+    RequireConfirmation { reason: String },
+    /// Tool is denied in this context.
+    Denied { reason: String },
+}
+
+impl ToolPermissionGate {
+    /// Create a gate with sensible defaults for ClawDesk built-in tools.
+    pub fn default_clawdesk() -> Self {
+        Self {
+            safe_tools: vec![
+                "memory_search".into(),
+                "memory_store".into(),
+                "agents_list".into(),
+                "web_search".into(),
+                "file_read".into(),
+                "file_list".into(),
+            ],
+            dangerous_tools: vec![
+                "shell".into(),
+                "file_write".into(),
+                "http".into(),
+                "message_send".into(),
+                "sessions_send".into(),
+                "spawn_subagent".into(),
+            ],
+            default_policy: ToolPermissionDefault::RequireConfirmation,
+        }
+    }
+
+    /// Create a fully permissive gate (all tools auto-approved).
+    pub fn permissive() -> Self {
+        Self {
+            safe_tools: vec![],
+            dangerous_tools: vec![],
+            default_policy: ToolPermissionDefault::Allow,
+        }
+    }
+
+    /// Create a strict gate (only safe tools auto-approved, all others denied).
+    pub fn strict() -> Self {
+        Self {
+            safe_tools: vec![
+                "memory_search".into(),
+                "memory_store".into(),
+                "agents_list".into(),
+                "file_read".into(),
+                "file_list".into(),
+            ],
+            dangerous_tools: vec![],
+            default_policy: ToolPermissionDefault::Deny,
+        }
+    }
+
+    /// Evaluate whether a tool should be allowed in an A2A context.
+    ///
+    /// `requesting_agent` is the agent that wants to use the tool.
+    /// `tool_name` is the name of the tool being requested.
+    pub fn evaluate(&self, tool_name: &str, requesting_agent: &str) -> ToolPermission {
+        // Check safe list first
+        if self.safe_tools.iter().any(|t| t.eq_ignore_ascii_case(tool_name)) {
+            return ToolPermission::AutoApprove;
+        }
+
+        // Check dangerous list
+        if self.dangerous_tools.iter().any(|t| t.eq_ignore_ascii_case(tool_name)) {
+            return ToolPermission::RequireConfirmation {
+                reason: format!(
+                    "tool '{}' requested by agent '{}' requires confirmation (classified as dangerous)",
+                    tool_name, requesting_agent
+                ),
+            };
+        }
+
+        // Default policy for unclassified tools
+        match self.default_policy {
+            ToolPermissionDefault::Allow => ToolPermission::AutoApprove,
+            ToolPermissionDefault::RequireConfirmation => {
+                ToolPermission::RequireConfirmation {
+                    reason: format!(
+                        "tool '{}' requested by agent '{}' is unclassified — confirmation required",
+                        tool_name, requesting_agent
+                    ),
+                }
+            }
+            ToolPermissionDefault::Deny => ToolPermission::Denied {
+                reason: format!(
+                    "tool '{}' is not in the safe tools list — denied by strict policy",
+                    tool_name
+                ),
+            },
+        }
+    }
+
+    /// Batch-evaluate a set of tools. Returns a map of tool_name → permission.
+    pub fn evaluate_batch(
+        &self,
+        tool_names: &[&str],
+        requesting_agent: &str,
+    ) -> Vec<(String, ToolPermission)> {
+        tool_names
+            .iter()
+            .map(|name| {
+                (name.to_string(), self.evaluate(name, requesting_agent))
+            })
+            .collect()
     }
 }
 
@@ -318,9 +604,9 @@ mod tests {
     async fn send_and_get_task() {
         let state = test_state();
 
-        // Register a target agent
+        // Register a target agent (RCU)
         let target = AgentCard::new("worker", "Worker Agent", "http://worker.local");
-        state.directory.write().await.register(target);
+        state.modify_directory(|dir| dir.register(target)).await;
 
         // Send a task
         let req = TaskSendRequest {
@@ -342,7 +628,7 @@ mod tests {
     async fn cancel_task() {
         let state = test_state();
         let target = AgentCard::new("worker", "Worker", "http://w.local");
-        state.directory.write().await.register(target);
+        state.modify_directory(|dir| dir.register(target)).await;
 
         let req = TaskSendRequest {
             skill_id: None,
@@ -356,5 +642,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(canceled.state, TaskState::Canceled);
+    }
+
+    #[test]
+    fn tool_permission_gate_safe_tools() {
+        let gate = ToolPermissionGate::default_clawdesk();
+        assert_eq!(
+            gate.evaluate("memory_search", "agent-a"),
+            ToolPermission::AutoApprove
+        );
+        assert_eq!(
+            gate.evaluate("file_read", "agent-a"),
+            ToolPermission::AutoApprove
+        );
+    }
+
+    #[test]
+    fn tool_permission_gate_dangerous_tools() {
+        let gate = ToolPermissionGate::default_clawdesk();
+        assert!(matches!(
+            gate.evaluate("shell", "agent-a"),
+            ToolPermission::RequireConfirmation { .. }
+        ));
+        assert!(matches!(
+            gate.evaluate("file_write", "agent-a"),
+            ToolPermission::RequireConfirmation { .. }
+        ));
+    }
+
+    #[test]
+    fn tool_permission_gate_unclassified() {
+        let gate = ToolPermissionGate::default_clawdesk();
+        // Default policy is RequireConfirmation for unclassified
+        assert!(matches!(
+            gate.evaluate("unknown_tool", "agent-a"),
+            ToolPermission::RequireConfirmation { .. }
+        ));
+    }
+
+    #[test]
+    fn tool_permission_gate_strict() {
+        let gate = ToolPermissionGate::strict();
+        assert_eq!(
+            gate.evaluate("memory_search", "agent-a"),
+            ToolPermission::AutoApprove
+        );
+        assert!(matches!(
+            gate.evaluate("shell", "agent-a"),
+            ToolPermission::Denied { .. }
+        ));
+        assert!(matches!(
+            gate.evaluate("unknown_tool", "agent-a"),
+            ToolPermission::Denied { .. }
+        ));
+    }
+
+    #[test]
+    fn tool_permission_gate_permissive() {
+        let gate = ToolPermissionGate::permissive();
+        assert_eq!(
+            gate.evaluate("shell", "agent-a"),
+            ToolPermission::AutoApprove
+        );
+        assert_eq!(
+            gate.evaluate("unknown_tool", "agent-a"),
+            ToolPermission::AutoApprove
+        );
+    }
+
+    #[test]
+    fn tool_permission_gate_batch() {
+        let gate = ToolPermissionGate::default_clawdesk();
+        let results = gate.evaluate_batch(
+            &["memory_search", "shell", "unknown_tool"],
+            "agent-a"
+        );
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].1, ToolPermission::AutoApprove);
+        assert!(matches!(results[1].1, ToolPermission::RequireConfirmation { .. }));
+        assert!(matches!(results[2].1, ToolPermission::RequireConfirmation { .. }));
+    }
+
+    #[test]
+    fn tool_permission_case_insensitive() {
+        let gate = ToolPermissionGate::default_clawdesk();
+        assert_eq!(
+            gate.evaluate("Memory_Search", "agent-a"),
+            ToolPermission::AutoApprove
+        );
+        assert!(matches!(
+            gate.evaluate("SHELL", "agent-a"),
+            ToolPermission::RequireConfirmation { .. }
+        ));
     }
 }

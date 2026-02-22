@@ -3,7 +3,7 @@
 //! All advanced SochDB modules (`SemanticCache`, `TraceStore`, `GraphOverlay`,
 //! `PolicyEngine`, `AtomicMemoryWriter`, etc.) are generic over `C: ConnectionTrait`.
 //! `SochConn` wraps `Arc<SochStore>` to satisfy this bound while sharing the
-//! same underlying `Database` (DurableConnection) across all modules.
+//! same underlying `EmbeddedConnection` across all modules.
 //!
 //! ## Usage
 //!
@@ -23,8 +23,11 @@ use std::sync::Arc;
 /// Cloneable connection wrapper for SochDB advanced modules.
 ///
 /// Implements `sochdb::ConnectionTrait` by delegating to the underlying
-/// `SochStore::db()` (= `DurableConnection`). Safe to clone — all clones
-/// share the same ACID database via `Arc`.
+/// `SochStore::connection()` (= `EmbeddedConnection`). Safe to clone — all
+/// clones share the same ACID database via `Arc`.
+///
+/// Note: `ConnectionTrait` uses `&[u8]` keys, so we convert to `&str` since
+/// all ClawDesk keys are valid UTF-8 strings.
 #[derive(Clone, Debug)]
 pub struct SochConn(Arc<SochStore>);
 
@@ -42,19 +45,34 @@ impl SochConn {
 
 impl ConnectionTrait for SochConn {
     fn put(&self, key: &[u8], value: &[u8]) -> sochdb::error::Result<()> {
-        self.0.db().put(key, value)
+        let path = std::str::from_utf8(key)
+            .map_err(|e| sochdb::error::ClientError::Storage(format!("Invalid UTF-8 key: {e}")))?;
+        self.0.put(path, value)
+            .map_err(|e| sochdb::error::ClientError::Storage(format!("bridge put: {e}")))
     }
 
     fn get(&self, key: &[u8]) -> sochdb::error::Result<Option<Vec<u8>>> {
-        self.0.db().get(key)
+        let path = std::str::from_utf8(key)
+            .map_err(|e| sochdb::error::ClientError::Storage(format!("Invalid UTF-8 key: {e}")))?;
+        self.0.get(path)
+            .map_err(|e| sochdb::error::ClientError::Storage(format!("bridge get: {e}")))
     }
 
     fn delete(&self, key: &[u8]) -> sochdb::error::Result<()> {
-        self.0.db().delete(key)
+        let path = std::str::from_utf8(key)
+            .map_err(|e| sochdb::error::ClientError::Storage(format!("Invalid UTF-8 key: {e}")))?;
+        self.0.delete(path)
+            .map_err(|e| sochdb::error::ClientError::Storage(format!("bridge delete: {e}")))
     }
 
     fn scan(&self, prefix: &[u8]) -> sochdb::error::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.0.db().scan(prefix)
+        let path = std::str::from_utf8(prefix)
+            .map_err(|e| sochdb::error::ClientError::Storage(format!("Invalid UTF-8 prefix: {e}")))?;
+        // SochStore::scan returns Vec<(String, Vec<u8>)>,
+        // but ConnectionTrait expects Vec<(Vec<u8>, Vec<u8>)>.
+        let results = self.0.scan(path)
+            .map_err(|e| sochdb::error::ClientError::Storage(format!("bridge scan: {e}")))?;
+        Ok(results.into_iter().map(|(k, v)| (k.into_bytes(), v)).collect())
     }
 }
 

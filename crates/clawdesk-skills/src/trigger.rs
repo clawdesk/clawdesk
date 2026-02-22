@@ -23,7 +23,11 @@
 
 use crate::definition::{Skill, SkillId, SkillTrigger};
 use chrono::{DateTime, Datelike, Timelike, Utc};
+use std::collections::HashSet;
 use std::sync::Arc;
+
+/// Maximum number of skills that may fire in a single turn to prevent cascade.
+const MAX_TRIGGERS_PER_TURN: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Turn context
@@ -45,6 +49,16 @@ pub struct TurnContext {
     pub current_time: DateTime<Utc>,
     /// Skill IDs explicitly requested by another skill or the user.
     pub requested_skill_ids: Vec<SkillId>,
+    /// Skills already triggered this turn — prevents cascade re-triggering.
+    /// Populated by `filter_matching` as it evaluates skills.
+    pub triggered_this_turn: HashSet<String>,
+    /// Memory-derived signal terms for memory→skill feedback.
+    ///
+    /// Populated from memory recall results before skill selection.
+    /// Keywords from recalled memories boost skill trigger matching,
+    /// enabling context-aware skill activation even when the user
+    /// message alone doesn't contain the trigger words.
+    pub memory_signals: Vec<String>,
 }
 
 impl TurnContext {
@@ -164,10 +178,12 @@ impl TriggerEvaluator {
             }
 
             SkillTrigger::Keywords { words, threshold } => {
-                if words.is_empty() || ctx.message_keywords.is_empty() {
+                if words.is_empty() || (ctx.message_keywords.is_empty() && ctx.memory_signals.is_empty()) {
                     return None;
                 }
-                let matched_count = words
+
+                // Primary: match message keywords against trigger words
+                let msg_matched = words
                     .iter()
                     .filter(|w| {
                         ctx.message_keywords
@@ -175,9 +191,31 @@ impl TriggerEvaluator {
                             .any(|k| k.eq_ignore_ascii_case(w))
                     })
                     .count();
-                let ratio = matched_count as f64 / words.len() as f64;
-                if ratio >= *threshold {
-                    Some((ratio, format!("keywords:{matched_count}/{}", words.len())))
+                let msg_ratio = msg_matched as f64 / words.len() as f64;
+
+                // Memory feedback: match memory signals against trigger words (α = 0.6)
+                let mem_ratio = if !ctx.memory_signals.is_empty() {
+                    let mem_matched = words
+                        .iter()
+                        .filter(|w| {
+                            ctx.memory_signals
+                                .iter()
+                                .any(|s| s.eq_ignore_ascii_case(w))
+                        })
+                        .count();
+                    0.6 * (mem_matched as f64 / words.len() as f64)
+                } else {
+                    0.0
+                };
+
+                let effective_ratio = msg_ratio.max(mem_ratio);
+                if effective_ratio >= *threshold {
+                    let label = if mem_ratio > msg_ratio {
+                        format!("keywords:{msg_matched}/{},memory_boost", words.len())
+                    } else {
+                        format!("keywords:{msg_matched}/{}", words.len())
+                    };
+                    Some((effective_ratio, label))
                 } else {
                     None
                 }
@@ -281,13 +319,23 @@ impl TriggerEvaluator {
     ///
     /// Returns `(Arc<Skill>, relevance_score)` pairs for skills that matched
     /// at least one trigger, sorted by relevance descending.
+    ///
+    /// Applies cascade gating:
+    /// - Skills already in `ctx.triggered_this_turn` are skipped.
+    /// - At most `MAX_TRIGGERS_PER_TURN` skills fire per turn.
+    /// - Matched skill IDs are recorded in `ctx.triggered_this_turn`.
     pub fn filter_matching(
         skills: &[Arc<Skill>],
-        ctx: &TurnContext,
+        ctx: &mut TurnContext,
     ) -> Vec<(Arc<Skill>, f64)> {
         let mut matched: Vec<(Arc<Skill>, f64)> = skills
             .iter()
             .filter_map(|skill| {
+                let id_str = skill.manifest.id.as_str().to_string();
+                // Skip skills already triggered this turn.
+                if ctx.triggered_this_turn.contains(&id_str) {
+                    return None;
+                }
                 // First check standard triggers.
                 let result = Self::evaluate(skill, ctx);
                 if result.matched {
@@ -306,6 +354,15 @@ impl TriggerEvaluator {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        // Cap the number of triggers per turn.
+        matched.truncate(MAX_TRIGGERS_PER_TURN);
+
+        // Record triggered skills for cascade prevention.
+        for (skill, _) in &matched {
+            ctx.triggered_this_turn
+                .insert(skill.manifest.id.as_str().to_string());
+        }
 
         matched
     }
@@ -354,6 +411,8 @@ mod tests {
             message_text: text.into(),
             current_time: Utc::now(),
             requested_skill_ids: vec![],
+            triggered_this_turn: HashSet::new(),
+            memory_signals: vec![],
         }
     }
 
@@ -474,7 +533,7 @@ mod tests {
             )),
         ];
         let ctx = make_context("/search hello");
-        let matched = TriggerEvaluator::filter_matching(&skills, &ctx);
+        let matched = TriggerEvaluator::filter_matching(&skills, &mut ctx.clone());
 
         assert_eq!(matched.len(), 2);
         // Command match (1.0) should rank before Always (0.5).

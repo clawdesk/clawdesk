@@ -14,8 +14,12 @@
 //! - **Crash recovery**: Events persisted to SochDB append-only log
 //! - **Consumer cursors**: u64 offsets per subscriber — O(1) publish/consume
 
+pub mod backpressure;
+pub mod bridge;
 pub mod dispatch;
 pub mod event;
+pub mod inbound;
 pub mod priority;
+pub mod skill_events;
 pub mod subscription;
 pub mod topic;

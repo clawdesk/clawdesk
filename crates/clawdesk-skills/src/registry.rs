@@ -182,6 +182,16 @@ impl SkillRegistry {
                 estimated_tokens: e.skill.token_cost(),
                 priority_weight: e.skill.manifest.priority_weight,
                 error: e.error.clone(),
+                trust_level: None, // populated by verification layer
+                publisher_key: e.skill.manifest.publisher_key.clone(),
+                content_hash: e.skill.manifest.content_hash.clone(),
+                dependencies: e
+                    .skill
+                    .manifest
+                    .dependencies
+                    .iter()
+                    .map(|d| d.as_str().to_string())
+                    .collect(),
             })
             .collect()
     }
@@ -226,6 +236,14 @@ pub struct SkillInfo {
     pub estimated_tokens: usize,
     pub priority_weight: f64,
     pub error: Option<String>,
+    /// Trust level from signature verification.
+    pub trust_level: Option<String>,
+    /// Publisher public key (hex-encoded Ed25519).
+    pub publisher_key: Option<String>,
+    /// Content hash (SHA-256 of canonical manifest bytes).
+    pub content_hash: Option<String>,
+    /// Dependencies declared by this skill.
+    pub dependencies: Vec<String>,
 }
 
 #[cfg(test)]

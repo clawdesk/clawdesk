@@ -15,11 +15,13 @@
 pub mod config_store;
 pub mod conversation_store;
 pub mod graph_store;
+pub mod replay_store;
 pub mod session_store;
 pub mod vector_store;
 
 pub use config_store::ConfigStore;
 pub use conversation_store::ConversationStore;
 pub use graph_store::GraphStore;
+pub use replay_store::ChatReplayStore;
 pub use session_store::SessionStore;
 pub use vector_store::VectorStore;

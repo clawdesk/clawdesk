@@ -23,11 +23,13 @@ pub mod format;
 pub mod image;
 pub mod pipeline;
 pub mod processor;
+pub mod recorder;
 pub mod selector;
 pub mod tts;
 pub mod understanding;
 pub mod video;
 pub mod voice;
+pub mod whisper;
 pub mod link_understanding;
 
 pub use pipeline::MediaPipeline;

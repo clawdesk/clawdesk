@@ -1,4 +1,4 @@
-//! Media processing commands — audio, image, document, link preview, TTS (Task 13).
+//! Media processing commands — audio, image, document, link preview, TTS.
 
 use crate::state::AppState;
 use serde::Serialize;

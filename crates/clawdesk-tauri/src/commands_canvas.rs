@@ -1,4 +1,4 @@
-//! Canvas workspace commands — block-based content organization (Task 30).
+//! Canvas workspace commands — block-based content organization.
 
 use crate::canvas::{Block, BlockMetadata, BlockType, Canvas, Connection, Position, Size};
 use crate::state::AppState;

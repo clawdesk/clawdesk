@@ -69,6 +69,22 @@ pub enum EventKind {
     DigestWindowClosed,
     /// Backup completed
     BackupCompleted,
+    /// Skill installed from store or local source
+    SkillInstalled,
+    /// Skill uninstalled
+    SkillUninstalled,
+    /// Skill updated to a new version
+    SkillUpdated,
+    /// Skill activated (eligible and loaded)
+    SkillActivated,
+    /// Skill deactivated
+    SkillDeactivated,
+    /// Skill eligibility changed (binary installed/removed)
+    SkillEligibilityChanged,
+    /// Store catalog synced from remote
+    CatalogSynced,
+    /// Skill install progress event (step started/completed/download)
+    SkillInstallProgress,
     /// Custom event from plugin or skill
     Custom(String),
 }

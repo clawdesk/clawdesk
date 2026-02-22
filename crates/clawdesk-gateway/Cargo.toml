@@ -20,6 +20,7 @@ clawdesk-agents = { workspace = true }
 clawdesk-sochdb = { workspace = true }
 clawdesk-plugin = { workspace = true }
 clawdesk-cron = { workspace = true }
+clawdesk-acp = { workspace = true }
 async-trait = { workspace = true }
 arc-swap = { workspace = true }
 axum = { workspace = true }

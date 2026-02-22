@@ -9,16 +9,14 @@ use crate::SochStore;
 #[async_trait]
 impl ConfigStore for SochStore {
     async fn load_config(&self) -> Result<ClawDeskConfig, StorageError> {
-        match self.db.get(b"config/main") {
+        match self.get("config/main") {
             Ok(Some(bytes)) => {
                 serde_json::from_slice(&bytes).map_err(|e| StorageError::SerializationFailed {
                     detail: e.to_string(),
                 })
             }
             Ok(None) => Ok(ClawDeskConfig::default()),
-            Err(e) => Err(StorageError::OpenFailed {
-                detail: e.to_string(),
-            }),
+            Err(e) => Err(e),
         }
     }
 
@@ -27,25 +25,17 @@ impl ConfigStore for SochStore {
             detail: e.to_string(),
         })?;
 
-        self.db
-            .put(b"config/main", &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put("config/main", &bytes)?;
 
         // Increment version
         let version = self.config_version().await.unwrap_or(0) + 1;
-        self.db
-            .put(b"config/version", &version.to_le_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put("config/version", &version.to_le_bytes())?;
 
         Ok(())
     }
 
     async fn config_version(&self) -> Result<u64, StorageError> {
-        match self.db.get(b"config/version") {
+        match self.get("config/version") {
             Ok(Some(bytes)) => {
                 if bytes.len() >= 8 {
                     let arr: [u8; 8] = bytes[..8].try_into().unwrap();
@@ -55,15 +45,13 @@ impl ConfigStore for SochStore {
                 }
             }
             Ok(None) => Ok(0),
-            Err(e) => Err(StorageError::OpenFailed {
-                detail: e.to_string(),
-            }),
+            Err(e) => Err(e),
         }
     }
 
     async fn get_value(&self, path: &str) -> Result<Option<serde_json::Value>, StorageError> {
         let key = format!("config/values/{}", path);
-        match self.db.get(key.as_bytes()) {
+        match self.get(&key) {
             Ok(Some(bytes)) => {
                 let value = serde_json::from_slice(&bytes)
                     .map_err(|e| StorageError::SerializationFailed {
@@ -72,9 +60,7 @@ impl ConfigStore for SochStore {
                 Ok(Some(value))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(StorageError::OpenFailed {
-                detail: e.to_string(),
-            }),
+            Err(e) => Err(e),
         }
     }
 
@@ -88,11 +74,7 @@ impl ConfigStore for SochStore {
             detail: e.to_string(),
         })?;
 
-        self.db
-            .put(key.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.put(&key, &bytes)?;
 
         Ok(())
     }

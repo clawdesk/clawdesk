@@ -20,8 +20,10 @@ clawdesk-storage = { workspace = true }
 clawdesk-sochdb = { workspace = true }
 sochdb = { workspace = true }
 clawdesk-channel = { workspace = true }
+clawdesk-channels = { workspace = true }
 clawdesk-providers = { workspace = true }
 clawdesk-agents = { workspace = true }
+clawdesk-cron = { workspace = true }
 clawdesk-gateway = { workspace = true }
 clawdesk-security = { workspace = true }
 clawdesk-tunnel = { workspace = true }
@@ -35,16 +37,22 @@ clawdesk-discovery = { workspace = true }
 clawdesk-observability = { workspace = true }
 clawdesk-infra = { workspace = true }
 clawdesk-memory = { workspace = true }
-tauri = { version = "2", features = [] }
+clawdesk-threads = { workspace = true }
+base64 = { workspace = true }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
+tauri-plugin-single-instance = { path = "../../../plugins-workspace/plugins/single-instance" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+async-trait = "0.1"
+parking_lot = { workspace = true }
 thiserror = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

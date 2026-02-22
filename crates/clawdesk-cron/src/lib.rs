@@ -13,6 +13,7 @@ pub mod heartbeat;
 pub mod parser;
 pub mod manager;
 pub mod proactive;
+pub mod webhook;
 
 pub use executor::CronExecutor;
 pub use heartbeat::{Heartbeat, HeartbeatConfig, HeartbeatDecision, HEARTBEAT_SKIP};

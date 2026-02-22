@@ -282,7 +282,138 @@ impl PromptBuilder {
             });
         }
 
-        // Phase 2: Knapsack over skills — sort by effective_density, greedily fill.
+        // ── Memory Directive ─────────────────────────────────────────────
+        // Always-on behavioral instructions for memory_search and memory_store.
+        // ~120 tokens — negligible in 128K context, high integration value.
+        {
+            let directive = "\
+## Memory Protocol
+
+You have access to persistent memory via two tools:
+
+**memory_search(query, max_results)** — Search stored memories.
+  • Use BEFORE answering questions about: prior conversations, user preferences, past decisions, project history, or anything discussed previously.
+  • If results are returned, incorporate them into your response.
+  • If no results found and you're uncertain, say so rather than guessing.
+
+**memory_store(content, tags)** — Save information for future recall.
+  • Store: user preferences, key decisions, project context, important facts, task outcomes.
+  • Write self-contained entries — include enough context to be useful when recalled later.
+  • Tag entries for categorization (e.g. \"preference\", \"decision\", \"project:name\").
+  • Do NOT store trivial or ephemeral information.";
+
+            let tokens = estimate_tokens(directive);
+            total_tokens += tokens;
+            sections.push(directive.to_string());
+            manifest_sections.push(ManifestSection {
+                name: "memory_directive".into(),
+                tokens,
+                included: true,
+                reason: "always-on behavioral directive".into(),
+            });
+        }
+
+        // ── Skill Selection Protocol ─────────────────────────────────────
+        // Always-on instructions for how to select and use skills.
+        // ~80 tokens.
+        {
+            let protocol = "\
+## Skill Selection Protocol
+
+When handling a request:
+1. Scan <skill_inventory> for skills whose triggers match the user's intent.
+2. If a matching skill is found, follow its instructions precisely.
+3. Prefer the most specific skill over general-purpose ones.
+4. If multiple skills match, pick the one with the highest relevance to the exact request.
+5. If no skill matches, respond using your general knowledge and available tools.
+
+## Skill Execution Protocol
+
+Skills are **instructions**, not tools. They teach you how to use existing builtin tools.
+When a skill provides CLI commands for a task, you MUST execute them immediately using `shell_exec` — do NOT just describe the command to the user and ask them to run it.
+
+**MANDATORY behavior when a matching skill exists:**
+1. Identify the correct CLI command from the skill instructions.
+2. Call `shell_exec` with that command. DO NOT ask the user to confirm first.
+3. Report the result (success/failure) to the user.
+
+**Tool mapping:**
+- **CLI-based skills** (e.g. apple-notes, bear-notes, reminders, obsidian): Call `shell_exec` with the CLI commands from the skill.
+- **File-based skills** (e.g. markdown, config editing): Call `file_read` / `file_write`.
+- **Web-based skills** (e.g. web search, API calls): Call `http_fetch` or `web_search`.
+
+**WRONG** (never do this):
+> \"Here's the command you can run: `memo notes -a \"abc\"`\"
+
+**RIGHT** (always do this):
+> [Call shell_exec with command: memo notes -a \"abc\"]
+> \"Done! I've created a note titled 'abc' in Apple Notes.\"
+
+NEVER say you \"cannot access\" an application if a skill provides CLI instructions for it.
+NEVER just show the user a command without executing it yourself via `shell_exec`.
+You have full shell access — USE IT.";
+
+            let tokens = estimate_tokens(protocol);
+            total_tokens += tokens;
+            sections.push(protocol.to_string());
+            manifest_sections.push(ManifestSection {
+                name: "skill_protocol".into(),
+                tokens,
+                included: true,
+                reason: "always-on behavioral directive".into(),
+            });
+        }
+
+        // Phase 2a: Skill inventory — lightweight always-on catalog of ALL
+        // candidate skills. This costs ~15 tokens per skill and ensures the
+        // agent always knows what it can do, even when full prompt fragments
+        // are excluded by the knapsack budget.
+        if !self.skills.is_empty() {
+            let inventory_lines: Vec<String> = self
+                .skills
+                .iter()
+                .map(|s| {
+                    let desc = s
+                        .prompt_fragment
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("(no description)")
+                        .trim();
+                    // Truncate description to ~60 chars for compactness
+                    let short_desc = if desc.len() > 60 {
+                        // Find a char boundary near 57
+                        let mut end = 57;
+                        while end > 0 && !desc.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &desc[..end])
+                    } else {
+                        desc.to_string()
+                    };
+                    format!("- {}: {}", s.display_name, short_desc)
+                })
+                .collect();
+
+            let inventory = format!(
+                "<skill_inventory>\nYou have {} installed skills. \
+                 When asked about your capabilities, ALWAYS refer to this list:\n{}\n\
+                 </skill_inventory>",
+                inventory_lines.len(),
+                inventory_lines.join("\n")
+            );
+
+            let inv_tokens = estimate_tokens(&inventory);
+            total_tokens += inv_tokens;
+            sections.push(inventory);
+            manifest_sections.push(ManifestSection {
+                name: "skill_inventory".into(),
+                tokens: inv_tokens,
+                included: true,
+                reason: format!("always-on: {} skills cataloged", self.skills.len()),
+            });
+        }
+
+        // Phase 2b: Knapsack over skills — sort by effective_density, greedily fill.
         let mut sorted_skills = self.skills;
         sorted_skills.sort_by(|a, b| {
             b.effective_density()
@@ -292,6 +423,7 @@ impl PromptBuilder {
 
         let mut skills_tokens = 0usize;
         let mut skill_fragments = Vec::new();
+        let mut skill_display_names = Vec::new();
 
         for skill in sorted_skills {
             if skills_tokens + skill.token_cost <= self.budget.skills_cap {
@@ -300,6 +432,7 @@ impl PromptBuilder {
                     "## {}\n{}",
                     skill.display_name, skill.prompt_fragment
                 ));
+                skill_display_names.push(skill.display_name.clone());
                 skills_included.push(skill.skill_id.clone());
                 manifest_sections.push(ManifestSection {
                     name: format!("skill:{}", skill.skill_id),
@@ -332,12 +465,18 @@ impl PromptBuilder {
         }
 
         if !skill_fragments.is_empty() {
-            let skills_text = format!("<skills>\n{}\n</skills>", skill_fragments.join("\n\n"));
+            let skills_text = format!(
+                "<skills>\nDetailed instructions for {} active skills (see <skill_inventory> for the full list):\n\n{}\n</skills>",
+                skill_display_names.len(),
+                skill_fragments.join("\n\n")
+            );
             sections.push(skills_text);
             total_tokens += skills_tokens;
         }
 
         // Phase 3: Fill remaining budget with memory fragments.
+        // Memory is now extracted as a separate payload for pre-user-message
+        // injection, instead of being appended to the system prompt sections.
         let remaining = self
             .budget
             .available()
@@ -364,20 +503,24 @@ impl PromptBuilder {
             }
         }
 
-        if !memory_fragments.is_empty() {
+        let memory_injection = if !memory_fragments.is_empty() {
             let memory_text = format!(
                 "<memory_context>\n{}\n</memory_context>",
                 memory_fragments.join("\n---\n")
             );
-            sections.push(memory_text);
+            // NOTE: Do NOT push to `sections` — memory goes into the
+            // `AssembledPrompt::memory_text` field for pre-user-message injection.
             total_tokens += memory_tokens;
             manifest_sections.push(ManifestSection {
                 name: "memory".into(),
                 tokens: memory_tokens,
                 included: true,
-                reason: format!("{memory_count} fragments, relevance-sorted"),
+                reason: format!("{memory_count} fragments, pre-user-message injection"),
             });
-        }
+            Some(memory_text)
+        } else {
+            None
+        };
 
         let utilization = if self.budget.available() > 0 {
             total_tokens as f64 / self.budget.available() as f64
@@ -399,6 +542,8 @@ impl PromptBuilder {
         let prompt = AssembledPrompt {
             text: sections.join("\n\n"),
             total_tokens,
+            memory_text: memory_injection,
+            memory_tokens,
         };
 
         (prompt, manifest)
@@ -414,6 +559,14 @@ impl PromptBuilder {
 pub struct AssembledPrompt {
     pub text: String,
     pub total_tokens: usize,
+    /// Memory context to inject as a separate message pre-user-message
+    ///. When `Some`, this should be placed as a System message
+    /// immediately before the user's latest turn rather than appended to
+    /// the system prompt. This positions memory in the LLM's high-attention
+    /// zone (recency bias) instead of being buried in a long system prompt.
+    pub memory_text: Option<String>,
+    /// Token cost of the memory injection, for budget accounting.
+    pub memory_tokens: usize,
 }
 
 /// Debugging artifact — tells you exactly what's in the prompt and why.
@@ -587,6 +740,51 @@ mod tests {
         assert!(manifest.skills_included.contains(&"core/small".to_string()));
         assert!(manifest.skills_excluded.iter().any(|(id, _)| id == "core/big"));
         assert!(prompt.text.contains("useful skill"));
+        // Both skills appear in the inventory regardless of knapsack
+        assert!(prompt.text.contains("<skill_inventory>"));
+        assert!(prompt.text.contains("Big Skill"));
+        assert!(prompt.text.contains("Small Skill"));
+    }
+
+    #[test]
+    fn skill_inventory_always_present_even_when_knapsack_excludes_all() {
+        // Budget so small that NO skill fragments fit, but inventory still appears
+        let builder = PromptBuilder::new(PromptBudget {
+            skills_cap: 1, // impossibly small
+            ..default_budget()
+        })
+        .unwrap();
+
+        let skills = vec![
+            ScoredSkill {
+                skill_id: "email/compose".into(),
+                display_name: "Email Compose".into(),
+                prompt_fragment: "Draft professional emails with subject and body.".into(),
+                token_cost: 50,
+                priority_weight: 5.0,
+                relevance: 0.5,
+            },
+            ScoredSkill {
+                skill_id: "media/spotify".into(),
+                display_name: "Spotify Player".into(),
+                prompt_fragment: "Terminal Spotify playback and search via spogo.".into(),
+                token_cost: 40,
+                priority_weight: 3.0,
+                relevance: 0.3,
+            },
+        ];
+
+        let (prompt, manifest) = builder.skills(skills).build();
+
+        // No skill fragments fit the knapsack
+        assert!(manifest.skills_included.is_empty());
+        // But the inventory IS present
+        assert!(prompt.text.contains("<skill_inventory>"));
+        assert!(prompt.text.contains("Email Compose"));
+        assert!(prompt.text.contains("Spotify Player"));
+        assert!(prompt.text.contains("You have 2 installed skills"));
+        // Manifest records the inventory section
+        assert!(manifest.sections.iter().any(|s| s.name == "skill_inventory"));
     }
 
     #[test]
@@ -650,7 +848,10 @@ mod tests {
 
         // Only the small fragment should fit.
         assert_eq!(manifest.memory_fragments, 1);
-        assert!(prompt.text.contains("important fact"));
+        // Memory is now placed in a separate field for pre-user-message injection
+        // rather than concatenated into the system prompt text.
+        let mem = prompt.memory_text.as_deref().unwrap_or("");
+        assert!(mem.contains("important fact"));
     }
 
     #[test]

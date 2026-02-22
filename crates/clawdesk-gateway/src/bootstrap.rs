@@ -40,6 +40,7 @@
 //! ```
 
 use crate::GatewayConfig;
+use clawdesk_channel::inbound_adapter::InboundAdapterRegistry;
 use clawdesk_channel::registry::ChannelRegistry;
 use clawdesk_channels::factory::{ChannelConfig, ChannelFactory};
 use clawdesk_skills::loader::SkillLoader;
@@ -173,6 +174,9 @@ pub struct BootstrapResult {
     pub gateway_config: GatewayConfig,
     /// Skills config — retained for reload operations.
     pub skills_config: SkillsConfig,
+    /// Inbound adapter registry — channels that implement `InboundAdapter`
+    /// are registered here for unified message ingestion via the event bus.
+    pub inbound_registry: InboundAdapterRegistry,
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +302,12 @@ pub async fn bootstrap(config: &ClawDeskConfig) -> BootstrapResult {
         "bootstrap complete"
     );
 
+    // Create InboundAdapterRegistry for channels that support inbound message ingestion.
+    // Channels implementing the InboundAdapter trait can be registered here during
+    // factory creation. For now, the registry is created empty and ready for adapters
+    // to be registered as channel plugins are loaded or hot-reloaded.
+    let inbound_registry = InboundAdapterRegistry::new(256);
+
     BootstrapResult {
         channels: registry,
         skills: load_result.registry,
@@ -305,6 +315,7 @@ pub async fn bootstrap(config: &ClawDeskConfig) -> BootstrapResult {
         channel_factory: factory,
         gateway_config: config.gateway.clone().into(),
         skills_config: config.skills.clone(),
+        inbound_registry,
     }
 }
 

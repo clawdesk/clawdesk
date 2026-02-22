@@ -252,6 +252,7 @@ mod tests {
                 token_budget: 128_000,
                 tokens_used: 1000,
                 source: "clawdesk".to_string(),
+                template_id: None,
             },
         );
 

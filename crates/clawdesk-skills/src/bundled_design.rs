@@ -314,6 +314,56 @@ bundled = true
     )
 }
 
+/// T10: Convert all design skills into the core `Skill` type for unified registry loading.
+pub fn design_skills_as_core() -> Vec<crate::Skill> {
+    use crate::definition::{SkillId, SkillManifest, SkillToolBinding, SkillTrigger};
+
+    bundled_design_skills()
+        .into_iter()
+        .map(|ds| {
+            let triggers: Vec<SkillTrigger> = vec![SkillTrigger::Keywords {
+                words: ds.triggers.clone(),
+                threshold: 0.6,
+            }];
+
+            let tools: Vec<SkillToolBinding> = ds
+                .tools
+                .iter()
+                .map(|t| SkillToolBinding {
+                    tool_name: t.clone(),
+                    description: format!("{} tool", t),
+                    parameters_schema: serde_json::Value::Null,
+                })
+                .collect();
+
+            crate::Skill {
+                manifest: SkillManifest {
+                    id: SkillId::new("design", &ds.id),
+                    display_name: ds.display_name,
+                    description: ds.description,
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    author: Some("ClawDesk".to_string()),
+                    dependencies: vec![],
+                    required_tools: ds.tools,
+                    parameters: vec![],
+                    triggers,
+                    estimated_tokens: ds.prompt.len() / 4,
+                    priority_weight: 0.8,
+                    tags: ds.tags,
+                    signature: None,
+                    publisher_key: None,
+                    content_hash: None,
+                    schema_version: 1,
+                },
+                prompt_fragment: ds.prompt,
+                provided_tools: tools,
+                parameter_values: serde_json::Value::Null,
+                source_path: None,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

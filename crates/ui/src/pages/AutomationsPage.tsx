@@ -1,9 +1,10 @@
 import { useState, useCallback } from "react";
 import * as api from "../api";
-import type { PipelineDescriptor, PipelineNodeDescriptor } from "../types";
+import type { PipelineDescriptor, PipelineNodeDescriptor, PipelineStepEvent } from "../types";
 import { Modal } from "../components/Modal";
 import { Icon } from "../components/Icon";
 import { AutomationDesigner } from "../components/AutomationDesigner";
+import { DagCanvas } from "../components/DagCanvas";
 
 // ── Templates (from sample.js) ────────────────────────────────
 
@@ -34,6 +35,8 @@ export interface AutomationsPageProps {
 
 // ── Component ─────────────────────────────────────────────────
 
+import { PageLayout } from "../components/PageLayout";
+
 export function AutomationsPage({
   pipelines,
   onRefreshPipelines,
@@ -47,6 +50,8 @@ export function AutomationsPage({
   const [runningId, setRunningId] = useState<string | null>(null);
   const [designerOpen, setDesignerOpen] = useState(false);
   const [editingPipeline, setEditingPipeline] = useState<PipelineDescriptor | null>(null);
+  const [dagPreview, setDagPreview] = useState<PipelineDescriptor | null>(null);
+  const [executionEvents, setExecutionEvents] = useState<Map<number, PipelineStepEvent>>(new Map());
 
   const openCreate = useCallback((template?: typeof AUTOMATION_TEMPLATES[number]) => {
     if (template) {
@@ -59,6 +64,24 @@ export function AutomationsPage({
       setSelectedTemplate(null);
     }
     setShowCreate(true);
+  }, []);
+
+  const openDesignerFromTemplate = useCallback((template: typeof AUTOMATION_TEMPLATES[number]) => {
+    // Create a preconfigured pipeline descriptor so the designer loads with a prompt step
+    const prebuilt: PipelineDescriptor = {
+      id: "",
+      name: template.title,
+      description: template.desc,
+      steps: [
+        { label: "Input", node_type: "input", model: null, agent_id: null, x: 0, y: 0 },
+        { label: template.title, node_type: "agent", model: "sonnet", agent_id: null, x: 200, y: 0 },
+        { label: "Output", node_type: "output", model: null, agent_id: null, x: 400, y: 0 },
+      ],
+      edges: [[0, 1], [1, 2]],
+      created: "",
+    };
+    setEditingPipeline(prebuilt);
+    setDesignerOpen(true);
   }, []);
 
   const createAutomation = useCallback(async () => {
@@ -83,36 +106,61 @@ export function AutomationsPage({
 
   const runPipeline = useCallback(async (pipelineId: string) => {
     setRunningId(pipelineId);
+    // Mark all steps as started for execution overlay (T8)
+    const pip = pipelines.find((p) => p.id === pipelineId);
+    if (pip) {
+      setDagPreview(pip);
+      const evMap = new Map<number, PipelineStepEvent>();
+      pip.steps.forEach((_s, i) => {
+        evMap.set(i, { pipeline_id: pipelineId, step_index: i, status: "started", timestamp: new Date().toISOString() });
+      });
+      setExecutionEvents(evMap);
+    }
     try {
-      await api.runPipeline(pipelineId);
+      const result = await api.runPipeline(pipelineId);
       pushToast("Pipeline run completed.");
+      // Update execution overlay with results
+      if (result && result.steps) {
+        const evMap = new Map<number, PipelineStepEvent>();
+        result.steps.forEach((s) => {
+          evMap.set(s.step_index, {
+            pipeline_id: pipelineId,
+            step_index: s.step_index,
+            status: s.success ? "completed" : "failed",
+            timestamp: new Date().toISOString(),
+            output_preview: s.output_preview,
+            error: s.error,
+          });
+        });
+        setExecutionEvents(evMap);
+      }
     } catch {
       pushToast("Pipeline run failed.");
+      // Mark all as failed
+      if (pip) {
+        const evMap = new Map<number, PipelineStepEvent>();
+        pip.steps.forEach((_s, i) => {
+          evMap.set(i, { pipeline_id: pipelineId, step_index: i, status: "failed", timestamp: new Date().toISOString(), error: "Run failed" });
+        });
+        setExecutionEvents(evMap);
+      }
     } finally {
       setRunningId(null);
     }
-  }, [pushToast]);
+  }, [pushToast, pipelines]);
 
   return (
-    <div className="view page-automations">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">
-            Automations <span className="chip chip-accent">Beta</span>
-          </h1>
-          <p className="page-subtitle">
-            Automate work by setting up scheduled threads and pipelines.
-          </p>
-        </div>
-        <div className="row-actions">
-          <button className="btn accent" onClick={() => { setEditingPipeline(null); setDesignerOpen(true); }}>
-            🛠️ Design Automation
-          </button>
-          <button className="btn primary" onClick={() => openCreate()}>
-            <Icon name="safe-on" /> New automation
-          </button>
-        </div>
-      </div>
+    <>
+    <PageLayout
+      title="Automations"
+      subtitle="Automate work by setting up scheduled threads and pipelines."
+      actions={
+        <button className="btn subtle" style={{ whiteSpace: "nowrap" }} onClick={() => { setEditingPipeline(null); setDesignerOpen(true); }}>
+          + New Automation
+        </button>
+      }
+      className="page-automations"
+    >
 
       {/* Existing pipelines */}
       {pipelines.length > 0 && (
@@ -123,29 +171,49 @@ export function AutomationsPage({
           </div>
           <div className="list-rows">
             {pipelines.map((p) => (
-              <div key={p.id} className="row-card">
-                <div>
-                  <div className="row-title">{p.name}</div>
-                  <div className="row-sub">
-                    {p.steps.length} steps · {p.edges.length} edges · Created: {p.created}
+              <div key={p.id} className="row-card" style={{ flexDirection: "column" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+                  <div>
+                    <div className="row-title">{p.name}</div>
+                    <div className="row-sub">
+                      {p.steps.length} steps · {p.edges.length} edges · Created: {p.created}
+                    </div>
+                    {p.description && <div className="row-sub">{p.description}</div>}
                   </div>
-                  {p.description && <div className="row-sub">{p.description}</div>}
+                  <div className="row-actions">
+                    <button
+                      className="btn subtle"
+                      onClick={() => setDagPreview(dagPreview?.id === p.id ? null : p)}
+                      title="DAG Preview"
+                    >
+                      DAG
+                    </button>
+                    <button
+                      className="btn subtle"
+                      onClick={() => { setEditingPipeline(p); setDesignerOpen(true); }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className="btn primary"
+                      disabled={runningId === p.id}
+                      onClick={() => runPipeline(p.id)}
+                    >
+                      {runningId === p.id ? "Running..." : "Run"}
+                    </button>
+                  </div>
                 </div>
-                <div className="row-actions">
-                  <button
-                    className="btn subtle"
-                    onClick={() => { setEditingPipeline(p); setDesignerOpen(true); }}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    className="btn primary"
-                    disabled={runningId === p.id}
-                    onClick={() => runPipeline(p.id)}
-                  >
-                    {runningId === p.id ? "Running..." : "Run"}
-                  </button>
-                </div>
+                {/* DAG Preview Inline */}
+                {dagPreview?.id === p.id && (
+                  <div style={{ marginTop: 12, borderTop: "1px solid var(--border)", paddingTop: 12, width: "100%" }}>
+                    <DagCanvas
+                      pipeline={p}
+                      stepEvents={runningId === p.id ? executionEvents : undefined}
+                      width={680}
+                      height={Math.max(200, p.steps.length * 60)}
+                    />
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -155,17 +223,20 @@ export function AutomationsPage({
       {/* Template grid */}
       <section className="section-card">
         <div className="section-head">
-          <h2>Start with a template</h2>
+          <h2>Start from a template</h2>
         </div>
         <div className="automation-template-grid">
           {AUTOMATION_TEMPLATES.map((a) => (
             <button
               key={a.id}
               className="automation-template-card"
-              onClick={() => openCreate(a)}
+              onClick={() => openDesignerFromTemplate(a)}
             >
               <span className="automation-template-icon">{a.icon}</span>
-              <div className="automation-template-desc">{a.desc}</div>
+              <div className="automation-template-body">
+                <div className="automation-template-title">{a.title}</div>
+                <div className="automation-template-desc">{a.desc}</div>
+              </div>
             </button>
           ))}
         </div>
@@ -234,14 +305,16 @@ export function AutomationsPage({
         </Modal>
       )}
 
-      {designerOpen && (
-        <AutomationDesigner
-          existingPipeline={editingPipeline}
-          onClose={() => setDesignerOpen(false)}
-          onSaved={() => { setDesignerOpen(false); onRefreshPipelines(); }}
-          pushToast={pushToast}
-        />
-      )}
-    </div>
+    </PageLayout>
+
+    {designerOpen && (
+      <AutomationDesigner
+        existingPipeline={editingPipeline}
+        onClose={() => setDesignerOpen(false)}
+        onSaved={() => { setDesignerOpen(false); onRefreshPipelines(); }}
+        pushToast={pushToast}
+      />
+    )}
+    </>
   );
 }

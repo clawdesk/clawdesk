@@ -100,12 +100,39 @@ pub fn estimate_tokens(text: &str) -> usize {
     };
 
     let bytes = text.as_bytes();
-    let mut counts = [0u32; 4];
 
-    for &b in bytes {
-        // Single indexed load — branchless classification.
-        counts[CLASS_LUT[b as usize] as usize] += 1;
+    // Interleaved histogram: 4 independent counter sets break store-forwarding
+    // dependencies.  When consecutive bytes classify to the same class, a single
+    // counter set would stall the CPU pipeline waiting for the previous
+    // read-modify-write to retire.  With 4 sets (one per byte in a quad),
+    // each write targets a different set, fully hiding the RMW latency.
+    //
+    // Layout: 4 sets × 4 classes = 16 u32s = 64 bytes = one L1 cache line.
+    let mut c = [[0u32; 4]; 4];
+
+    let chunks = bytes.len() / 4;
+    let tail = bytes.len() % 4;
+
+    for i in 0..chunks {
+        let base = i * 4;
+        c[0][CLASS_LUT[bytes[base] as usize] as usize] += 1;
+        c[1][CLASS_LUT[bytes[base + 1] as usize] as usize] += 1;
+        c[2][CLASS_LUT[bytes[base + 2] as usize] as usize] += 1;
+        c[3][CLASS_LUT[bytes[base + 3] as usize] as usize] += 1;
     }
+
+    let base = chunks * 4;
+    for i in 0..tail {
+        c[0][CLASS_LUT[bytes[base + i] as usize] as usize] += 1;
+    }
+
+    // Merge the 4 counter sets.
+    let counts = [
+        c[0][0] + c[1][0] + c[2][0] + c[3][0],
+        c[0][1] + c[1][1] + c[2][1] + c[3][1],
+        c[0][2] + c[1][2] + c[2][2] + c[3][2],
+        c[0][3] + c[1][3] + c[2][3] + c[3][3],
+    ];
 
     let tokens_f = (counts[0] as f64 / 4.2) // alnum
         + (counts[1] as f64 / 6.0)           // whitespace

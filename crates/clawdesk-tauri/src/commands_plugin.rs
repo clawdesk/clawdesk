@@ -1,4 +1,4 @@
-//! Plugin system commands — lifecycle, install, hooks (Task 14).
+//! Plugin system commands — lifecycle, install, hooks.
 
 use crate::state::AppState;
 use serde::Serialize;

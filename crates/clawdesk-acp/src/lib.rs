@@ -46,20 +46,29 @@
 //! where w(c) is the importance weight of capability c.
 
 pub mod agent_card;
+pub mod announce;
 pub mod capability;
 pub mod content_router;
+pub mod delta_stream;
 pub mod discovery;
 pub mod error;
+pub mod heartbeat;
 pub mod message;
+pub mod policy;
 pub mod router;
 pub mod server;
+pub mod session_router;
+pub mod skill_wiring;
 pub mod streaming;
 pub mod task;
 
 pub use agent_card::{AgentCard, AgentCapability, AgentEndpoint, AgentSkill};
+pub use announce::{AnnounceRouter, Announcement, AnnouncePayload, DeliveryTarget, DeliveryResult, RetryPolicy};
 pub use capability::{CapSet, CapabilityId};
 pub use error::{AcpError, AcpErrorKind, AcpResult, Retryability, Severity};
+pub use heartbeat::{HeartbeatConfig, HeartbeatMonitor, HeartbeatCallback, PingPayload, PongPayload, PingResult};
 pub use message::{A2AMessage, A2AMessageKind, Artifact};
 pub use router::{AgentDirectory, AgentRouter, RoutingDecision};
 pub use server::A2AHandler;
+pub use session_router::{AgentSource, AgentSummary, CircuitBreaker, SessionRouter};
 pub use task::{Task, TaskId, TaskState, TaskEvent};

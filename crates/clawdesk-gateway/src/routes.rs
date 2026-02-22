@@ -8,6 +8,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use clawdesk_channel::reply_formatter::{MarkupFormat, ReplyFormatter};
 use clawdesk_storage::session_store::SessionStore;
 use clawdesk_types::channel::ChannelId;
 use clawdesk_types::session::{Session, SessionFilter, SessionKey};
@@ -194,9 +195,16 @@ pub async fn send_message(
 
     let reply_text = agent_response.content;
 
+    // Format the response for the channel's native markup format.
+    // The HTTP/webchat API uses Markdown natively (no conversion needed),
+    // but other channels (Slack, Telegram, WhatsApp) would use their
+    // respective format. The ReplyFormatter also handles semantic chunking
+    // for channels with message length limits.
+    let formatted_reply = format_for_channel(&reply_text, &session.channel);
+
     let assistant_msg = AgentMessage {
         role: Role::Assistant,
-        content: reply_text.clone(),
+        content: formatted_reply.clone(),
         timestamp: Utc::now(),
         model: session.model.clone(),
         token_count: Some(agent_response.output_tokens as usize),
@@ -219,7 +227,7 @@ pub async fn send_message(
     debug!(%session_id, input_tokens = agent_response.input_tokens, output_tokens = agent_response.output_tokens, "message processed via agent runner");
 
         Ok(Json(SendMessageResponse {
-            reply: reply_text,
+            reply: formatted_reply,
             session_id,
             thread_id: thread_id.clone(),
         }))
@@ -286,4 +294,47 @@ pub async fn list_channels(
         })
         .collect();
     Json(channels)
+}
+/// Format an agent response for a specific channel's native markup.
+///
+/// Maps `ChannelId` to `MarkupFormat`:
+/// - webchat, HTTP API → Markdown (passthrough)
+/// - slack → SlackMrkdwn
+/// - telegram → TelegramMarkdownV2
+/// - whatsapp → WhatsApp
+/// - imessage, signal, sms → PlainText
+///
+/// For channels with message length limits, the ReplyFormatter applies
+/// semantic chunking, returning the first chunk. Full multi-chunk delivery
+/// should be handled by the channel adapter's outbound path.
+fn format_for_channel(markdown: &str, channel: &ChannelId) -> String {
+    let channel_str = channel.to_string();
+    let (format, max_length) = match channel_str.as_str() {
+        s if s.contains("slack") => (MarkupFormat::SlackMrkdwn, 40_000),
+        s if s.contains("telegram") => (MarkupFormat::TelegramMarkdownV2, 4_096),
+        s if s.contains("whatsapp") => (MarkupFormat::WhatsApp, 65_536),
+        s if s.contains("discord") => (MarkupFormat::Markdown, 2_000),
+        s if s.contains("imessage") || s.contains("signal") || s.contains("sms") => {
+            (MarkupFormat::PlainText, 160_000)
+        }
+        // webchat, HTTP API, and unknown channels: passthrough Markdown
+        _ => return markdown.to_string(),
+    };
+
+    let chunks = ReplyFormatter::format_and_chunk(markdown, format, max_length);
+    if chunks.is_empty() {
+        return String::new();
+    }
+
+    // Return the first chunk. If there are multiple chunks, the channel
+    // adapter's outbound delivery path should handle sending each chunk
+    // sequentially with appropriate threading/reply semantics.
+    if chunks.len() > 1 {
+        debug!(
+            channel = %channel_str,
+            total_parts = chunks.len(),
+            "response chunked for channel length limits"
+        );
+    }
+    chunks[0].content.clone()
 }

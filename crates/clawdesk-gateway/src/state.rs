@@ -18,7 +18,9 @@
 //! (skill activate/deactivate, channel reload) are rare operations.
 
 use arc_swap::ArcSwap;
+use clawdesk_acp::server::A2AState;
 use clawdesk_agents::ToolRegistry;
+use clawdesk_channel::inbound_adapter::InboundAdapterRegistry;
 use clawdesk_channel::registry::ChannelRegistry;
 use clawdesk_channels::factory::ChannelFactory;
 use clawdesk_cron::CronManager;
@@ -29,6 +31,7 @@ use clawdesk_skills::registry::SkillRegistry;
 use clawdesk_sochdb::SochStore;
 use crate::thread_ownership::ThreadOwnershipManager;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -64,6 +67,16 @@ pub struct GatewayState {
 
     // --- Responses API persistence ---
     pub response_store: Option<crate::responses_api::ResponseStore>,
+
+    // --- Inbound adapter registry for multi-channel message ingestion ---
+    /// Holds registered inbound adapters. Channels that implement `InboundAdapter`
+    /// are registered here; the gateway calls `start_all()` after construction
+    /// and spawns the `InboundBridge` to publish messages to the event bus.
+    pub inbound_registry: Arc<Mutex<InboundAdapterRegistry>>,
+
+    // --- A2A protocol state ---
+    /// Shared A2A protocol state (agent card, directory, tasks, policy).
+    pub a2a_state: ArcSwap<A2AState>,
 }
 
 impl GatewayState {
@@ -78,6 +91,7 @@ impl GatewayState {
         skill_loader: SkillLoader,
         channel_factory: ChannelFactory,
         cancel: CancellationToken,
+        inbound_registry: InboundAdapterRegistry,
     ) -> Self {
         Self {
             channels: ArcSwap::from_pointee(channels),
@@ -93,6 +107,14 @@ impl GatewayState {
             start_time: std::time::Instant::now(),
             thread_ownership: Arc::new(ThreadOwnershipManager::default()),
             response_store: Some(crate::responses_api::new_response_store()),
+            inbound_registry: Arc::new(Mutex::new(inbound_registry)),
+            a2a_state: ArcSwap::from_pointee(A2AState::new(
+                clawdesk_acp::agent_card::AgentCard::new(
+                    "clawdesk",
+                    "ClawDesk",
+                    "http://localhost:18789",
+                ),
+            )),
         }
     }
 

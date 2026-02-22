@@ -51,12 +51,73 @@ impl ValidatedConfig {
             errors.push("gateway.port must be > 0".to_string());
         }
 
-        // Provider validation
-        if raw.providers.anthropic.is_none()
-            && raw.providers.openai.is_none()
-            && raw.providers.google.is_none()
-        {
-            // Warning, not error — can work with no providers configured initially
+        // Agent config validation
+        if raw.agents.default_model.is_empty() {
+            errors.push("agents.default_model must not be empty".to_string());
+        }
+        if raw.agents.max_tool_iterations == 0 {
+            errors.push("agents.max_tool_iterations must be > 0".to_string());
+        }
+        if raw.agents.timeout_seconds == 0 {
+            errors.push("agents.timeout_seconds must be > 0".to_string());
+        }
+
+        // Security validation
+        if raw.security.max_file_size_bytes == 0 {
+            errors.push("security.max_file_size_bytes must be > 0".to_string());
+        }
+
+        // Provider validation — warn if no providers, but not an error
+        // (desktop mode can add keys later via UI)
+
+        // Provider-specific validation: if configured, keys must be present
+        if let Some(ref anthropic) = raw.providers.anthropic {
+            if anthropic.api_key.is_none() && anthropic.api_key_ref.is_none() {
+                errors.push(
+                    "providers.anthropic configured but neither api_key nor api_key_ref set"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(ref openai) = raw.providers.openai {
+            if openai.api_key.is_none() && openai.api_key_ref.is_none() {
+                errors.push(
+                    "providers.openai configured but neither api_key nor api_key_ref set"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(ref google) = raw.providers.google {
+            if google.api_key.is_none() && google.api_key_ref.is_none() {
+                errors.push(
+                    "providers.google configured but neither api_key nor api_key_ref set"
+                        .to_string(),
+                );
+            }
+        }
+
+        // Channel validation: if configured, required fields must be non-empty
+        if let Some(ref telegram) = raw.channels.telegram {
+            if telegram.bot_token.is_empty() {
+                errors.push("channels.telegram.bot_token must not be empty".to_string());
+            }
+        }
+        if let Some(ref discord) = raw.channels.discord {
+            if discord.bot_token.is_empty() || discord.application_id.is_empty() {
+                errors.push(
+                    "channels.discord requires both bot_token and application_id".to_string(),
+                );
+            }
+        }
+        if let Some(ref slack) = raw.channels.slack {
+            if slack.bot_token.is_empty()
+                || slack.app_token.is_empty()
+                || slack.signing_secret.is_empty()
+            {
+                errors.push(
+                    "channels.slack requires bot_token, app_token, and signing_secret".to_string(),
+                );
+            }
         }
 
         if errors.is_empty() {

@@ -6,6 +6,14 @@
 //! drain rate `μ` (consumption). Stability requires `μ > λ`.
 //! Buffer depth `B` provides grace period `B/(λ - μ)` seconds before overflow.
 //!
+//! ## Lock-Free Ring Buffer
+//!
+//! The hot-path buffer uses an SPSC (Single-Producer Single-Consumer) atomic
+//! ring buffer. Producer writes to `buffer[tail % N]` and increments `tail`
+//! with `Release` ordering. Consumer reads from `buffer[head % N]` and
+//! increments `head` with `Acquire` ordering. Enqueue/dequeue is O(1)
+//! with no critical section — backpressure check is `tail - head < N`.
+//!
 //! ## Overflow Policies
 //!
 //! - `DropOldest`: Bounded latency, lossy — evicts oldest undelivered event.
@@ -18,11 +26,10 @@
 //! Idempotency key = `(task_id, sequence_number)`.
 //! Dedup via Bloom filter with `ε < 10⁻⁶` at `≈ 30n` bits.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, Notify};
 
 /// Overflow policy when the buffer is full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,24 +143,143 @@ pub struct StreamMetrics {
     pub producer_blocks: AtomicU64,
 }
 
-/// Backpressure-aware event stream with bounded buffer.
+// ---------------------------------------------------------------------------
+// SPSC lock-free ring buffer (cache-line aligned)
+// ---------------------------------------------------------------------------
+
+/// Cache-line size for padding to prevent false sharing.
+const CACHE_LINE: usize = 64;
+
+/// Pad a usize-sized atomic to fill an entire cache line, preventing
+/// false sharing between producer (tail) and consumer (head).
+#[repr(C, align(64))]
+struct CacheAlignedAtomicUsize {
+    value: AtomicUsize,
+    _pad: [u8; CACHE_LINE - std::mem::size_of::<AtomicUsize>()],
+}
+
+impl CacheAlignedAtomicUsize {
+    fn new(v: usize) -> Self {
+        Self {
+            value: AtomicUsize::new(v),
+            _pad: [0u8; CACHE_LINE - std::mem::size_of::<AtomicUsize>()],
+        }
+    }
+}
+
+/// Lock-free SPSC ring buffer for stream events.
+///
+/// Uses atomic head/tail indices with Acquire/Release ordering.
+/// Capacity is rounded up to the next power of two for efficient modulo
+/// via bitmask.
+struct SpscRing {
+    /// Slots — `UnsafeCell` for interior mutability without locks.
+    slots: Box<[std::cell::UnsafeCell<Option<StreamEvent>>]>,
+    /// Bitmask = capacity - 1 (capacity is always a power of two).
+    mask: usize,
+    /// Producer writes here (cache-line aligned).
+    tail: CacheAlignedAtomicUsize,
+    /// Consumer reads here (cache-line aligned).
+    head: CacheAlignedAtomicUsize,
+}
+
+// SAFETY: SpscRing is designed for single-producer single-consumer use.
+// The producer only writes to `tail` and `slots[tail & mask]`.
+// The consumer only writes to `head` and reads `slots[head & mask]`.
+// Acquire/Release ordering ensures proper happens-before relationships.
+unsafe impl Send for SpscRing {}
+unsafe impl Sync for SpscRing {}
+
+impl SpscRing {
+    fn new(min_capacity: usize) -> Self {
+        let capacity = min_capacity.next_power_of_two().max(2);
+        let mut slots = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            slots.push(std::cell::UnsafeCell::new(None));
+        }
+        Self {
+            slots: slots.into_boxed_slice(),
+            mask: capacity - 1,
+            tail: CacheAlignedAtomicUsize::new(0),
+            head: CacheAlignedAtomicUsize::new(0),
+        }
+    }
+
+    /// Number of items currently in the ring.
+    #[inline]
+    fn len(&self) -> usize {
+        let tail = self.tail.value.load(Ordering::Acquire);
+        let head = self.head.value.load(Ordering::Acquire);
+        tail.wrapping_sub(head)
+    }
+
+    /// True if the ring is full.
+    #[inline]
+    fn is_full(&self) -> bool {
+        self.len() > self.mask // len > capacity - 1 means full
+    }
+
+    /// Capacity of the ring.
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.mask + 1
+    }
+
+    /// Try to push an event. Returns `Err(event)` if full.
+    fn try_push(&self, event: StreamEvent) -> Result<(), StreamEvent> {
+        let tail = self.tail.value.load(Ordering::Relaxed);
+        let head = self.head.value.load(Ordering::Acquire);
+        if tail.wrapping_sub(head) >= self.capacity() {
+            return Err(event);
+        }
+        let slot = &self.slots[tail & self.mask];
+        // SAFETY: producer is the only writer to this slot at this tail index.
+        unsafe { *slot.get() = Some(event) };
+        self.tail.value.store(tail.wrapping_add(1), Ordering::Release);
+        Ok(())
+    }
+
+    /// Try to pop an event. Returns `None` if empty.
+    fn try_pop(&self) -> Option<StreamEvent> {
+        let head = self.head.value.load(Ordering::Relaxed);
+        let tail = self.tail.value.load(Ordering::Acquire);
+        if head == tail {
+            return None;
+        }
+        let slot = &self.slots[head & self.mask];
+        // SAFETY: consumer is the only reader of this slot at this head index.
+        let event = unsafe { (*slot.get()).take() };
+        self.head.value.store(head.wrapping_add(1), Ordering::Release);
+        event
+    }
+
+    /// Force-push by evicting the oldest event (for DropOldest policy).
+    fn force_push(&self, event: StreamEvent) -> Option<StreamEvent> {
+        let dropped = self.try_pop();
+        // After evicting one, there's guaranteed space.
+        let _ = self.try_push(event);
+        dropped
+    }
+}
+
+/// Backpressure-aware event stream with bounded lock-free buffer.
 ///
 /// Memory usage under slow consumers is bounded to `O(B)` where `B`
 /// is the configured buffer depth.
 pub struct BackpressureStream {
     config: StreamConfig,
-    /// Bounded buffer — ring buffer semantics via VecDeque.
-    buffer: Mutex<VecDeque<StreamEvent>>,
+    /// Lock-free SPSC ring buffer — no mutex on the hot path.
+    ring: SpscRing,
     /// Sequence counter per task.
     sequence: AtomicU64,
     /// Notify when buffer has space (for BlockProducer policy).
     space_available: Notify,
     /// Metrics.
     pub metrics: Arc<StreamMetrics>,
-    /// Channel for consumer notifications.
+    /// Channel for consumer notifications (async wakeup).
     event_tx: mpsc::Sender<StreamEvent>,
     /// Consumer receives events here.
-    event_rx: Mutex<mpsc::Receiver<StreamEvent>>,
+    event_rx: tokio::sync::Mutex<mpsc::Receiver<StreamEvent>>,
 }
 
 impl BackpressureStream {
@@ -161,12 +287,12 @@ impl BackpressureStream {
     pub fn new(config: StreamConfig) -> Self {
         let (tx, rx) = mpsc::channel(config.buffer_depth);
         Self {
-            buffer: Mutex::new(VecDeque::with_capacity(config.buffer_depth)),
+            ring: SpscRing::new(config.buffer_depth),
             sequence: AtomicU64::new(0),
             space_available: Notify::new(),
             metrics: Arc::new(StreamMetrics::default()),
             event_tx: tx,
-            event_rx: Mutex::new(rx),
+            event_rx: tokio::sync::Mutex::new(rx),
             config,
         }
     }
@@ -187,57 +313,53 @@ impl BackpressureStream {
             .events_produced
             .fetch_add(1, Ordering::Relaxed);
 
-        let mut buf = self.buffer.lock().await;
-
-        if buf.len() >= self.config.buffer_depth {
-            match self.config.overflow_policy {
-                OverflowPolicy::DropOldest => {
-                    // Evict oldest — bounded latency, lossy.
-                    if let Some(_dropped) = buf.pop_front() {
+        match self.ring.try_push(event.clone()) {
+            Ok(()) => {}
+            Err(rejected) => {
+                match self.config.overflow_policy {
+                    OverflowPolicy::DropOldest => {
+                        // Evict oldest — bounded latency, lossy.
+                        if self.ring.force_push(rejected).is_some() {
+                            self.metrics
+                                .events_dropped
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    OverflowPolicy::DropNewest => {
+                        // Drop incoming — bounded age, lossy.
                         self.metrics
                             .events_dropped
                             .fetch_add(1, Ordering::Relaxed);
-                    }
-                    buf.push_back(event.clone());
-                }
-                OverflowPolicy::DropNewest => {
-                    // Drop incoming — bounded age, lossy.
-                    self.metrics
-                        .events_dropped
-                        .fetch_add(1, Ordering::Relaxed);
-                    return Err(StreamError::BufferFull {
-                        buffer_depth: self.config.buffer_depth,
-                    });
-                }
-                OverflowPolicy::BlockProducer => {
-                    // Drop lock, wait for space, re-acquire.
-                    drop(buf);
-                    self.metrics
-                        .producer_blocks
-                        .fetch_add(1, Ordering::Relaxed);
-
-                    // Wait with timeout to prevent deadlock.
-                    let wait_result = tokio::time::timeout(
-                        self.config.sse_timeout,
-                        self.space_available.notified(),
-                    )
-                    .await;
-
-                    if wait_result.is_err() {
-                        return Err(StreamError::BackpressureTimeout {
-                            timeout: self.config.sse_timeout,
+                        return Err(StreamError::BufferFull {
+                            buffer_depth: self.ring.capacity(),
                         });
                     }
+                    OverflowPolicy::BlockProducer => {
+                        // Wait for space, then retry.
+                        self.metrics
+                            .producer_blocks
+                            .fetch_add(1, Ordering::Relaxed);
 
-                    let mut buf = self.buffer.lock().await;
-                    buf.push_back(event.clone());
+                        let wait_result = tokio::time::timeout(
+                            self.config.sse_timeout,
+                            self.space_available.notified(),
+                        )
+                        .await;
+
+                        if wait_result.is_err() {
+                            return Err(StreamError::BackpressureTimeout {
+                                timeout: self.config.sse_timeout,
+                            });
+                        }
+
+                        // Retry after wakeup — best effort.
+                        let _ = self.ring.try_push(rejected);
+                    }
                 }
             }
-        } else {
-            buf.push_back(event.clone());
         }
 
-        // Try to send to consumer channel (non-blocking).
+        // Send to consumer channel (non-blocking async wakeup).
         let _ = self.event_tx.try_send(event);
 
         Ok(seq)
@@ -267,33 +389,33 @@ impl BackpressureStream {
         }
     }
 
-    /// Drain all pending events older than `max_pending_age`.
+    /// Drain all pending events older than `max_pending_age` from the ring.
     /// These should be re-routed to push notification channel.
     pub async fn drain_stale(&self) -> Vec<StreamEvent> {
-        let mut buf = self.buffer.lock().await;
         let now = Instant::now();
         let mut stale = Vec::new();
-
-        buf.retain(|event| {
+        // Drain from ring: pop events, keep non-stale ones in a temp buffer.
+        let mut keep = Vec::new();
+        while let Some(event) = self.ring.try_pop() {
             if now.duration_since(event.produced_at) > self.config.max_pending_age {
-                stale.push(event.clone());
-                false
+                stale.push(event);
             } else {
-                true
+                keep.push(event);
             }
-        });
-
-        // Notify producer of freed space.
+        }
+        // Re-insert non-stale events.
+        for event in keep {
+            let _ = self.ring.try_push(event);
+        }
         if !stale.is_empty() {
             self.space_available.notify_waiters();
         }
-
         stale
     }
 
     /// Current buffer occupancy.
     pub async fn buffer_len(&self) -> usize {
-        self.buffer.lock().await.len()
+        self.ring.len()
     }
 
     /// Snapshot of current metrics.

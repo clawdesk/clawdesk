@@ -33,12 +33,7 @@ impl DeadLetterQueue {
                 detail: e.to_string(),
             })?;
 
-        self.store
-            .db()
-            .put(key.as_bytes(), &bytes)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+        self.store.put(&key, &bytes)?;
 
         info!(run_id = %entry.run_id, attempts = entry.attempts, "run moved to DLQ");
         Ok(())
@@ -47,7 +42,7 @@ impl DeadLetterQueue {
     /// Load a specific DLQ entry.
     pub async fn get(&self, run_id: &RunId) -> Result<Option<DeadLetterEntry>, RuntimeError> {
         let key = Self::dlq_key(run_id);
-        match self.store.db().get(key.as_bytes()) {
+        match self.store.get(&key) {
             Ok(Some(bytes)) => {
                 let entry = serde_json::from_slice(&bytes).map_err(|e| {
                     RuntimeError::CheckpointCorrupted {
@@ -57,10 +52,7 @@ impl DeadLetterQueue {
                 Ok(Some(entry))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(StorageError::OpenFailed {
-                detail: e.to_string(),
-            }
-            .into()),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -69,11 +61,7 @@ impl DeadLetterQueue {
         let prefix = "runtime:dlq:";
         let entries = self
             .store
-            .db()
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(prefix)?;
 
         let mut result = Vec::new();
         for (_key, val) in &entries {
@@ -88,7 +76,7 @@ impl DeadLetterQueue {
     /// Remove an entry from the DLQ (e.g., after successful retry or purge).
     pub async fn remove(&self, run_id: &RunId) -> Result<(), RuntimeError> {
         let key = Self::dlq_key(run_id);
-        let _ = self.store.db().delete(key.as_bytes());
+        let _ = self.store.delete(&key);
         debug!(%run_id, "DLQ entry removed");
         Ok(())
     }
@@ -98,15 +86,11 @@ impl DeadLetterQueue {
         let prefix = "runtime:dlq:";
         let entries = self
             .store
-            .db()
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(prefix)?;
 
         let count = entries.len();
         for (key, _) in &entries {
-            let _ = self.store.db().delete(key);
+            let _ = self.store.delete(key);
         }
 
         info!(count, "DLQ purged");
@@ -118,11 +102,7 @@ impl DeadLetterQueue {
         let prefix = "runtime:dlq:";
         let entries = self
             .store
-            .db()
-            .scan(prefix.as_bytes())
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
+            .scan(prefix)?;
         Ok(entries.len())
     }
 

@@ -24,7 +24,7 @@
 //!
 //! Zero locks. Zero allocations. Zero panics on the hot path.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Number of shards. Must be a power of 2.
@@ -351,26 +351,40 @@ impl ReplayWindow {
     }
 
     /// Advance the window when we see a new maximum counter value.
+    ///
+    /// Uses block-aligned bitmask clearing: O(Δ/64) atomics instead of O(Δ).
+    /// Fully-spanned 64-bit words are zeroed with a plain `store(0)` (not RMW),
+    /// and at most 2 partial boundary words use `fetch_and` with a computed mask.
+    /// A sequence jump of 1,000 becomes ~15 plain stores + 2 atomic RMWs,
+    /// eliminating the cache-coherency storm from 1,000 individual `fetch_and` ops.
     fn advance_window(&self, old_max: u64, new_max: u64) {
         let advance = new_max - old_max;
 
         if advance >= 2048 {
-            // Window fully invalidated — clear everything
+            // Window fully invalidated — zero all 32 words with relaxed stores.
             for word in &self.bitmap_l0 {
-                word.store(0, Ordering::Release);
+                word.store(0, Ordering::Relaxed);
             }
+            // Single release fence makes all zeros visible to other threads.
+            fence(Ordering::Release);
             self.summary_l1.store(0, Ordering::Release);
-        } else {
-            // Clear bits for counters that fell out of the window.
-            // The new window covers [new_max - 2047, new_max].
-            // We must clear bits for counters in [old_max - 2047, new_max - 2048]
-            // which are now outside. In practice, we clear from old_max+1 to new_max
-            // (those positions will be reused).
-            for c in (old_max + 1)..new_max {
-                let bit = Self::bit_position(c);
-                self.bitmap_l0[bit.0].fetch_and(!bit.1, Ordering::Release);
+        } else if advance > 1 {
+            // Block-aligned partial clear.
+            // Bits to clear: positions for counters (old_max+1) .. (new_max-1)
+            // in the circular 2048-bit bitmap.  new_max's bit is set by the caller.
+            let bits_to_clear = (advance - 1) as usize;
+            let first_bit = ((old_max + 1) % 2048) as usize;
+            let end = first_bit + bits_to_clear;
+
+            if end <= 2048 {
+                Self::clear_bit_range(&self.bitmap_l0, first_bit, end);
+            } else {
+                // Wraps around the circular boundary.
+                Self::clear_bit_range(&self.bitmap_l0, first_bit, 2048);
+                Self::clear_bit_range(&self.bitmap_l0, 0, end - 2048);
             }
         }
+        // advance == 1: no stale bits to clear (only new_max's position, set by caller).
 
         // Update counter_max (CAS loop to handle concurrent advances)
         loop {
@@ -390,6 +404,55 @@ impl ReplayWindow {
             {
                 break;
             }
+        }
+    }
+
+    /// Clear a contiguous range of bits [start_bit, end_bit) in the bitmap.
+    ///
+    /// Fully-covered 64-bit words get a single `store(0, Release)` (plain write,
+    /// not an atomic RMW — no cache-line lock, no MESI invalidation storm).
+    /// Partial boundary words get a single `fetch_and` with a computed mask.
+    /// Maximum atomic RMW operations: 2 (first and last partial words).
+    #[inline]
+    fn clear_bit_range(bitmap: &[AtomicU64; 32], start_bit: usize, end_bit: usize) {
+        debug_assert!(start_bit < end_bit && end_bit <= 2048);
+
+        let first_word = start_bit >> 6;
+        let first_offset = start_bit & 63;
+        let last_word = (end_bit - 1) >> 6;
+        let last_end = end_bit & 63; // 0 means ends exactly at word boundary
+
+        if first_word == last_word {
+            // Single word span.
+            let count = end_bit - start_bit;
+            if first_offset == 0 && count == 64 {
+                bitmap[first_word].store(0, Ordering::Release);
+            } else {
+                let mask = ((1u64 << count) - 1) << first_offset;
+                bitmap[first_word].fetch_and(!mask, Ordering::Release);
+            }
+            return;
+        }
+
+        // First word: clear bits [first_offset, 64).
+        if first_offset == 0 {
+            bitmap[first_word].store(0, Ordering::Release);
+        } else {
+            let keep = (1u64 << first_offset) - 1;
+            bitmap[first_word].fetch_and(keep, Ordering::Release);
+        }
+
+        // Interior words: full clear (plain store, not RMW).
+        for w in (first_word + 1)..last_word {
+            bitmap[w].store(0, Ordering::Release);
+        }
+
+        // Last word: clear bits [0, last_end) or all if aligned.
+        if last_end == 0 {
+            bitmap[last_word].store(0, Ordering::Release);
+        } else {
+            let clear = (1u64 << last_end) - 1;
+            bitmap[last_word].fetch_and(!clear, Ordering::Release);
         }
     }
 

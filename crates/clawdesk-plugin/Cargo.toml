@@ -9,7 +9,6 @@ rust-version.workspace = true
 
 [dependencies]
 clawdesk-types = { workspace = true }
-clawdesk-agents = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

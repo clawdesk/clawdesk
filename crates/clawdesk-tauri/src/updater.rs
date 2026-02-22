@@ -279,6 +279,128 @@ pub fn check_manifest(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// C4: Update Channel Manager — user-facing channel selection + persistence
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Manages update channel preferences and provides IPC-ready state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelManager {
+    /// Current configuration.
+    pub config: UpdaterConfig,
+    /// Available channels with descriptions.
+    pub available_channels: Vec<ChannelInfo>,
+    /// Last check result summary (for UI display).
+    pub last_check: Option<UpdateCheckSummary>,
+}
+
+/// Information about an available update channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelInfo {
+    pub channel: UpdateChannel,
+    pub label: String,
+    pub description: String,
+    pub risk_level: String,
+}
+
+/// Summary of the last update check (for frontend display).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCheckSummary {
+    pub checked_at: String,
+    pub channel: UpdateChannel,
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub notes: Option<String>,
+}
+
+impl Default for ChannelManager {
+    fn default() -> Self {
+        Self {
+            config: UpdaterConfig::default(),
+            available_channels: vec![
+                ChannelInfo {
+                    channel: UpdateChannel::Stable,
+                    label: "Stable".into(),
+                    description: "Recommended. Thoroughly tested production releases.".into(),
+                    risk_level: "low".into(),
+                },
+                ChannelInfo {
+                    channel: UpdateChannel::Beta,
+                    label: "Beta".into(),
+                    description: "Pre-release builds. Updated weekly with new features.".into(),
+                    risk_level: "medium".into(),
+                },
+                ChannelInfo {
+                    channel: UpdateChannel::Dev,
+                    label: "Dev".into(),
+                    description: "Nightly builds. Bleeding edge, may contain bugs.".into(),
+                    risk_level: "high".into(),
+                },
+            ],
+            last_check: None,
+        }
+    }
+}
+
+impl ChannelManager {
+    /// Switch to a different update channel.
+    pub fn switch_channel(&mut self, channel: UpdateChannel) {
+        self.config.channel = channel;
+        // Clear custom URL when switching channels
+        self.config.manifest_url = None;
+        // Reset last check since it's from the old channel
+        self.last_check = None;
+    }
+
+    /// Record the result of an update check.
+    pub fn record_check(&mut self, result: &UpdateCheckResult, checked_at: String) {
+        let summary = match result {
+            UpdateCheckResult::Available {
+                current,
+                latest,
+                notes,
+                ..
+            } => UpdateCheckSummary {
+                checked_at,
+                channel: self.config.channel,
+                current_version: current.clone(),
+                latest_version: Some(latest.clone()),
+                update_available: true,
+                notes: Some(notes.clone()),
+            },
+            UpdateCheckResult::UpToDate { version } => UpdateCheckSummary {
+                checked_at,
+                channel: self.config.channel,
+                current_version: version.clone(),
+                latest_version: None,
+                update_available: false,
+                notes: None,
+            },
+            UpdateCheckResult::Error(_) => return, // Don't record errors
+        };
+        self.last_check = Some(summary);
+    }
+
+    /// Get the effective manifest URL for the current channel.
+    pub fn manifest_url(&self) -> &str {
+        self.config
+            .manifest_url
+            .as_deref()
+            .unwrap_or_else(|| self.config.channel.default_manifest_url())
+    }
+
+    /// Serialize to JSON for persistence.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Deserialize from JSON.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +537,54 @@ mod tests {
             }
             other => panic!("expected Error, got {:?}", other),
         }
+    }
+
+    // ── C4: Channel Manager tests ──
+
+    #[test]
+    fn channel_manager_default() {
+        let mgr = ChannelManager::default();
+        assert_eq!(mgr.config.channel, UpdateChannel::Stable);
+        assert_eq!(mgr.available_channels.len(), 3);
+        assert!(mgr.last_check.is_none());
+    }
+
+    #[test]
+    fn channel_manager_switch() {
+        let mut mgr = ChannelManager::default();
+        mgr.switch_channel(UpdateChannel::Beta);
+        assert_eq!(mgr.config.channel, UpdateChannel::Beta);
+        assert_eq!(
+            mgr.manifest_url(),
+            "https://releases.clawdesk.app/beta/manifest.json"
+        );
+    }
+
+    #[test]
+    fn channel_manager_record_check() {
+        let mut mgr = ChannelManager::default();
+        let result = UpdateCheckResult::Available {
+            current: "0.1.0".into(),
+            latest: "0.2.0".into(),
+            asset: PlatformAsset {
+                platform: Platform::MacosAarch64,
+                url: "https://example.com/app.dmg".into(),
+                sha256: "abc".into(),
+                size: 1000,
+            },
+            notes: "Bug fixes".into(),
+        };
+        mgr.record_check(&result, "2025-01-15T00:00:00Z".into());
+        let summary = mgr.last_check.as_ref().unwrap();
+        assert!(summary.update_available);
+        assert_eq!(summary.latest_version.as_deref(), Some("0.2.0"));
+    }
+
+    #[test]
+    fn channel_manager_roundtrip() {
+        let mgr = ChannelManager::default();
+        let json = mgr.to_json().unwrap();
+        let parsed = ChannelManager::from_json(&json).unwrap();
+        assert_eq!(parsed.config.channel, UpdateChannel::Stable);
     }
 }

@@ -7,7 +7,7 @@
 //! ## Relationship to `IMessageChannel`
 //!
 //! `IMessageChannel` is the minimal polling-based adapter. `BlueBubblesChannel`
-//! is the full-featured replacement that matches OpenClaw's BlueBubbles plugin
+//! is the full-featured replacement with complete BlueBubbles plugin
 //! capabilities: reactions, media, groups, effects, edit, unsend.
 //!
 //! ## Architecture

@@ -75,6 +75,53 @@ pub enum ToolCapability {
     Scheduling,
 }
 
+/// Sandbox isolation requirement for a tool.
+///
+/// Maps `ToolCapability` to a minimum isolation level.
+/// Used by the sandbox policy engine to enforce isolation.
+///
+/// ```text
+/// effective(t) = max(required_isolation(t), policy_override(t))
+/// if effective(t) > available(platform) → BLOCK
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum SandboxRequirement {
+    /// No isolation needed (read-only, in-memory tools).
+    None,
+    /// Path scope — file operations confined to workspace.
+    PathScope,
+    /// Process isolation — child process with limited capabilities.
+    ProcessIsolation,
+    /// Full sandbox — seccomp/seatbelt + resource limits.
+    FullSandbox,
+}
+
+impl SandboxRequirement {
+    /// Infer sandbox requirement from tool capabilities.
+    ///
+    /// Lattice join: the highest capability requirement wins.
+    pub fn from_capabilities(caps: &[ToolCapability]) -> Self {
+        let mut req = Self::None;
+        for cap in caps {
+            let cap_req = match cap {
+                ToolCapability::FileSystem => Self::PathScope,
+                ToolCapability::Network => Self::ProcessIsolation,
+                ToolCapability::ShellExec => Self::FullSandbox,
+                ToolCapability::Browser => Self::FullSandbox,
+                ToolCapability::Memory => Self::None,
+                ToolCapability::Messaging => Self::ProcessIsolation,
+                ToolCapability::ExternalApi => Self::ProcessIsolation,
+                ToolCapability::MediaGeneration => Self::ProcessIsolation,
+                ToolCapability::Scheduling => Self::PathScope,
+            };
+            if cap_req > req {
+                req = cap_req;
+            }
+        }
+        req
+    }
+}
+
 /// Tool policy configuration — governs which tools are allowed and when.
 #[derive(Debug, Clone)]
 pub struct ToolPolicy {
@@ -123,7 +170,15 @@ impl ToolPolicy {
     }
 
     /// Check if all required capabilities are granted.
+    ///
+    /// When `granted_capabilities` is empty, all capabilities are considered
+    /// available (permissive default for desktop). Explicit grants restrict
+    /// to only the listed capabilities — tools requiring unlisted capabilities
+    /// will be blocked.
     pub fn capabilities_met(&self, required: &[ToolCapability]) -> bool {
+        if self.granted_capabilities.is_empty() {
+            return true; // No explicit grants = all capabilities available (default)
+        }
         required
             .iter()
             .all(|cap| self.granted_capabilities.contains(cap))
@@ -248,11 +303,65 @@ impl ToolRegistry {
     pub fn total_count(&self) -> usize {
         self.slots.len()
     }
+
+    /// Create a new registry containing only tools whose names appear in `names`.
+    ///
+    /// This is a **projection** (semijoin): given the current tool set `P` and
+    /// an allowlist `A`, produces `P ∩ A`. Unknown names are silently ignored.
+    ///
+    /// Time: O(|A| + |P|). Space: O(min(|A|, |P|)) for the new registry.
+    /// Tool implementations are `Arc::clone`'d — no deep copies.
+    pub fn filter_by_names(&self, names: &[String]) -> Self {
+        use std::collections::HashSet;
+        let allow: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
+        let mut filtered = Self::new();
+        for (name, slot) in &self.slots {
+            if allow.contains(name.as_str()) {
+                // Clone the entire slot — OnceLock + factory + schema
+                let new_lock = OnceLock::new();
+                if let Some(tool) = slot.instance.get() {
+                    let _ = new_lock.set(Arc::clone(tool));
+                }
+                filtered.slots.insert(
+                    name.clone(),
+                    ToolSlot {
+                        instance: new_lock,
+                        factory: slot.factory.clone(),
+                        schema: slot.schema.clone(),
+                    },
+                );
+            }
+        }
+        filtered
+    }
 }
 
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Clone for ToolRegistry {
+    /// Clone the registry, preserving all loaded tool instances (via `Arc`).
+    /// Lazy slots that haven't been loaded yet retain their factory.
+    fn clone(&self) -> Self {
+        let mut cloned = Self::new();
+        for (name, slot) in &self.slots {
+            let new_lock = OnceLock::new();
+            if let Some(tool) = slot.instance.get() {
+                let _ = new_lock.set(Arc::clone(tool));
+            }
+            cloned.slots.insert(
+                name.clone(),
+                ToolSlot {
+                    instance: new_lock,
+                    factory: slot.factory.clone(),
+                    schema: slot.schema.clone(),
+                },
+            );
+        }
+        cloned
     }
 }
 
@@ -275,6 +384,13 @@ pub trait AfterToolHook: Send + Sync {
 }
 
 /// Hook runner — executes before/after hooks with timeout.
+///
+/// **DEPRECATED (T1):** Use `clawdesk_plugin::hooks::HookManager` with
+/// `Phase::AfterToolCall` instead. This struct is retained for backward
+/// compatibility but is no longer instantiated by the agent runner.
+/// The `HookManager` provides full chain-of-responsibility semantics
+/// with priority ordering and short-circuit support.
+#[deprecated(note = "Use clawdesk_plugin::hooks::HookManager instead (T1 fix)")]
 pub struct HookRunner {
     before_hooks: Vec<Arc<dyn BeforeToolHook>>,
     after_hooks: Vec<Arc<dyn AfterToolHook>>,
@@ -394,5 +510,50 @@ mod tests {
         let schemas = registry.schemas();
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, "echo");
+    }
+
+    #[test]
+    fn test_sandbox_requirement_from_capabilities() {
+        // No capabilities → None
+        assert_eq!(
+            SandboxRequirement::from_capabilities(&[]),
+            SandboxRequirement::None
+        );
+
+        // FileSystem only → PathScope
+        assert_eq!(
+            SandboxRequirement::from_capabilities(&[ToolCapability::FileSystem]),
+            SandboxRequirement::PathScope
+        );
+
+        // ShellExec → FullSandbox (highest)
+        assert_eq!(
+            SandboxRequirement::from_capabilities(&[ToolCapability::ShellExec]),
+            SandboxRequirement::FullSandbox
+        );
+
+        // Mixed: FileSystem + Network → ProcessIsolation (lattice join)
+        assert_eq!(
+            SandboxRequirement::from_capabilities(&[
+                ToolCapability::FileSystem,
+                ToolCapability::Network
+            ]),
+            SandboxRequirement::ProcessIsolation
+        );
+
+        // Mixed: FileSystem + ShellExec → FullSandbox (highest wins)
+        assert_eq!(
+            SandboxRequirement::from_capabilities(&[
+                ToolCapability::FileSystem,
+                ToolCapability::ShellExec
+            ]),
+            SandboxRequirement::FullSandbox
+        );
+
+        // Memory only → None
+        assert_eq!(
+            SandboxRequirement::from_capabilities(&[ToolCapability::Memory]),
+            SandboxRequirement::None
+        );
     }
 }

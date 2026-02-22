@@ -15,7 +15,9 @@
 //! - **Format**: Adapt response for target channel constraints
 //! - **Deliver**: Send via channel, track delivery status
 
+pub mod chunking;
 pub mod classifier;
+pub mod debounce;
 pub mod echo;
 pub mod formatter;
 pub mod pipeline;

@@ -15,10 +15,11 @@
 //! Resolution: `agent.field ?? template.field ?? default`.
 //! Chain depth bounded at 3 (agent → template → base).
 
+use serde::Serialize;
 use std::collections::HashMap;
 
 /// A bundled persona template.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PersonaTemplate {
     /// Template identifier (e.g. "ui-designer").
     pub id: &'static str,

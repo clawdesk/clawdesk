@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 // ═══════════════════════════════════════════════════════════
-// Notifications (Task 20)
+// Notifications
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
@@ -65,7 +65,7 @@ pub async fn list_notifications(
 }
 
 // ═══════════════════════════════════════════════════════════
-// Clipboard (Task 21)
+// Clipboard
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize)]
@@ -127,7 +127,7 @@ pub async fn get_clipboard_history(
 }
 
 // ═══════════════════════════════════════════════════════════
-// Voice Wake (Task 22)
+// Voice Wake
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
@@ -195,7 +195,7 @@ pub async fn get_voice_wake_status(
 }
 
 // ═══════════════════════════════════════════════════════════
-// Idle Detection (Task 29)
+// Idle Detection
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize)]

@@ -21,11 +21,13 @@
 mod agent_compose;
 mod completions;
 mod doctor;
+mod gateway_rpc;
 mod onboard;
 mod pipeline_run;
 mod policy_audit;
 mod security_audit;
 mod skill_author;
+mod skill_cli;
 mod skill_registry;
 
 use clap::{Parser, Subcommand};
@@ -104,6 +106,11 @@ enum Commands {
     Security {
         #[command(subcommand)]
         action: SecurityAction,
+    },
+    /// Skill lifecycle management
+    Skill {
+        #[command(subcommand)]
+        action: skill_cli::SkillAction,
     },
 }
 
@@ -320,6 +327,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         plugin_host, cron_manager,
                         skills, skill_loader, channel_factory,
                         cancel.clone(),
+                        clawdesk_channel::inbound_adapter::InboundAdapterRegistry::new(256),
                     ),
                 );
 
@@ -396,6 +404,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Completions { shell } => {
             completions::generate_completions(&shell)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        }
+        Commands::Skill { action } => {
+            skill_cli::execute_skill_command(&cli.gateway_url, action).await?;
         }
         Commands::Security { action } => {
             match action {

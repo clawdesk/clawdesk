@@ -5,7 +5,7 @@ use clawdesk_types::error::ProviderError;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{
     ChatMessage, FinishReason, MessageRole, Provider, ProviderRequest, ProviderResponse,
@@ -138,11 +138,30 @@ impl Provider for OpenAiProvider {
             temperature: request.temperature,
         };
 
+        // Build JSON body and add tools if present
+        let mut body = serde_json::to_value(&api_request).map_err(|e| ProviderError::FormatError {
+            provider: "openai".into(),
+            detail: e.to_string(),
+        })?;
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request.tools.iter().map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            }).collect();
+            body["tools"] = serde_json::json!(tools);
+        }
+
         let response = self
             .client
             .post(&self.base_url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&api_request)
+            .json(&body)
             .send()
             .await
             .map_err(|e| {
@@ -287,6 +306,21 @@ impl Provider for OpenAiProvider {
             body["temperature"] = serde_json::json!(temp);
         }
 
+        // Include tool definitions for function calling
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request.tools.iter().map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            }).collect();
+            body["tools"] = serde_json::json!(tools);
+        }
+
         let response = self
             .client
             .post(&self.base_url)
@@ -316,6 +350,14 @@ impl Provider for OpenAiProvider {
         // Parse SSE event stream
         let mut buffer = String::new();
         let mut response = response;
+
+        // Accumulate tool call deltas during streaming.
+        // OpenAI sends tool calls as incremental fragments:
+        //   delta.tool_calls[i].id (first chunk for call i)
+        //   delta.tool_calls[i].function.name (first chunk for call i)
+        //   delta.tool_calls[i].function.arguments (subsequent chunks, partial JSON)
+        let mut tool_call_accum: Vec<(String, String, String)> = Vec::new(); // (id, name, args_json)
+
         while let Some(chunk) = response.chunk().await.map_err(|e| {
             ProviderError::NetworkError {
                 provider: "openai".into(),
@@ -368,6 +410,32 @@ impl Provider for OpenAiProvider {
                                 .and_then(|c| c.as_str())
                                 .unwrap_or("");
 
+                            // ── Accumulate tool call deltas ──
+                            // OpenAI streams tool calls as incremental fragments
+                            // across multiple chunks.
+                            if let Some(tc_arr) = delta.and_then(|d| d.get("tool_calls")).and_then(|v| v.as_array()) {
+                                for tc in tc_arr {
+                                    let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                    // Ensure accumulator has enough slots
+                                    while tool_call_accum.len() <= idx {
+                                        tool_call_accum.push((String::new(), String::new(), String::new()));
+                                    }
+                                    // First chunk for this call carries id + function.name
+                                    if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                                        tool_call_accum[idx].0 = id.to_string();
+                                    }
+                                    if let Some(func) = tc.get("function") {
+                                        if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                            tool_call_accum[idx].1 = name.to_string();
+                                        }
+                                        // Arguments come as incremental string fragments
+                                        if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+                                            tool_call_accum[idx].2.push_str(args);
+                                        }
+                                    }
+                                }
+                            }
+
                             let finish = choice
                                 .get("finish_reason")
                                 .and_then(|f| f.as_str())
@@ -380,12 +448,28 @@ impl Provider for OpenAiProvider {
 
                             let done = finish.is_some();
 
+                            // On final chunk, assemble accumulated tool calls
+                            let final_tool_calls = if done && !tool_call_accum.is_empty() {
+                                tool_call_accum.drain(..).filter_map(|(id, name, args)| {
+                                    if name.is_empty() { return None; }
+                                    let arguments = if args.is_empty() {
+                                        serde_json::json!({})
+                                    } else {
+                                        serde_json::from_str(&args).unwrap_or(serde_json::json!({}))
+                                    };
+                                    Some(ToolCall { id, name, arguments })
+                                }).collect()
+                            } else {
+                                Vec::new()
+                            };
+
                             let _ = chunk_tx
                                 .send(StreamChunk {
                                     delta: content.to_string(),
                                     done,
                                     finish_reason: finish,
                                     usage: if done { usage.clone() } else { None },
+                                    tool_calls: final_tool_calls,
                                 })
                                 .await;
                         }
@@ -397,6 +481,7 @@ impl Provider for OpenAiProvider {
                                 done: true,
                                 finish_reason: Some(FinishReason::Stop),
                                 usage,
+                                tool_calls: Vec::new(),
                             })
                             .await;
                     }

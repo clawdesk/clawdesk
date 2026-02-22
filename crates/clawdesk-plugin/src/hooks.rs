@@ -64,6 +64,92 @@ impl fmt::Display for Phase {
 /// Priority for hook execution (lower = runs first).
 pub type Priority = i32;
 
+/// Typed overrides that hooks can set to mutate agent behavior.
+///
+/// Instead of stuffing mutations into the untyped `data: serde_json::Value`
+/// field, hooks use these typed fields so the runner can apply them safely.
+/// All fields are `Option` — only populated fields cause an override.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HookOverrides {
+    /// Override the model for this run (e.g., switch to a cheaper model
+    /// for simple queries, or a more capable model for complex ones).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Text to prepend to the system prompt.
+    /// Applied before the existing system prompt content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_prepend: Option<String>,
+
+    /// Text to append to the system prompt.
+    /// Applied after the existing system prompt content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_append: Option<String>,
+
+    /// Additional tool names to inject for this run.
+    /// These tools must be registered in the ToolRegistry — the hook only
+    /// activates them, it does not define new tools.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inject_tools: Vec<String>,
+
+    /// Tool names to suppress for this run (remove from available tools).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suppress_tools: Vec<String>,
+
+    /// Override the maximum tool rounds for this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_rounds: Option<usize>,
+
+    /// Text to prepend to the response before delivery.
+    /// Applied at the MessageSend phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_prepend: Option<String>,
+
+    /// Text to append to the response before delivery.
+    /// Applied at the MessageSend phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_append: Option<String>,
+}
+
+impl HookOverrides {
+    /// Returns `true` if no overrides are set.
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none()
+            && self.system_prompt_prepend.is_none()
+            && self.system_prompt_append.is_none()
+            && self.inject_tools.is_empty()
+            && self.suppress_tools.is_empty()
+            && self.max_tool_rounds.is_none()
+            && self.response_prepend.is_none()
+            && self.response_append.is_none()
+    }
+
+    /// Merge another set of overrides into this one.
+    /// Later overrides win for scalar fields; lists are concatenated.
+    pub fn merge(&mut self, other: &HookOverrides) {
+        if other.model.is_some() {
+            self.model = other.model.clone();
+        }
+        if other.system_prompt_prepend.is_some() {
+            self.system_prompt_prepend = other.system_prompt_prepend.clone();
+        }
+        if other.system_prompt_append.is_some() {
+            self.system_prompt_append = other.system_prompt_append.clone();
+        }
+        self.inject_tools.extend(other.inject_tools.iter().cloned());
+        self.suppress_tools.extend(other.suppress_tools.iter().cloned());
+        if other.max_tool_rounds.is_some() {
+            self.max_tool_rounds = other.max_tool_rounds;
+        }
+        if other.response_prepend.is_some() {
+            self.response_prepend = other.response_prepend.clone();
+        }
+        if other.response_append.is_some() {
+            self.response_append = other.response_append.clone();
+        }
+    }
+}
+
 /// Context passed to hooks — mutable data the hook can inspect/modify.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookContext {
@@ -73,6 +159,12 @@ pub struct HookContext {
     pub data: serde_json::Value,
     /// If set to true by a hook, the chain is short-circuited.
     pub cancelled: bool,
+    /// GAP-7: Typed overrides that hooks can set to mutate agent behavior.
+    /// The runner inspects this after dispatch and applies any set fields.
+    /// Multiple hooks in a chain can contribute overrides — later hooks win
+    /// for scalar fields, lists are concatenated.
+    #[serde(default)]
+    pub overrides: HookOverrides,
 }
 
 impl HookContext {
@@ -83,6 +175,7 @@ impl HookContext {
             agent_id: None,
             data: serde_json::Value::Null,
             cancelled: false,
+            overrides: HookOverrides::default(),
         }
     }
 
@@ -98,6 +191,36 @@ impl HookContext {
 
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
         self.data = data;
+        self
+    }
+
+    /// Set a model override on this context.
+    pub fn override_model(mut self, model: impl Into<String>) -> Self {
+        self.overrides.model = Some(model.into());
+        self
+    }
+
+    /// Append text to the system prompt via overrides.
+    pub fn append_to_prompt(mut self, text: impl Into<String>) -> Self {
+        self.overrides.system_prompt_append = Some(text.into());
+        self
+    }
+
+    /// Prepend text to the system prompt via overrides.
+    pub fn prepend_to_prompt(mut self, text: impl Into<String>) -> Self {
+        self.overrides.system_prompt_prepend = Some(text.into());
+        self
+    }
+
+    /// Inject additional tools by name.
+    pub fn inject_tools(mut self, tools: Vec<String>) -> Self {
+        self.overrides.inject_tools.extend(tools);
+        self
+    }
+
+    /// Suppress tools by name.
+    pub fn suppress_tools(mut self, tools: Vec<String>) -> Self {
+        self.overrides.suppress_tools.extend(tools);
         self
     }
 }
@@ -485,5 +608,97 @@ mod tests {
         assert_eq!(mgr.hook_count(Phase::MessageReceive).await, 1);
         assert_eq!(mgr.hook_count(Phase::MessageSend).await, 1);
         assert_eq!(mgr.hook_count(Phase::Boot).await, 0);
+    }
+
+    // ── HookOverrides tests ──────────────────────────────────
+
+    #[test]
+    fn test_hook_overrides_default_is_empty() {
+        let overrides = HookOverrides::default();
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn test_hook_overrides_merge_scalar_last_wins() {
+        let mut a = HookOverrides {
+            model: Some("claude-haiku".into()),
+            max_tool_rounds: Some(10),
+            ..Default::default()
+        };
+        let b = HookOverrides {
+            model: Some("claude-opus".into()),
+            system_prompt_append: Some("Be concise.".into()),
+            ..Default::default()
+        };
+        a.merge(&b);
+        assert_eq!(a.model.as_deref(), Some("claude-opus"));
+        assert_eq!(a.max_tool_rounds, Some(10)); // not overridden
+        assert_eq!(a.system_prompt_append.as_deref(), Some("Be concise."));
+    }
+
+    #[test]
+    fn test_hook_overrides_merge_lists_concatenate() {
+        let mut a = HookOverrides {
+            inject_tools: vec!["web_search".into()],
+            suppress_tools: vec!["file_write".into()],
+            ..Default::default()
+        };
+        let b = HookOverrides {
+            inject_tools: vec!["calculator".into()],
+            suppress_tools: vec!["shell_exec".into()],
+            ..Default::default()
+        };
+        a.merge(&b);
+        assert_eq!(a.inject_tools, vec!["web_search", "calculator"]);
+        assert_eq!(a.suppress_tools, vec!["file_write", "shell_exec"]);
+    }
+
+    #[test]
+    fn test_hook_context_override_helpers() {
+        let ctx = HookContext::new(Phase::BeforeAgentStart)
+            .override_model("claude-opus")
+            .append_to_prompt("Be helpful.")
+            .inject_tools(vec!["web_search".into()])
+            .suppress_tools(vec!["shell".into()]);
+
+        assert_eq!(ctx.overrides.model.as_deref(), Some("claude-opus"));
+        assert_eq!(ctx.overrides.system_prompt_append.as_deref(), Some("Be helpful."));
+        assert_eq!(ctx.overrides.inject_tools, vec!["web_search"]);
+        assert_eq!(ctx.overrides.suppress_tools, vec!["shell"]);
+        assert!(!ctx.overrides.is_empty());
+    }
+
+    /// A hook that sets typed overrides (model + prompt append).
+    struct OverrideHook;
+
+    #[async_trait]
+    impl Hook for OverrideHook {
+        fn name(&self) -> &str {
+            "override-hook"
+        }
+        fn phases(&self) -> Vec<Phase> {
+            vec![Phase::BeforeAgentStart]
+        }
+        async fn execute(&self, ctx: HookContext) -> HookResult {
+            let ctx = ctx
+                .override_model("claude-haiku")
+                .append_to_prompt("Keep responses under 100 words.");
+            HookResult::Continue(ctx)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hook_overrides_propagate_through_dispatch() {
+        let mgr = HookManager::new();
+        mgr.register(Arc::new(OverrideHook)).await;
+
+        let ctx = HookContext::new(Phase::BeforeAgentStart);
+        let result = mgr.dispatch(ctx).await;
+
+        assert_eq!(result.overrides.model.as_deref(), Some("claude-haiku"));
+        assert_eq!(
+            result.overrides.system_prompt_append.as_deref(),
+            Some("Keep responses under 100 words.")
+        );
     }
 }

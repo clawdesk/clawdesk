@@ -12,6 +12,13 @@
 //! with clear boundary markers and enforces tool access via a bipartite
 //! graph (skill → allowed_tools).
 //!
+//! ## Zero-Copy Rendering
+//!
+//! `render()` uses `PromptRope` to assemble the final prompt from borrowed
+//! fragments. Boundary markers are the only owned allocations; the core
+//! instructions and skill fragments are referenced without copying. Final
+//! flattening to a String happens once.
+//!
 //! ## Architecture
 //!
 //! ```text
@@ -28,6 +35,7 @@
 //! └─────────────────────────────────────────────┘
 //! ```
 
+use crate::context::PromptRope;
 use clawdesk_types::estimate_tokens;
 use std::collections::{HashMap, HashSet};
 
@@ -60,20 +68,21 @@ pub struct IsolatedPrompt {
 impl IsolatedPrompt {
     /// Render the isolated prompt into a single string with boundary markers.
     ///
-    /// Each namespace is wrapped in clear delimiters so that:
-    /// 1. The LLM can distinguish skill boundaries
-    /// 2. A skill's prompt cannot escape its namespace
-    /// 3. Tool access is explicitly declared per namespace
+    /// Uses `PromptRope` for zero-copy assembly: core instructions and
+    /// skill fragments are borrowed in-place; only boundary markers are
+    /// owned allocations. The final `flatten()` is the single contiguous copy.
     pub fn render(&self) -> String {
-        let mut output = String::with_capacity(self.total_tokens * 4);
+        // Estimate fragments: 1 core + ~4 per namespace (header, tools, body, footer) + separators
+        let frag_count = 1 + self.namespaces.len() * 5;
+        let mut rope = PromptRope::with_capacity(frag_count);
 
-        // Core instructions (highest priority).
-        output.push_str(&self.core_instructions);
-        output.push_str("\n\n");
+        // Core instructions (highest priority) — borrowed, zero-copy.
+        rope.append_borrowed(&self.core_instructions);
+        rope.append_borrowed("\n\n");
 
         for ns in &self.namespaces {
-            // Boundary header.
-            output.push_str(&format!(
+            // Boundary header — owned (dynamic format string).
+            rope.append_owned(format!(
                 "--- BEGIN SKILL [{}] (trust: {}) ---\n",
                 ns.skill_id, ns.trust_label
             ));
@@ -81,18 +90,18 @@ impl IsolatedPrompt {
             // Tool access declaration.
             if !ns.allowed_tools.is_empty() {
                 let tools: Vec<&str> = ns.allowed_tools.iter().map(|s| s.as_str()).collect();
-                output.push_str(&format!("Allowed tools: {}\n", tools.join(", ")));
+                rope.append_owned(format!("Allowed tools: {}\n", tools.join(", ")));
             }
 
-            // Sandboxed prompt fragment.
-            output.push_str(&ns.fragment);
-            output.push('\n');
+            // Sandboxed prompt fragment — borrowed, zero-copy.
+            rope.append_borrowed(&ns.fragment);
+            rope.newline();
 
-            // Boundary footer.
-            output.push_str(&format!("--- END SKILL [{}] ---\n\n", ns.skill_id));
+            // Boundary footer — owned.
+            rope.append_owned(format!("--- END SKILL [{}] ---\n\n", ns.skill_id));
         }
 
-        output
+        rope.flatten()
     }
 }
 

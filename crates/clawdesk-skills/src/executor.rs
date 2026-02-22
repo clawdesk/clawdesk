@@ -112,13 +112,25 @@ impl SkillExecutor {
     }
 
     /// Register a skill's tools with their handler.
+    ///
+    /// Registers both `provided_tools` (skill-owned tool definitions) and
+    /// `required_tools` (agent-level tools the skill needs). For required_tools,
+    /// the handler is registered as a fallback — if the agent's tool registry
+    /// already has a handler for that tool, this won't overwrite it.
     pub fn register_skill(&mut self, skill: &Skill, handler: SkillHandler) {
         let skill_id = skill.manifest.id.clone();
+        // Register provided tools (skill-owned)
         for tool in &skill.provided_tools {
             self.handlers.insert(
                 tool.tool_name.clone(),
                 (skill_id.clone(), handler.clone()),
             );
+        }
+        // Register required tools as fallback (don't overwrite existing handlers)
+        for tool_name in &skill.manifest.required_tools {
+            self.handlers
+                .entry(tool_name.clone())
+                .or_insert_with(|| (skill_id.clone(), handler.clone()));
         }
     }
 

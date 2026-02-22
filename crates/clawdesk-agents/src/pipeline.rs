@@ -2,7 +2,7 @@
 //!
 //! ## Design rationale
 //!
-//! OpenClaw's multi-agent is config-driven channel routing: each agent is
+//! Traditional multi-agent is config-driven channel routing: each agent is
 //! an isolated island with no inter-agent communication. If "home" needs
 //! "work" to do something, the user switches channels manually.
 //!

@@ -13,6 +13,85 @@ export interface HealthResponse {
   agents_active: number;
   skills_loaded: number;
   tunnel_active: boolean;
+  /** Whether the storage backend is using durable (on-disk) persistence. */
+  storage_healthy: boolean;
+  /** Human-readable storage path (for diagnostics). */
+  storage_path: string;
+}
+
+// ── Durable Runtime ───────────────────────────────────────────
+export interface DurableRunInfo {
+  run_id: string;
+  state: string;
+  worker_id: string;
+}
+
+export interface DurableRunStatus {
+  run_id: string;
+  state: string;
+  checkpoint_count: number;
+  journal_entries: number;
+}
+
+// ── A2A Protocol ──────────────────────────────────────────────
+export interface TaskSendRequest {
+  skill_id?: string;
+  input: any;
+  target_agent?: string;
+  required_capabilities?: string[];
+}
+
+export interface A2ATaskResponse {
+  task_id: string;
+  state: string;
+  output?: any;
+  error?: string;
+  progress: number;
+  artifacts: any[];
+}
+
+// ── Debug / Storage Diagnostics ───────────────────────────────
+export interface DebugEvent {
+  ts: number;
+  category: string;
+  action: string;
+  detail: string;
+  level: "info" | "warn" | "error";
+}
+
+export interface SessionMismatch {
+  chat_id: string;
+  memory_msg_count: number;
+  sochdb_msg_count: number;
+}
+
+export interface SessionDetail {
+  chat_id: string;
+  agent_id: string;
+  title: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+  in_sochdb: boolean;
+  in_memory: boolean;
+  serialized_size: number;
+}
+
+export interface StorageSnapshot {
+  is_ephemeral: boolean;
+  storage_path: string;
+  memory_session_count: number;
+  sochdb_session_count: number;
+  memory_only_sessions: string[];
+  sochdb_only_sessions: string[];
+  message_count_mismatches: SessionMismatch[];
+  memory_agent_count: number;
+  sochdb_agent_count: number;
+  wal_size_bytes: number;
+  wal_exists: boolean;
+  old_format_session_count: number;
+  roundtrip_test: string;
+  session_details: SessionDetail[];
 }
 
 export interface DesktopAgent {
@@ -83,14 +162,19 @@ export interface CompactionInfo {
 export interface SendMessageRequest {
   agent_id: string;
   content: string;
+  model_override?: string;
+  chat_id?: string;
 }
 
 export interface SendMessageResponse {
   message: ChatMessage;
   trace: TraceEntry[];
+  chat_id: string;
+  chat_title?: string;
 }
 
 export interface SessionSummary {
+  chat_id: string;
   agent_id: string;
   title: string;
   last_activity: string;
@@ -175,9 +259,34 @@ export interface ModelInfo {
 export interface ChannelInfo {
   id: string;
   name: string;
-  status: string;
-  channel_type: string;
+  status: string;          // "active" | "available" | "error" | "disconnected"
+  channel_type: string;    // "telegram" | "discord" | "slack" | "whatsapp" etc.
+  configured?: boolean;
+  config?: Record<string, string>;
+  capabilities?: string[];  // "direct" | "group" | "media" | "threads" | "reactions"
+  last_error?: string;
+  docs_url?: string;
 }
+
+export type ChannelConfigField = {
+  key: string;
+  label: string;
+  type: "text" | "password" | "url" | "select" | "toggle";
+  placeholder?: string;
+  help?: string;
+  required?: boolean;
+  options?: string[];      // for select type
+};
+
+export type ChannelTypeSpec = {
+  id: string;
+  label: string;
+  icon: string;
+  blurb: string;
+  docs_url: string;
+  configFields: ChannelConfigField[];
+  capabilities: string[];
+};
 
 export interface InviteResponse {
   invite_code: string;
@@ -507,6 +616,42 @@ export interface SkillTriggerInfo {
   relevance: number;
 }
 
+export interface SkillDetail {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  category: string;
+  instructions: string;
+  tags: string[];
+  required_tools: string[];
+  estimated_tokens: number;
+  state: string;
+  source: string;
+  author: string | null;
+}
+
+export interface RegisterSkillRequest {
+  name: string;
+  description: string;
+  version: string;
+  category: string;
+  instructions: string;
+  tags: string[];
+  allowed_tools: string[];
+  /** When editing an existing skill, pass its original ID to update in-place. */
+  existing_id?: string;
+}
+
+export interface SkillValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  estimated_tokens: number;
+  parsed_name: string | null;
+  parsed_description: string | null;
+}
+
 // ══════════════════════════════════════════════════════════════
 // Canvas (commands_canvas.rs)
 // ══════════════════════════════════════════════════════════════
@@ -706,7 +851,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     persona:
       "You are a thorough research assistant. Search the web, read papers, extract key findings, and cite your sources. Always provide structured summaries.",
     skills: ["web-search", "citations", "markdown"],
-    model: "sonnet",
+    model: "default",
     description: "Deep research with citations and structured output",
   },
   {
@@ -716,7 +861,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     persona:
       "You are a senior software engineer. Write clean, tested code. Use best practices, proper error handling, and clear documentation. Run tests.",
     skills: ["code-exec", "files", "git"],
-    model: "sonnet",
+    model: "default",
     description: "Write, test, and ship production code",
   },
   {
@@ -724,9 +869,9 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     icon: "📝",
     color: "#f59e0b",
     persona:
-      "You are a professional writer. Create engaging content — articles, reports, documentation. Maintain consistent tone and structure.",
+      "You are a professional writer. Create engaging content \u2014 articles, reports, documentation. Maintain consistent tone and structure.",
     skills: ["web-search", "markdown", "files"],
-    model: "opus",
+    model: "default",
     description: "Professional writing with research backing",
   },
   {
@@ -736,8 +881,8 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     persona:
       "You coordinate daily tasks. Check emails, summarize updates, schedule reminders. Be concise and actionable.",
     skills: ["email", "calendar", "cron", "alerts"],
-    model: "haiku",
-    description: "Lightweight coordinator for daily workflows (cheapest)",
+    model: "default",
+    description: "Lightweight coordinator for daily workflows",
   },
 ];
 
@@ -764,6 +909,54 @@ export interface RuntimeStatus {
   active_runs: number;
   completed_runs: number;
   failed_runs: number;
+}
+
+// Typed shape returned by get_runtime_status backend command
+export interface RuntimeStatusInfo {
+  durable_runner_available: boolean;
+  worker_id: string;
+  checkpoint_store: string;
+  journal: string;
+  lease_manager: string;
+}
+
+// Checkpoint record from list_checkpoints
+export interface CheckpointEntry {
+  run_id: string;
+  step_index: number;
+  state_snapshot: string;
+  created_at: string;
+}
+
+// Dead Letter Queue entry from get_dlq
+export interface DlqEntry {
+  id: string;
+  run_id: string;
+  error: string;
+  failed_at: string;
+  retry_count: number;
+  payload: string;
+}
+
+// Pipeline execution step event for live overlay
+export interface PipelineStepEvent {
+  pipeline_id: string;
+  step_index: number;
+  status: "started" | "completed" | "failed";
+  timestamp: string;
+  output_preview?: string;
+  error?: string;
+}
+
+// A2A full agent card (detailed shape from get_agent_card / get_self_agent_card)
+export interface A2AFullAgentCard {
+  id: string;
+  name: string;
+  description: string;
+  url: string;
+  capabilities: string[];
+  version: string;
+  provider: string;
 }
 
 export interface CacheEntry {
@@ -799,14 +992,21 @@ export interface PipelineStepResult {
 }
 
 // ── Typed event payloads ───────────────────────────────────
+// These MUST match TauriAgentEvent in state.rs (serde tag = "type")
 
 export type AgentEventPayload =
-  | { type: "StreamChunk"; text: string }
-  | { type: "ToolStart"; tool: string; args_preview: string }
-  | { type: "ToolEnd"; tool: string; success: boolean; duration_ms: number }
-  | { type: "RoundComplete"; round: number; input_tokens: number; output_tokens: number }
-  | { type: "Finished"; total_tokens: number; cost_usd: number }
-  | { type: "Error"; message: string };
+  | { type: "StreamChunk"; text: string; done: boolean }
+  | { type: "ToolStart"; name: string; args: string }
+  | { type: "ToolEnd"; name: string; success: boolean; duration_ms: number }
+  | { type: "RoundStart"; round: number }
+  | { type: "Response"; content: string; finish_reason: string }
+  | { type: "Done"; total_rounds: number }
+  | { type: "Error"; error: string }
+  | { type: "Compaction"; level: string; tokens_before: number; tokens_after: number }
+  | { type: "PromptAssembled"; total_tokens: number; skills_included: string[]; skills_excluded: string[]; memory_fragments: number; budget_utilization: number }
+  | { type: "IdentityVerified"; hash_match: boolean; version: number }
+  | { type: "ContextGuardAction"; action: string; token_count: number; threshold: number }
+  | { type: "FallbackTriggered"; from_model: string; to_model: string; reason: string };
 
 export interface AgentEventEnvelope {
   agent_id: string;
