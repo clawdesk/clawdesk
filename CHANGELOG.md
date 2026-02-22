@@ -76,3 +76,18 @@
 - **`ChatPage.tsx` — Invalid DOM nesting**: Changed outer `<button>` wrapping
   thread sidebar items to `<div role="button">` to fix React warning about
   `<button>` nested inside `<button>` (delete button inside clickable row).
+- **`conversation.rs` — Messages lost on restart**: `append_message()` used
+  non-durable `put()` (no commit), so individual messages written to the
+  `sessions/` keyspace were discarded during WAL recovery. Now uses
+  `put_durable()` for immediate commit. `append_messages()` batch variant
+  switched from individual `put()` calls to `put_batch()` for a single
+  atomic commit.
+- **`commands.rs` — Deleted chats reappearing on restart**: `delete_chat()`
+  called `soch_store.delete()` without committing the transaction, so the
+  deletion was lost on WAL recovery and the chat silently reappeared. Now
+  calls `commit()` after delete and also cleans up the associated
+  `tool_history/` key.
+- **`lib.rs` — WAL backup file accumulation**: Old `wal.log.backup.*` and
+  `wal.log.corrupt.*` files from retry-quarantine cycles were never cleaned
+  up, leading to unbounded disk usage (~80 MB observed). After a successful
+  SochDB open + self-test, these files are now automatically removed.
