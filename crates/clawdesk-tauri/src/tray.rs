@@ -231,12 +231,12 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to load tray icon");
 
     // Build the tray icon
-    let _tray = TrayIconBuilder::new()
+    let _tray = TrayIconBuilder::with_id("main")
         .icon(icon)
         .icon_as_template(true)
         .menu(&menu)
         .tooltip("ClawDesk — Checking status...")
-        .on_menu_event(move |app, event| {
+        .on_menu_event(move |app: &tauri::AppHandle, event| {
             match event.id().as_ref() {
                 "show_hide" => {
                     if let Some(window) = app.get_webview_window("main") {
@@ -287,7 +287,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         })
-        .on_tray_icon_event(|tray, event| {
+        .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event| {
             // Double-click (or single-click on macOS) shows window
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -326,7 +326,7 @@ fn start_health_poll(
         std::thread::sleep(std::time::Duration::from_secs(3));
 
         loop {
-            let health = check_provider_health();
+            let health = check_gateway_health();
             let previous = tray_state.health().overall;
 
             tray_state.update_health(health.clone());
@@ -343,7 +343,10 @@ fn start_health_poll(
 
             // Update tray tooltip
             if let Some(tray) = app_handle.tray_by_id("main") {
+                let status_text = format!("Status: {}", health.overall.indicator());
                 let _ = tray.set_tooltip(Some(health.overall.tooltip()));
+                // On macOS, set_title shows text next to the tray icon
+                let _ = tray.set_title(Some(&status_text));
             }
 
             std::thread::sleep(std::time::Duration::from_secs(30));
@@ -354,41 +357,85 @@ fn start_health_poll(
 /// Check health of all configured LLM providers.
 ///
 /// This is a synchronous function called from the poll thread.
-/// It checks each provider by verifying that the API key is set
-/// (via env var or vault reference).
-fn check_provider_health() -> GatewayHealth {
+/// It first pings the embedded gateway, then checks provider configs.
+fn check_gateway_health() -> GatewayHealth {
+    // First, check if the embedded gateway is alive
+    let gateway_port = std::env::var("CLAWDESK_GATEWAY_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(18789);
+    let gateway_url = format!("http://127.0.0.1:{}/api/v1/health", gateway_port);
+
+    let gateway_alive = std::net::TcpStream::connect_timeout(
+        &format!("127.0.0.1:{}", gateway_port).parse().unwrap(),
+        std::time::Duration::from_secs(2),
+    )
+    .is_ok();
+
+    if !gateway_alive {
+        return GatewayHealth {
+            overall: HealthStatus::Offline,
+            providers: vec![ProviderHealth {
+                name: "Gateway".to_string(),
+                status: HealthStatus::Offline,
+                latency_ms: None,
+                last_check: Some(chrono::Utc::now()),
+                error: Some(format!("Cannot reach gateway at {}", gateway_url)),
+            }],
+            checked_at: chrono::Utc::now(),
+        };
+    }
+
+    // Gateway is reachable. Now check which providers have API keys set.
     let providers = vec![
         ("Anthropic", "ANTHROPIC_API_KEY"),
         ("OpenAI", "OPENAI_API_KEY"),
         ("Google AI", "GOOGLE_API_KEY"),
-        ("Azure OpenAI", "AZURE_OPENAI_API_KEY"),
-        ("Cohere", "COHERE_API_KEY"),
+        ("Ollama", "OLLAMA_HOST"),
     ];
 
     let mut health_list = Vec::new();
 
+    // Gateway itself is healthy
+    health_list.push(ProviderHealth {
+        name: "Gateway".to_string(),
+        status: HealthStatus::Healthy,
+        latency_ms: None,
+        last_check: Some(chrono::Utc::now()),
+        error: None,
+    });
+
     for (name, env_var) in &providers {
         let has_key = std::env::var(env_var).map(|v| !v.is_empty()).unwrap_or(false);
-        let status = if has_key {
-            HealthStatus::Healthy
+        // Mark Ollama as healthy if env var is set OR if it's running locally
+        let is_available = if *name == "Ollama" {
+            has_key || std::net::TcpStream::connect_timeout(
+                &"127.0.0.1:11434".parse().unwrap(),
+                std::time::Duration::from_secs(1),
+            ).is_ok()
         } else {
-            HealthStatus::Offline
+            has_key
         };
 
-        health_list.push(ProviderHealth {
-            name: name.to_string(),
-            status,
-            latency_ms: None,
-            last_check: Some(chrono::Utc::now()),
-            error: if has_key {
-                None
-            } else {
-                Some(format!("{} not set", env_var))
-            },
-        });
+        if is_available {
+            health_list.push(ProviderHealth {
+                name: name.to_string(),
+                status: HealthStatus::Healthy,
+                latency_ms: None,
+                last_check: Some(chrono::Utc::now()),
+                error: None,
+            });
+        }
+        // Only include providers that are configured — skip unconfigured ones
     }
 
-    let overall = GatewayHealth::compute_overall(&health_list);
+    // If only gateway is in the list (no providers configured), still healthy
+    let overall = if health_list.len() <= 1 {
+        // Only gateway, no providers configured — degraded
+        HealthStatus::Degraded
+    } else {
+        GatewayHealth::compute_overall(&health_list)
+    };
 
     GatewayHealth {
         overall,
@@ -414,7 +461,7 @@ pub fn get_gateway_health(
 pub fn refresh_gateway_health(
     state: tauri::State<'_, Arc<TrayState>>,
 ) -> Result<GatewayHealth, String> {
-    let health = check_provider_health();
+    let health = check_gateway_health();
     state.update_health(health.clone());
     Ok(health)
 }

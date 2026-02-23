@@ -1449,6 +1449,33 @@ export default function App() {
     streamingThreadId,
   ]);
 
+  // ── System tray menu → frontend navigation ──────────────────────────
+  useEffect(() => {
+    let disposed = false;
+    const cleanups: Array<() => void> = [];
+
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+
+      if (disposed) return;
+
+      const u1 = await listen("tray-open-settings", () => {
+        navigate("settings");
+      });
+      cleanups.push(u1);
+
+      const u2 = await listen("tray-new-chat", () => {
+        navigate("chat");
+      });
+      cleanups.push(u2);
+    })().catch(() => { /* tray events optional */ });
+
+    return () => {
+      disposed = true;
+      cleanups.forEach((fn) => fn());
+    };
+  }, [navigate]);
+
   useEffect(() => {
     const onResize = () => setViewportWidth(window.innerWidth);
     window.addEventListener("resize", onResize);
