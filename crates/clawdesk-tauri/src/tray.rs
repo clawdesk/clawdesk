@@ -167,20 +167,16 @@ impl Default for TrayState {
 // Tray setup
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Initialize the system tray with health indicator.
-///
-/// Call this from `tauri::Builder::setup()`.
-///
-/// # Arguments
-/// * `app` - The Tauri application handle.
-///
-/// # Panics
-/// Panics if the tray icon cannot be created (missing icon file).
-pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let tray_state = Arc::new(TrayState::new());
-    app.manage(tray_state.clone());
+/// Build the tray context menu with the given status text.
+fn build_tray_menu(
+    app: &tauri::AppHandle,
+    status_text: &str,
+) -> Result<tauri::menu::Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+    let status_item = MenuItemBuilder::new(status_text)
+        .id("status")
+        .enabled(false)
+        .build(app)?;
 
-    // Build the tray context menu
     let show_hide = MenuItemBuilder::new("Show/Hide Window")
         .id("show_hide")
         .build(app)?;
@@ -193,12 +189,6 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .id("settings")
         .build(app)?;
 
-    let status_item = MenuItemBuilder::new("Status: Checking...")
-        .id("status")
-        .enabled(false)
-        .build(app)?;
-
-    // Auto-launch toggle — check current state from plugin
     let autostart_enabled = app
         .autolaunch()
         .is_enabled()
@@ -225,6 +215,24 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .item(&quit)
         .build()?;
 
+    Ok(menu)
+}
+
+/// Initialize the system tray with health indicator.
+///
+/// Call this from `tauri::Builder::setup()`.
+///
+/// # Arguments
+/// * `app` - The Tauri application handle.
+///
+/// # Panics
+/// Panics if the tray icon cannot be created (missing icon file).
+pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let tray_state = Arc::new(TrayState::new());
+    app.manage(tray_state.clone());
+
+    let menu = build_tray_menu(app.handle(), "Status: Checking...")?;
+
     // Load the tray icon image (44×44 template, black on transparent)
     let icon_bytes = include_bytes!("../icons/tray-icon.png");
     let icon = Image::from_bytes(icon_bytes)
@@ -249,7 +257,6 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 "new_chat" => {
-                    // Emit event to frontend to create a new chat
                     let _ = app.emit("tray-new-chat", ());
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.show();
@@ -288,7 +295,6 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event| {
-            // Double-click (or single-click on macOS) shows window
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -341,12 +347,16 @@ fn start_health_poll(
                 let _ = app_handle.emit("tray-health-changed", &health);
             }
 
-            // Update tray tooltip
+            // Update tray tooltip, title, and rebuild menu with current status
             if let Some(tray) = app_handle.tray_by_id("main") {
                 let status_text = format!("Status: {}", health.overall.indicator());
                 let _ = tray.set_tooltip(Some(health.overall.tooltip()));
-                // On macOS, set_title shows text next to the tray icon
                 let _ = tray.set_title(Some(&status_text));
+
+                // Rebuild menu so the status item text is current
+                if let Ok(menu) = build_tray_menu(&app_handle, &status_text) {
+                    let _ = tray.set_menu(Some(menu));
+                }
             }
 
             std::thread::sleep(std::time::Duration::from_secs(30));
