@@ -118,6 +118,10 @@ struct OllamaChatRequest {
 struct OllamaChatMessage {
     role: String,
     content: String,
+    /// Tool calls made by the assistant (only for role=assistant).
+    /// Ollama needs this to associate tool results with the original calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OllamaToolCall>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,12 +148,12 @@ struct OllamaToolFunction {
 }
 
 /// Ollama tool call returned in the response.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OllamaToolCall {
     function: OllamaToolCallFunction,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OllamaToolCallFunction {
     name: String,
     arguments: serde_json::Value,
@@ -278,6 +282,105 @@ fn try_extract_tool_calls_from_content(content: &str) -> Vec<ToolCall> {
     vec![]
 }
 
+/// Convert ClawDesk messages to Ollama wire format.
+///
+/// Handles two critical conversions that small models depend on:
+///
+/// 1. **Tool result messages** (`MessageRole::Tool`): The agent runner wraps tool
+///    results in a JSON envelope `{"tool_call_id":"...","name":"...","content":"...","is_error":...}`.
+///    Small models (e.g. GLM-4.7-Flash) can't parse through this wrapper to find the
+///    actual content. This function extracts the inner `content` field and sends it as
+///    plain text in the `tool` role message.
+///
+/// 2. **Assistant messages preceding tool results**: Ollama's API (like OpenAI's)
+///    expects the assistant message to include a `tool_calls` array so the model can
+///    associate subsequent tool results with the calls it made. We reconstruct this
+///    from the tool result messages that follow.
+fn convert_messages(
+    request: &crate::ProviderRequest,
+) -> Vec<OllamaChatMessage> {
+    let mut msgs = Vec::new();
+
+    if let Some(ref system) = request.system_prompt {
+        msgs.push(OllamaChatMessage {
+            role: "system".into(),
+            content: system.clone(),
+            tool_calls: None,
+        });
+    }
+
+    let messages = &request.messages;
+    let len = messages.len();
+
+    for (i, m) in messages.iter().enumerate() {
+        match m.role {
+            MessageRole::Tool => {
+                // Unwrap the JSON envelope to extract actual tool output.
+                // The runner stores: {"tool_call_id":"...", "name":"...", "content":"...", "is_error":...}
+                // Ollama expects: {"role": "tool", "content": "actual output text"}
+                let content = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&*m.content) {
+                    parsed.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&m.content)
+                        .to_string()
+                } else {
+                    m.content.to_string()
+                };
+                msgs.push(OllamaChatMessage {
+                    role: "tool".into(),
+                    content,
+                    tool_calls: None,
+                });
+            }
+            MessageRole::Assistant => {
+                // Check if this assistant message is followed by tool results.
+                // If so, reconstruct the tool_calls array from subsequent tool messages
+                // so Ollama can associate results with calls.
+                let mut tool_calls_for_msg: Option<Vec<OllamaToolCall>> = None;
+
+                // Look ahead: count consecutive tool messages following this assistant message
+                let mut j = i + 1;
+                let mut pending_tool_calls = Vec::new();
+                while j < len && messages[j].role == MessageRole::Tool {
+                    // Extract tool name from the JSON envelope
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&*messages[j].content) {
+                        let name = parsed.get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        pending_tool_calls.push(OllamaToolCall {
+                            function: OllamaToolCallFunction {
+                                name,
+                                arguments: serde_json::json!({}),
+                            },
+                        });
+                    }
+                    j += 1;
+                }
+
+                if !pending_tool_calls.is_empty() {
+                    tool_calls_for_msg = Some(pending_tool_calls);
+                }
+
+                msgs.push(OllamaChatMessage {
+                    role: "assistant".into(),
+                    content: m.content.to_string(),
+                    tool_calls: tool_calls_for_msg,
+                });
+            }
+            _ => {
+                msgs.push(OllamaChatMessage {
+                    role: m.role.as_str().to_string(),
+                    content: m.content.to_string(),
+                    tool_calls: None,
+                });
+            }
+        }
+    }
+
+    msgs
+}
+
 #[async_trait]
 impl Provider for OllamaProvider {
     fn name(&self) -> &str {
@@ -319,19 +422,7 @@ impl Provider for OllamaProvider {
         let has_tools = !request.tools.is_empty();
         debug!(%model, messages = request.messages.len(), tools = request.tools.len(), "calling Ollama API");
 
-        let mut messages: Vec<OllamaChatMessage> = Vec::new();
-        if let Some(ref system) = request.system_prompt {
-            messages.push(OllamaChatMessage {
-                role: "system".into(),
-                content: system.clone(),
-            });
-        }
-        for m in &request.messages {
-            messages.push(OllamaChatMessage {
-                role: m.role.as_str().to_string(),
-                content: m.content.to_string(),
-            });
-        }
+        let messages = convert_messages(request);
 
         let api_request = OllamaChatRequest {
             model: model.clone(),
@@ -456,19 +547,7 @@ impl Provider for OllamaProvider {
 
         debug!(%model, "streaming Ollama API");
 
-        let mut messages: Vec<OllamaChatMessage> = Vec::new();
-        if let Some(ref system) = request.system_prompt {
-            messages.push(OllamaChatMessage {
-                role: "system".into(),
-                content: system.clone(),
-            });
-        }
-        for m in &request.messages {
-            messages.push(OllamaChatMessage {
-                role: m.role.as_str().to_string(),
-                content: m.content.to_string(),
-            });
-        }
+        let messages = convert_messages(request);
 
         let api_request = OllamaChatRequest {
             model: model.clone(),
