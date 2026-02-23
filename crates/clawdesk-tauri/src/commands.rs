@@ -4045,14 +4045,15 @@ pub async fn list_channels(
     Ok(result)
 }
 
-/// Save configuration for a channel adapter.
+/// Save configuration for a channel adapter and hot-start it.
 ///
-/// Stores the key-value config in `AppState::channel_configs` and
-/// sets corresponding environment variables so channel bootstrap
-/// can pick them up on next restart.
+/// Stores the key-value config in `AppState::channel_configs`, persists
+/// to `~/.clawdesk/channels.json`, sets env vars, and creates + starts
+/// the channel adapter so the user doesn't need to restart the app.
 #[tauri::command]
 pub async fn update_channel(
     state: tauri::State<'_, AppState>,
+    app: AppHandle,
     channel_id: String,
     config: std::collections::HashMap<String, String>,
 ) -> Result<bool, String> {
@@ -4060,7 +4061,7 @@ pub async fn update_channel(
     let env_mappings: &[(&str, &str, &str)] = &[
         ("telegram", "bot_token", "TELEGRAM_BOT_TOKEN"),
         ("discord", "bot_token", "DISCORD_TOKEN"),
-        ("discord", "application_id", "DISCORD_APPLICATION_ID"),
+        ("discord", "application_id", "DISCORD_APP_ID"),
         ("discord", "guild_id", "DISCORD_GUILD_ID"),
         ("slack", "bot_token", "SLACK_BOT_TOKEN"),
         ("slack", "app_token", "SLACK_APP_TOKEN"),
@@ -4085,15 +4086,30 @@ pub async fn update_channel(
         }
     }
 
-    // Persist in AppState
-    let mut configs = state.channel_configs.write().map_err(|e| e.to_string())?;
-    configs.insert(channel_id.clone(), config);
+    // Persist in AppState + disk
+    {
+        let mut configs = state.channel_configs.write().map_err(|e| e.to_string())?;
+        configs.insert(channel_id.clone(), config.clone());
+        AppState::save_channel_configs(&configs);
+    }
 
-    tracing::info!(channel = %channel_id, "Channel config saved");
+    tracing::info!(channel = %channel_id, "Channel config saved — attempting hot-start");
+
+    // Hot-start the channel adapter (create, register, start)
+    if let Err(e) = AppState::hot_start_channel(
+        &channel_id,
+        &config,
+        &state.channel_factory,
+        &state.channel_registry,
+        &app,
+    ) {
+        tracing::warn!(channel = %channel_id, error = %e, "Hot-start failed — channel will start on next app restart");
+    }
+
     Ok(true)
 }
 
-/// Disconnect a channel adapter — clears its saved config.
+/// Disconnect a channel adapter — clears its saved config and persists.
 #[tauri::command]
 pub async fn disconnect_channel(
     state: tauri::State<'_, AppState>,
@@ -4101,6 +4117,7 @@ pub async fn disconnect_channel(
 ) -> Result<bool, String> {
     let mut configs = state.channel_configs.write().map_err(|e| e.to_string())?;
     configs.remove(&channel_id);
+    AppState::save_channel_configs(&configs);
     tracing::info!(channel = %channel_id, "Channel disconnected");
     Ok(true)
 }

@@ -410,9 +410,12 @@ pub struct AppState {
     pub provider_registry: RwLock<ProviderRegistry>,
     pub tool_registry: Arc<ToolRegistry>,
     pub channel_registry: Arc<RwLock<ChannelRegistry>>,
+    /// Factory for creating channel adapters from config maps.
+    /// Stored so `update_channel` can hot-start channels after initial setup.
+    pub channel_factory: Arc<clawdesk_channels::factory::ChannelFactory>,
     /// Saved channel configurations (channel_id → config key-value pairs).
-    /// Persisted in-memory; the `update_channel` / `disconnect_channel` commands
-    /// read and write this map so the Settings UI can configure adapters.
+    /// Persisted to `~/.clawdesk/channels.json` via `save_channel_configs()`
+    /// so channels survive restarts.
     pub channel_configs: RwLock<HashMap<String, HashMap<String, String>>>,
     pub scanner: Arc<CascadeScanner>,
     pub scanner_pattern_count: usize,
@@ -1145,11 +1148,44 @@ impl AppState {
         // T11: Wire ChannelFactory → ChannelRegistry. Always register
         // config-free channels (webchat, internal); probe env vars for the rest.
         let mut channel_registry = ChannelRegistry::new();
+
+        use clawdesk_channels::factory::{ChannelConfig, ChannelFactory};
+
+        let factory = ChannelFactory::with_builtins();
+        let saved_channel_configs = Self::load_channel_configs();
         {
-            use clawdesk_channels::factory::{ChannelConfig, ChannelFactory};
             use serde_json::Map;
 
-            let factory = ChannelFactory::with_builtins();
+            // ── Set env vars from saved channel configs ──
+            for (kind, cfg_map) in &saved_channel_configs {
+                // Set env vars from saved configs so the env-var probe below can find them
+                let env_mappings: &[(&str, &str, &str)] = &[
+                    ("telegram", "bot_token", "TELEGRAM_BOT_TOKEN"),
+                    ("discord", "bot_token", "DISCORD_TOKEN"),
+                    ("discord", "application_id", "DISCORD_APP_ID"),
+                    ("discord", "guild_id", "DISCORD_GUILD_ID"),
+                    ("slack", "bot_token", "SLACK_BOT_TOKEN"),
+                    ("slack", "app_token", "SLACK_APP_TOKEN"),
+                    ("whatsapp", "access_token", "WHATSAPP_TOKEN"),
+                    ("whatsapp", "phone_number_id", "WHATSAPP_PHONE_NUMBER_ID"),
+                    ("email", "imap_host", "IMAP_HOST"),
+                    ("email", "smtp_host", "SMTP_HOST"),
+                    ("email", "email_user", "EMAIL_USER"),
+                    ("email", "email_password", "EMAIL_PASSWORD"),
+                    ("irc", "server", "IRC_SERVER"),
+                    ("irc", "nickname", "IRC_NICKNAME"),
+                ];
+                for &(ch, key, env_var) in env_mappings {
+                    if kind.as_str() == ch {
+                        if let Some(val) = cfg_map.get(key) {
+                            if !val.is_empty() {
+                                std::env::set_var(env_var, val);
+                            }
+                        }
+                    }
+                }
+                info!(kind = %kind, "Restored saved channel config from disk");
+            }
 
             // Always-available channels (no credentials needed)
             for kind in &["webchat", "internal"] {
@@ -1471,7 +1507,8 @@ impl AppState {
             provider_registry: RwLock::new(provider_registry),
             tool_registry,
             channel_registry,
-            channel_configs: RwLock::new(HashMap::new()),
+            channel_factory: Arc::new(factory),
+            channel_configs: RwLock::new(saved_channel_configs),
             scanner: Arc::new(scanner),
             scanner_pattern_count: pattern_count,
             audit_logger: Arc::new(audit_logger),
@@ -1995,6 +2032,129 @@ impl AppState {
         if let Err(e) = self.soch_store.delete(&key) {
             tracing::error!(key = %key, error = %e, "Failed to delete journal entry from SochDB");
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Channel config persistence — ~/.clawdesk/channels.json
+    // ═══════════════════════════════════════════════════════════
+
+    fn channels_path() -> std::path::PathBuf {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(home)
+            .join(".clawdesk")
+            .join("channels.json")
+    }
+
+    /// Load saved channel configs from `~/.clawdesk/channels.json`.
+    /// Returns an empty map if the file doesn't exist or can't be parsed.
+    pub fn load_channel_configs() -> HashMap<String, HashMap<String, String>> {
+        let path = Self::channels_path();
+        match std::fs::read_to_string(&path) {
+            Ok(data) => {
+                match serde_json::from_str(&data) {
+                    Ok(configs) => {
+                        info!(path = %path.display(), "Loaded saved channel configs");
+                        configs
+                    }
+                    Err(e) => {
+                        warn!(path = %path.display(), error = %e, "Failed to parse channels.json");
+                        HashMap::new()
+                    }
+                }
+            }
+            Err(_) => HashMap::new(), // File doesn't exist yet — normal on first run
+        }
+    }
+
+    /// Persist channel configs to `~/.clawdesk/channels.json` atomically.
+    pub fn save_channel_configs(configs: &HashMap<String, HashMap<String, String>>) {
+        let path = Self::channels_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension("json.tmp");
+        match serde_json::to_string_pretty(configs) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, &path)) {
+                    error!(error = %e, "Failed to persist channel configs");
+                } else {
+                    info!(path = %path.display(), "Channel configs persisted to disk");
+                }
+            }
+            Err(e) => error!(error = %e, "Failed to serialize channel configs"),
+        }
+    }
+
+    /// Hot-start a channel adapter: create it from config, register it, and
+    /// spawn a background thread running `Channel::start()`.
+    ///
+    /// Called from `update_channel` so the user doesn't need to restart the app.
+    pub fn hot_start_channel(
+        channel_id: &str,
+        config: &HashMap<String, String>,
+        factory: &clawdesk_channels::factory::ChannelFactory,
+        channel_registry: &Arc<RwLock<ChannelRegistry>>,
+        app_handle: &tauri::AppHandle,
+    ) -> Result<(), String> {
+        use clawdesk_channels::factory::ChannelConfig;
+        use serde_json::Map;
+
+        // Build a ChannelConfig from the user's key-value map
+        let mut map = Map::new();
+        for (k, v) in config {
+            map.insert(k.clone(), serde_json::Value::String(v.clone()));
+        }
+        let cfg = ChannelConfig::new(channel_id, map);
+
+        // Create the channel adapter
+        let channel = factory
+            .create(&cfg)
+            .map_err(|e| format!("Failed to create {channel_id} channel: {e}"))?;
+
+        // Register it (requires write lock)
+        {
+            let mut reg = channel_registry
+                .write()
+                .map_err(|e| format!("Channel registry lock: {e}"))?;
+            let _ = reg.register(Arc::clone(&channel));
+        }
+
+        info!(channel = %channel_id, "Channel adapter created and registered (hot-start)");
+
+        // Spawn the inbound message loop on a background thread
+        let state_ref: tauri::State<'_, AppState> = app_handle.state();
+        let sink = std::sync::Arc::new(crate::state::ChannelMessageSink {
+            negotiator: Arc::clone(&state_ref.negotiator),
+            tool_registry: Arc::clone(&state_ref.tool_registry),
+            app_handle: app_handle.clone(),
+            channel_registry: Arc::clone(channel_registry),
+            cancel: state_ref.cancel.clone(),
+        });
+
+        let ch_name = channel_id.to_string();
+        std::thread::Builder::new()
+            .name(format!("channel-{ch_name}"))
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+                    .expect("channel runtime");
+                rt.block_on(async move {
+                    info!(channel = %ch_name, "Starting hot-started channel adapter");
+                    match channel.start(sink).await {
+                        Ok(()) => info!(channel = %ch_name, "Hot-started channel adapter running"),
+                        Err(e) => error!(channel = %ch_name, error = %e, "Hot-started channel failed"),
+                    }
+                    // Keep the runtime alive
+                    tokio::signal::ctrl_c().await.ok();
+                });
+            })
+            .map_err(|e| format!("Failed to spawn channel thread: {e}"))?;
+
+        Ok(())
     }
 
     /// T21: Post-init health verification.
