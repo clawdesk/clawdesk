@@ -1,7 +1,17 @@
 //! Slack channel implementation.
 //!
-//! Supports both Socket Mode (recommended for development) and
-//! Events API (for production). Implements `Channel` + `Threaded` + `Reactions`.
+//! Supports Socket Mode for receiving events via a WebSocket connection.
+//! Implements `Channel` + `Threaded` + `Reactions`.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! SlackChannel
+//! ├── socket_mode_loop() — connects via WebSocket; dispatches events
+//! ├── normalize_event()  — SlackMessageEvent → NormalizedMessage
+//! ├── send()             — OutboundMessage → chat.postMessage
+//! └── send_to_thread()   — threaded replies via thread_ts
+//! ```
 //!
 //! ## Rate limits
 //!
@@ -14,12 +24,14 @@ use async_trait::async_trait;
 use clawdesk_channel::{Channel, MessageSink, Reactions, Threaded};
 use clawdesk_types::channel::{ChannelId, ChannelMeta};
 use clawdesk_types::message::{DeliveryReceipt, NormalizedMessage, OutboundMessage, SenderIdentity};
+use futures::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tracing::{debug, info, warn};
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
 
@@ -94,6 +106,123 @@ impl SlackChannel {
             timestamp: chrono::Utc::now(),
         })
     }
+
+    /// Socket Mode WebSocket loop.
+    ///
+    /// 1. POST `apps.connections.open` with the app-level token to get a `wss://` URL
+    /// 2. Connect via WebSocket
+    /// 3. For each frame, parse the envelope type:
+    ///    - `hello` → connection established
+    ///    - `events_api` → extract the inner event, ACK, and dispatch
+    ///    - `disconnect` → reconnect
+    /// 4. ACK every envelope by sending `{"envelope_id": "..."}` back
+    async fn socket_mode_loop(&self, sink: Arc<dyn MessageSink>) -> Result<(), String> {
+        // 1. Get WebSocket URL via apps.connections.open
+        let open_resp = self
+            .client
+            .post(&self.api_url("apps.connections.open"))
+            .header("Authorization", format!("Bearer {}", self.app_token))
+            .send()
+            .await
+            .map_err(|e| format!("Slack connections.open failed: {e}"))?;
+
+        let open_body: serde_json::Value = open_resp
+            .json()
+            .await
+            .map_err(|e| format!("Slack connections.open parse failed: {e}"))?;
+
+        if !open_body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = open_body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+            return Err(format!("Slack connections.open error: {err}"));
+        }
+
+        let ws_url = open_body
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Slack connections.open: no url in response".to_string())?;
+
+        info!("Slack: connecting to Socket Mode WebSocket…");
+
+        let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
+            .await
+            .map_err(|e| format!("Slack WebSocket connect failed: {e}"))?;
+
+        let (mut write, mut read) = ws_stream.split();
+
+        info!("Slack: Socket Mode connected");
+
+        while self.running.load(Ordering::Relaxed) {
+            let frame = match read.next().await {
+                Some(Ok(WsMessage::Text(t))) => t,
+                Some(Ok(WsMessage::Close(_))) | None => {
+                    info!("Slack: Socket Mode WebSocket closed");
+                    break;
+                }
+                _ => continue,
+            };
+
+            let envelope: serde_json::Value = match serde_json::from_str(frame.as_ref()) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let envelope_id = envelope.get("envelope_id").and_then(|v| v.as_str());
+            let envelope_type = envelope.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            // ACK every envelope immediately
+            if let Some(eid) = envelope_id {
+                let ack = serde_json::json!({"envelope_id": eid});
+                if write.send(WsMessage::Text(ack.to_string().into())).await.is_err() {
+                    break;
+                }
+            }
+
+            match envelope_type {
+                "hello" => {
+                    info!("Slack: Socket Mode hello received");
+                }
+                "disconnect" => {
+                    info!("Slack: disconnect requested, will reconnect");
+                    break;
+                }
+                "events_api" => {
+                    // Extract the inner event payload
+                    let Some(payload) = envelope.get("payload") else {
+                        continue;
+                    };
+                    let Some(event) = payload.get("event") else {
+                        continue;
+                    };
+
+                    // Only handle message events (not message_changed, etc.)
+                    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let subtype = event.get("subtype").and_then(|v| v.as_str());
+
+                    if event_type != "message" || subtype.is_some() {
+                        continue;
+                    }
+
+                    let msg_event: SlackMessageEvent = match serde_json::from_value(event.clone()) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            debug!(error = %e, "Slack: failed to parse message event");
+                            continue;
+                        }
+                    };
+
+                    if let Some(normalized) = self.normalize_event(&msg_event) {
+                        sink.on_message(normalized).await;
+                    }
+                }
+                _ => {
+                    debug!(envelope_type, "Slack: ignoring envelope type");
+                }
+            }
+        }
+
+        info!("Slack: Socket Mode loop ended");
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -114,7 +243,7 @@ impl Channel for SlackChannel {
         }
     }
 
-    async fn start(&self, _sink: Arc<dyn MessageSink>) -> Result<(), String> {
+    async fn start(&self, sink: Arc<dyn MessageSink>) -> Result<(), String> {
         self.running.store(true, Ordering::Relaxed);
 
         // Verify bot token via auth.test
@@ -144,13 +273,32 @@ impl Channel for SlackChannel {
             "Slack bot verified"
         );
 
-        // In production: connect via Socket Mode WebSocket or set up
-        // Events API webhook handler. The connection would:
-        // 1. POST apps.connections.open with app_token
-        // 2. Connect to returned wss:// URL
-        // 3. Handle hello, events_api, disconnect, slash_commands
+        // Spawn the Socket Mode WebSocket loop with auto-reconnect.
+        let sm_channel = SlackChannel::new(
+            self.bot_token.clone(),
+            self.app_token.clone(),
+            self.signing_secret.clone(),
+        );
+        sm_channel.running.store(true, Ordering::Relaxed);
 
-        info!("Slack channel started");
+        tokio::spawn(async move {
+            loop {
+                match sm_channel.socket_mode_loop(Arc::clone(&sink)).await {
+                    Ok(()) => {
+                        info!("Slack Socket Mode loop ended normally, reconnecting…");
+                    }
+                    Err(e) => {
+                        warn!("Slack Socket Mode error: {e}, reconnecting in 5s…");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+                if !sm_channel.running.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        });
+
+        info!("Slack channel started — Socket Mode loop spawned");
         Ok(())
     }
 

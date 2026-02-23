@@ -211,7 +211,7 @@ impl Channel for TelegramChannel {
         }
     }
 
-    async fn start(&self, _sink: Arc<dyn MessageSink>) -> Result<(), String> {
+    async fn start(&self, sink: Arc<dyn MessageSink>) -> Result<(), String> {
         self.running.store(true, Ordering::Relaxed);
 
         // Verify bot token
@@ -239,11 +239,21 @@ impl Channel for TelegramChannel {
             );
         }
 
-        // Start polling in the background
-        // The caller must hold an Arc to Self; for simplicity, we expect this
-        // to be called on an Arc<TelegramChannel>.
-        // In a real implementation, we'd store the JoinHandle for cancellation.
-        info!("Telegram channel started (long-polling mode)");
+        // Spawn the long-polling loop on a background task.
+        // We create a new TelegramChannel instance so the spawned future
+        // has 'static lifetime and owns its state independently.
+        let poll_channel = Arc::new(TelegramChannel::new(
+            self.bot_token.clone(),
+            self.allowed_chat_ids.clone(),
+            self.enable_groups,
+        ));
+        poll_channel.running.store(true, Ordering::Relaxed);
+
+        tokio::spawn(async move {
+            poll_channel.poll_loop(sink).await;
+        });
+
+        info!("Telegram channel started — poll loop spawned");
         Ok(())
     }
 

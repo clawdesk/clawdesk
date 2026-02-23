@@ -443,6 +443,8 @@ pub fn run() {
                     reg.iter()
                         .filter(|(id, _)| matches!(id,
                             ChannelId::Discord | ChannelId::Telegram | ChannelId::Slack
+                            | ChannelId::WhatsApp | ChannelId::Email
+                            | ChannelId::IMessage | ChannelId::Irc
                         ))
                         .map(|(id, ch)| (*id, std::sync::Arc::clone(ch)))
                         .collect()

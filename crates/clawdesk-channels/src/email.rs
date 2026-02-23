@@ -283,31 +283,273 @@ impl EmailChannel {
         }
     }
 
-    /// IMAP polling loop: fetches unseen messages and dispatches.
-    async fn imap_poll_loop(self: Arc<Self>, _sink: Arc<dyn MessageSink>) {
+    /// IMAP polling loop: connects to the IMAP server, fetches unseen messages,
+    /// normalizes them, and dispatches via `sink.on_message()`.
+    ///
+    /// Uses raw IMAP commands over TLS (tokio-rustls). On each poll cycle:
+    /// 1. LOGIN with credentials
+    /// 2. SELECT mailbox
+    /// 3. SEARCH UNSEEN for unread messages
+    /// 4. FETCH each UID (BODY.PEEK[HEADER] + BODY.PEEK[TEXT])
+    /// 5. Parse and normalize
+    /// 6. STORE +FLAGS (\Seen) to mark as read
+    /// 7. LOGOUT
+    /// 8. Sleep for poll_interval_secs
+    async fn imap_poll_loop(self: Arc<Self>, sink: Arc<dyn MessageSink>) {
         info!(
             host = %self.imap_config.host,
             mailbox = %self.mailbox,
+            poll_secs = self.poll_interval_secs,
             "Email IMAP poll loop started"
         );
 
-        // In production:
-        // 1. Connect to IMAP server with TLS
-        // 2. LOGIN with credentials
-        // 3. SELECT mailbox
-        // 4. SEARCH UNSEEN for unread messages
-        // 5. FETCH each UID (BODY[HEADER] + BODY[TEXT])
-        // 6. Parse email headers and body
-        // 7. Normalize and dispatch via sink.on_message()
-        // 8. STORE +FLAGS (\Seen) to mark as read
-        // 9. Support IDLE (RFC 2177) for push notifications
-        //    or fall back to periodic polling
-
         while self.running.load(Ordering::Relaxed) {
+            match self.imap_poll_once(&sink).await {
+                Ok(count) => {
+                    if count > 0 {
+                        info!(count, "Email: processed new messages");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Email IMAP poll error, retrying next cycle");
+                }
+            }
+
             tokio::time::sleep(Duration::from_secs(self.poll_interval_secs)).await;
         }
 
         info!("Email IMAP poll loop stopped");
+    }
+
+    /// Single IMAP poll cycle — connect, fetch unseen, normalize, mark read.
+    async fn imap_poll_once(&self, sink: &Arc<dyn MessageSink>) -> Result<usize, String> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // Connect TLS
+        let addr = format!("{}:{}", self.imap_config.host, self.imap_config.port);
+        let tcp = tokio::net::TcpStream::connect(&addr)
+            .await
+            .map_err(|e| format!("IMAP connect failed: {e}"))?;
+
+        let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+        let tls_config = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let connector = tokio_tls_connector(tls_config);
+        let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(
+            self.imap_config.host.as_str(),
+        )
+        .map_err(|e| format!("invalid server name: {e}"))?
+        .to_owned();
+
+        let tls_stream = connector
+            .connect(server_name, tcp)
+            .await
+            .map_err(|e| format!("IMAP TLS handshake failed: {e}"))?;
+
+        let (reader, mut writer) = tokio::io::split(tls_stream);
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        let mut tag = 0u32;
+
+        // Read server greeting
+        line.clear();
+        reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("IMAP greeting read failed: {e}"))?;
+
+        if !line.contains("OK") {
+            return Err(format!("IMAP server rejected connection: {}", line.trim()));
+        }
+
+        // LOGIN
+        tag += 1;
+        let login_cmd = format!(
+            "A{tag} LOGIN {} {}\r\n",
+            self.imap_config.username, self.imap_config.password
+        );
+        writer
+            .write_all(login_cmd.as_bytes())
+            .await
+            .map_err(|e| format!("IMAP LOGIN write failed: {e}"))?;
+
+        loop {
+            line.clear();
+            reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| format!("IMAP LOGIN read failed: {e}"))?;
+            if line.starts_with(&format!("A{tag} ")) {
+                if !line.contains("OK") {
+                    return Err(format!("IMAP LOGIN failed: {}", line.trim()));
+                }
+                break;
+            }
+        }
+
+        // SELECT mailbox
+        tag += 1;
+        let select_cmd = format!("A{tag} SELECT {}\r\n", self.mailbox);
+        writer
+            .write_all(select_cmd.as_bytes())
+            .await
+            .map_err(|e| format!("IMAP SELECT write failed: {e}"))?;
+
+        loop {
+            line.clear();
+            reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| format!("IMAP SELECT read failed: {e}"))?;
+            if line.starts_with(&format!("A{tag} ")) {
+                if !line.contains("OK") {
+                    return Err(format!("IMAP SELECT failed: {}", line.trim()));
+                }
+                break;
+            }
+        }
+
+        // SEARCH UNSEEN
+        tag += 1;
+        let search_cmd = format!("A{tag} SEARCH UNSEEN\r\n");
+        writer
+            .write_all(search_cmd.as_bytes())
+            .await
+            .map_err(|e| format!("IMAP SEARCH write failed: {e}"))?;
+
+        let mut uids: Vec<u32> = Vec::new();
+        loop {
+            line.clear();
+            reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| format!("IMAP SEARCH read failed: {e}"))?;
+
+            if line.starts_with("* SEARCH") {
+                // Parse UIDs from "* SEARCH 1 2 3"
+                uids = line
+                    .trim()
+                    .strip_prefix("* SEARCH")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .filter_map(|s| s.parse::<u32>().ok())
+                    .filter(|&uid| uid > self.last_uid.load(Ordering::Relaxed))
+                    .collect();
+            }
+
+            if line.starts_with(&format!("A{tag} ")) {
+                break;
+            }
+        }
+
+        let mut count = 0;
+
+        for uid in &uids {
+            // FETCH message
+            tag += 1;
+            let fetch_cmd = format!("A{tag} FETCH {uid} (BODY.PEEK[HEADER] BODY.PEEK[TEXT])\r\n");
+            writer
+                .write_all(fetch_cmd.as_bytes())
+                .await
+                .map_err(|e| format!("IMAP FETCH write failed: {e}"))?;
+
+            let mut headers = String::new();
+            let mut body_text = String::new();
+            let mut in_headers = false;
+            let mut in_body = false;
+
+            loop {
+                line.clear();
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .map_err(|e| format!("IMAP FETCH read failed: {e}"))?;
+
+                if line.starts_with(&format!("A{tag} ")) {
+                    break;
+                }
+
+                // Simple state machine for FETCH response parsing
+                if line.contains("BODY[HEADER]") {
+                    in_headers = true;
+                    in_body = false;
+                    continue;
+                }
+                if line.contains("BODY[TEXT]") {
+                    in_headers = false;
+                    in_body = true;
+                    continue;
+                }
+                if line.trim() == ")" {
+                    in_headers = false;
+                    in_body = false;
+                    continue;
+                }
+
+                if in_headers {
+                    headers.push_str(&line);
+                } else if in_body {
+                    body_text.push_str(&line);
+                }
+            }
+
+            // Parse headers
+            let from = extract_header(&headers, "From").unwrap_or_default();
+            let to = extract_header(&headers, "To").unwrap_or_default();
+            let subject = extract_header(&headers, "Subject").unwrap_or_default();
+            let message_id = extract_header(&headers, "Message-ID")
+                .unwrap_or_else(|| format!("<{uid}@imap>"));
+            let in_reply_to = extract_header(&headers, "In-Reply-To");
+            let references: Vec<String> = extract_header(&headers, "References")
+                .map(|r| r.split_whitespace().map(String::from).collect())
+                .unwrap_or_default();
+
+            // Extract sender name from "Name <email>" format
+            let (from_name, from_addr) = parse_email_address(&from);
+
+            let parsed = ParsedEmail {
+                uid: *uid,
+                message_id,
+                from: from_addr,
+                from_name: Some(from_name),
+                to,
+                subject,
+                body_text: body_text.trim().to_string(),
+                body_html: None,
+                in_reply_to,
+                references,
+                attachments: vec![],
+            };
+
+            let normalized = self.normalize_email(&parsed);
+            sink.on_message(normalized).await;
+            count += 1;
+
+            // Mark as seen
+            tag += 1;
+            let store_cmd = format!("A{tag} STORE {uid} +FLAGS (\\Seen)\r\n");
+            let _ = writer.write_all(store_cmd.as_bytes()).await;
+            loop {
+                line.clear();
+                let _ = reader.read_line(&mut line).await;
+                if line.starts_with(&format!("A{tag} ")) {
+                    break;
+                }
+            }
+
+            self.last_uid.store(*uid, Ordering::Relaxed);
+        }
+
+        // LOGOUT
+        tag += 1;
+        let logout_cmd = format!("A{tag} LOGOUT\r\n");
+        let _ = writer.write_all(logout_cmd.as_bytes()).await;
+
+        Ok(count)
     }
 }
 
@@ -322,6 +564,46 @@ fn mime_to_media_type(mime: &str) -> clawdesk_types::message::MediaType {
     } else {
         clawdesk_types::message::MediaType::Document
     }
+}
+
+/// Create a TLS connector from a rustls ClientConfig.
+fn tokio_tls_connector(
+    config: tokio_rustls::rustls::ClientConfig,
+) -> tokio_rustls::TlsConnector {
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+}
+
+/// Extract a header value by name from raw IMAP headers.
+fn extract_header(headers: &str, name: &str) -> Option<String> {
+    let prefix = format!("{}: ", name);
+    for line in headers.lines() {
+        if let Some(rest) = line.strip_prefix(&prefix) {
+            return Some(rest.trim().to_string());
+        }
+        // Case-insensitive fallback
+        if line.len() > prefix.len() {
+            let lower = line[..prefix.len()].to_lowercase();
+            if lower == prefix.to_lowercase() {
+                return Some(line[prefix.len()..].trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Parse "Display Name <email@example.com>" into (name, email).
+fn parse_email_address(addr: &str) -> (String, String) {
+    if let Some(start) = addr.find('<') {
+        if let Some(end) = addr.find('>') {
+            let name = addr[..start].trim().trim_matches('"').to_string();
+            let email = addr[start + 1..end].trim().to_string();
+            if name.is_empty() {
+                return (email.clone(), email);
+            }
+            return (name, email);
+        }
+    }
+    (addr.to_string(), addr.to_string())
 }
 
 #[async_trait]
@@ -342,11 +624,9 @@ impl Channel for EmailChannel {
         }
     }
 
-    async fn start(&self, _sink: Arc<dyn MessageSink>) -> Result<(), String> {
+    async fn start(&self, sink: Arc<dyn MessageSink>) -> Result<(), String> {
         self.running.store(true, Ordering::Relaxed);
 
-        // Verify IMAP connectivity
-        // In production: attempt IMAP LOGIN and SELECT mailbox
         info!(
             imap_host = %self.imap_config.host,
             imap_port = self.imap_config.port,
@@ -354,9 +634,25 @@ impl Channel for EmailChannel {
             smtp_port = self.smtp_config.port,
             from = %self.from_address,
             mailbox = %self.mailbox,
-            "Email channel started"
+            "Email channel starting"
         );
 
+        // Spawn the IMAP poll loop on a background task.
+        let poll_channel = Arc::new(EmailChannel::new(EmailConfig {
+            imap: self.imap_config.clone(),
+            smtp: self.smtp_config.clone(),
+            from_address: self.from_address.clone(),
+            from_name: self.from_name.clone(),
+            mailbox: self.mailbox.clone(),
+            poll_interval_secs: self.poll_interval_secs,
+        }));
+        poll_channel.running.store(true, Ordering::Relaxed);
+
+        tokio::spawn(async move {
+            poll_channel.imap_poll_loop(sink).await;
+        });
+
+        info!("Email channel started — IMAP poll loop spawned");
         Ok(())
     }
 
