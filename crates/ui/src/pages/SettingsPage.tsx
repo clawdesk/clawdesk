@@ -363,6 +363,10 @@ export function SettingsPage({
   const [activeProviderId, setActiveProvId] = useState<string | null>(() => getActiveProviderId());
   // Which provider card is expanded for editing (by id), null = none
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+
+  // Clear history confirmation
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
   // Draft state for the provider being edited
   const [editDraft, setEditDraft] = useState<ProviderConfig | null>(null);
   const [showApiKeyFor, setShowApiKeyFor] = useState<string | null>(null);
@@ -635,26 +639,74 @@ export function SettingsPage({
               <div className="settings-group">
                 <div className="settings-group-label" style={{ color: "var(--error)" }}>Danger Zone</div>
                 <div className="section-card" style={{ padding: 16, border: "1px solid var(--error)", borderRadius: 8 }}>
-                  <p className="settings-desc" style={{ marginBottom: 8 }}>
-                    Permanently delete all chat history. This cannot be undone.
+                  <p className="settings-desc" style={{ marginBottom: 4 }}>
+                    Permanently delete all chat conversations and message history.
+                  </p>
+                  <p className="settings-desc" style={{ marginBottom: 12, color: "var(--text-soft)", fontSize: 12 }}>
+                    Your agents, skills, providers, and settings will NOT be affected.
                   </p>
                   <button
                     className="btn subtle"
                     style={{ color: "var(--error)", borderColor: "var(--error)" }}
-                    onClick={async () => {
-                      if (!window.confirm("Delete ALL chat history? This cannot be undone.")) return;
-                      try {
-                        const count = await api.clearAllChats();
-                        pushToast(`Cleared ${count} chat session${count === 1 ? "" : "s"}.`);
-                      } catch (e: any) {
-                        pushToast(`Failed to clear history: ${e?.message || e}`);
-                      }
-                    }}
+                    onClick={() => setShowClearConfirm(true)}
                   >
                     🗑️ Clear All Chat History
                   </button>
                 </div>
               </div>
+
+              {/* Clear history confirmation modal */}
+              {showClearConfirm && (
+                <div className="modal-backdrop" onClick={() => !isClearing && setShowClearConfirm(false)}>
+                  <div className="modal" style={{ maxWidth: 440, padding: 0 }} onClick={(e) => e.stopPropagation()}>
+                    <div style={{ padding: "20px 24px 0" }}>
+                      <h3 style={{ fontSize: 17, fontWeight: 600, marginBottom: 12, color: "var(--text)" }}>Clear all chat history?</h3>
+                      <div style={{ fontSize: 14, lineHeight: 1.6, color: "var(--text)" }}>
+                        <p style={{ marginBottom: 12 }}>This will permanently delete:</p>
+                        <ul style={{ paddingLeft: 20, marginBottom: 16 }}>
+                          <li>All chat conversations</li>
+                          <li>All message history</li>
+                          <li>All tool call records</li>
+                        </ul>
+                        <div style={{ padding: "10px 12px", background: "var(--panel-strong)", borderRadius: 8, marginBottom: 16, fontSize: 13 }}>
+                          ✅ <strong>Not affected:</strong> Your agents, skills, providers, automations, and all settings will remain unchanged.
+                        </div>
+                        <p style={{ color: "var(--error)", fontWeight: 500, fontSize: 13 }}>
+                          This action cannot be undone.
+                        </p>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "16px 24px", borderTop: "1px solid var(--line)", marginTop: 8 }}>
+                      <button
+                        className="btn ghost"
+                        onClick={() => setShowClearConfirm(false)}
+                        disabled={isClearing}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="btn"
+                        style={{ background: "var(--error)", color: "#fff", borderColor: "var(--error)" }}
+                        disabled={isClearing}
+                        onClick={async () => {
+                          setIsClearing(true);
+                          try {
+                            const count = await api.clearAllChats();
+                            pushToast(`Cleared ${count} chat session${count === 1 ? "" : "s"} successfully.`);
+                            setShowClearConfirm(false);
+                          } catch (e: any) {
+                            pushToast(`Failed to clear history: ${e?.message || e}`);
+                          } finally {
+                            setIsClearing(false);
+                          }
+                        }}
+                      >
+                        {isClearing ? "Clearing..." : "Yes, clear all history"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
