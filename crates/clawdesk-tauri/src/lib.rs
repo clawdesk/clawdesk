@@ -413,6 +413,69 @@ pub fn run() {
                 info!(port, "Embedded gateway server spawned on localhost");
             }
 
+            // ── Start inbound channel adapters ───────────────────────
+            // For channels that support inbound messages (Discord, Telegram, etc.),
+            // call Channel::start() with a MessageSink that routes messages through
+            // the agent runner and sends responses back via the channel.
+            {
+                use clawdesk_channel::Channel;
+                use clawdesk_types::channel::ChannelId;
+
+                let sink = std::sync::Arc::new(state::ChannelMessageSink {
+                    negotiator: std::sync::Arc::clone(&state.negotiator),
+                    tool_registry: std::sync::Arc::clone(&state.tool_registry),
+                    agents: {
+                        // We need an Arc<RwLock<HashMap>> that matches agents field.
+                        // AppState.agents is RwLock<HashMap>, we need to wrap it.
+                        // Instead, clone the current agents snapshot into a new Arc<RwLock>.
+                        let agents_snapshot = state.agents.read()
+                            .map(|a| a.clone())
+                            .unwrap_or_default();
+                        std::sync::Arc::new(std::sync::RwLock::new(agents_snapshot))
+                    },
+                    channel_registry: std::sync::Arc::clone(&state.channel_registry),
+                    cancel: state.cancel.clone(),
+                });
+
+                // Check which channels are registered and start their inbound loops
+                let channels_to_start: Vec<(ChannelId, std::sync::Arc<dyn Channel>)> = {
+                    let reg = state.channel_registry.read().expect("channel registry lock");
+                    reg.iter()
+                        .filter(|(id, _)| matches!(id,
+                            ChannelId::Discord | ChannelId::Telegram | ChannelId::Slack
+                        ))
+                        .map(|(id, ch)| (*id, std::sync::Arc::clone(ch)))
+                        .collect()
+                };
+
+                for (id, ch) in channels_to_start {
+                    let ch_sink = std::sync::Arc::clone(&sink);
+                    // Spawn on a background thread with its own runtime so
+                    // Channel::start() can do async work (token validation,
+                    // WebSocket connection, etc.) without blocking the setup hook.
+                    let ch_name = format!("{id}");
+                    std::thread::Builder::new()
+                        .name(format!("channel-{id}"))
+                        .spawn(move || {
+                            let rt = tokio::runtime::Builder::new_multi_thread()
+                                .worker_threads(1)
+                                .enable_all()
+                                .build()
+                                .expect("channel runtime");
+                            rt.block_on(async move {
+                                info!(channel = %ch_name, "Starting inbound channel adapter");
+                                match ch.start(ch_sink).await {
+                                    Ok(()) => info!(channel = %ch_name, "Channel adapter started"),
+                                    Err(e) => error!(channel = %ch_name, error = %e, "Channel adapter failed to start"),
+                                }
+                                // Keep the runtime alive so spawned gateway tasks continue running
+                                tokio::signal::ctrl_c().await.ok();
+                            });
+                        })
+                        .ok();
+                }
+            }
+
             // T25: Initialize OTEL tracer if endpoint is configured
             if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
                 info!(endpoint = %endpoint, "Initializing OpenTelemetry tracer");

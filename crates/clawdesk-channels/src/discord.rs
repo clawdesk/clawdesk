@@ -509,12 +509,38 @@ impl Channel for DiscordChannel {
             "Discord bot verified"
         );
 
-        // The gateway_loop is designed to be driven externally.
-        // In a full deployment the caller spawns it:
-        //   tokio::spawn(channel.gateway_loop(sink))
-        // We log readiness here — the caller is responsible for the event loop
-        // lifetime so it can manage reconnection.
-        info!("Discord channel started — ready for gateway_loop()");
+        // Spawn the Gateway WebSocket event loop on a background task.
+        // We create a lightweight clone of this channel's configuration so the
+        // spawned future has 'static lifetime (avoids &self borrow issues).
+        let gw_channel = DiscordChannel::new(
+            self.bot_token.clone(),
+            self.application_id.clone(),
+            self.allowed_guild_ids.clone(),
+            self.allowed_users.clone(),
+            self.listen_to_bots,
+            self.mention_only,
+        );
+        gw_channel.running.store(true, Ordering::Relaxed);
+
+        tokio::spawn(async move {
+            loop {
+                match gw_channel.gateway_loop(Arc::clone(&sink)).await {
+                    Ok(()) => {
+                        info!("Discord gateway loop ended normally");
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Discord gateway loop error: {e}, reconnecting in 5s…");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        if !gw_channel.running.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        info!("Discord channel started — gateway loop spawned");
         Ok(())
     }
 

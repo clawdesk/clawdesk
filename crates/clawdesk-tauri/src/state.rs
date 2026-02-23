@@ -630,6 +630,138 @@ impl clawdesk_cron::executor::AgentExecutor for NoopAgentExecutor {
     }
 }
 
+// ── Channel MessageSink — routes inbound channel messages through the agent ──
+
+/// `MessageSink` implementation that processes inbound messages from external
+/// channels (Discord, Telegram, Slack, etc.) through the agent pipeline and
+/// sends responses back via the originating channel.
+///
+/// This is the glue between the channel adapters' `gateway_loop()` and the
+/// agent runner: when a Discord user @mentions the bot, the gateway loop
+/// calls `sink.on_message(normalized)`, which lands here. We resolve the
+/// agent + provider, run the LLM, and send the response back via
+/// `Channel::send()`.
+pub(crate) struct ChannelMessageSink {
+    pub negotiator: Arc<RwLock<ProviderNegotiator>>,
+    pub tool_registry: Arc<ToolRegistry>,
+    pub agents: Arc<RwLock<HashMap<String, DesktopAgent>>>,
+    pub channel_registry: Arc<RwLock<ChannelRegistry>>,
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
+#[async_trait::async_trait]
+impl clawdesk_channel::MessageSink for ChannelMessageSink {
+    async fn on_message(&self, msg: clawdesk_types::message::NormalizedMessage) {
+        use clawdesk_providers::capability::ProviderCaps;
+
+        let channel_id = msg.sender.channel;
+        let sender_name = msg.sender.display_name.clone();
+
+        info!(
+            channel = %channel_id,
+            sender = %sender_name,
+            body_len = msg.body.len(),
+            "Inbound channel message received — routing to agent"
+        );
+
+        // 1. Find the default agent (first registered agent)
+        let agent = match self.agents.read() {
+            Ok(agents) => agents.values().next().cloned(),
+            Err(e) => {
+                error!("Failed to read agents: {e}");
+                return;
+            }
+        };
+        let Some(agent) = agent else {
+            warn!("No agent configured — dropping inbound message from {sender_name}");
+            return;
+        };
+
+        // 2. Resolve provider from negotiator
+        let model_id = AppState::resolve_model_id(&agent.model);
+        let required = ProviderCaps::TEXT_COMPLETION.union(ProviderCaps::SYSTEM_PROMPT);
+        let provider: Arc<dyn Provider> = {
+            let neg = match self.negotiator.read() {
+                Ok(n) => n,
+                Err(e) => {
+                    error!("Negotiator lock poisoned: {e}");
+                    return;
+                }
+            };
+            match neg.resolve_model(&model_id, required) {
+                Some((p, _)) => Arc::clone(p),
+                None => {
+                    warn!(model = %agent.model, "No provider for model — dropping message");
+                    return;
+                }
+            }
+        };
+
+        // 3. Build a minimal AgentConfig + runner
+        let config = AgentConfig {
+            model: agent.model.clone(),
+            system_prompt: agent.persona.clone(),
+            ..Default::default()
+        };
+
+        let history = vec![clawdesk_providers::ChatMessage::new(
+            clawdesk_providers::MessageRole::User,
+            msg.body.as_str(),
+        )];
+
+        let runner = AgentRunner::new(
+            provider,
+            Arc::clone(&self.tool_registry),
+            config,
+            self.cancel.clone(),
+        );
+
+        // 4. Run the agent
+        let response = match runner.run(history, agent.persona.clone()).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                error!(channel = %channel_id, error = %e, "Agent run failed for inbound message");
+                return;
+            }
+        };
+
+        info!(
+            channel = %channel_id,
+            sender = %sender_name,
+            response_len = response.content.len(),
+            "Agent response ready — sending back to channel"
+        );
+
+        // 5. Send response back through the originating channel
+        let outbound = clawdesk_types::message::OutboundMessage {
+            origin: msg.origin.clone(),
+            body: response.content,
+            media: vec![],
+            reply_to: None,
+            thread_id: None,
+        };
+
+        let ch = {
+            let reg = match self.channel_registry.read() {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("Channel registry lock poisoned: {e}");
+                    return;
+                }
+            };
+            reg.get(&channel_id).cloned()
+        };
+
+        if let Some(ch) = ch {
+            if let Err(e) = ch.send(outbound).await {
+                error!(channel = %channel_id, error = %e, "Failed to send response back");
+            }
+        } else {
+            error!(channel = %channel_id, "Channel not found in registry — cannot reply");
+        }
+    }
+}
+
 // ── T6: ApprovalGate adapter — bridges ExecApprovalManager into AgentRunner ──
 
 /// Bridges `ExecApprovalManager` into the agent runner's `ApprovalGate` trait.
