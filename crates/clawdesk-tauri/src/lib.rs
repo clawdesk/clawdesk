@@ -390,14 +390,25 @@ pub fn run() {
                     ..Default::default()
                 };
 
-                // Spawn on the Tokio runtime — runs until the app's
-                // CancellationToken is triggered on exit.
-                tokio::spawn(async move {
-                    info!(port, "Starting embedded gateway server");
-                    if let Err(e) = clawdesk_gateway::serve(config, gw_state, cancel).await {
-                        error!("Embedded gateway exited with error: {}", e);
-                    }
-                });
+                // Spawn on a dedicated thread with its own Tokio runtime.
+                // The Tauri .setup() hook runs before Tauri's internal runtime
+                // is available, so we can't use tokio::spawn() here.
+                std::thread::Builder::new()
+                    .name("gateway-server".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_multi_thread()
+                            .worker_threads(2)
+                            .enable_all()
+                            .build()
+                            .expect("gateway tokio runtime");
+                        rt.block_on(async move {
+                            info!(port, "Starting embedded gateway server");
+                            if let Err(e) = clawdesk_gateway::serve(config, gw_state, cancel).await {
+                                error!("Embedded gateway exited with error: {}", e);
+                            }
+                        });
+                    })
+                    .expect("failed to spawn gateway thread");
 
                 info!(port, "Embedded gateway server spawned on localhost");
             }
