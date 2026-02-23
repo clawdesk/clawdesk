@@ -676,8 +676,9 @@ impl AgentRunner {
             if ws_path.is_dir() {
                 let boot_config = self.config.bootstrap.clone().unwrap_or_default();
                 // GAP-9: Budget-aware bootstrap — limit bootstrap content to at most
-                // 25% of context_limit to leave room for conversation and tool results.
-                let bootstrap_budget = self.config.context_limit / 4;
+                // 15% of context_limit to leave room for conversation and tool results.
+                // Small models especially need conversation + tool results to dominate.
+                let bootstrap_budget = self.config.context_limit * 15 / 100;
                 let boot_config = BootstrapConfig {
                     max_total_chars: boot_config.max_total_chars.min(bootstrap_budget * 4),
                     ..boot_config
@@ -1250,6 +1251,24 @@ impl AgentRunner {
 
             // Emit done for the streaming cursor
             self.emit(AgentEvent::StreamChunk { text: String::new(), done: true });
+
+            // Fallback token estimation: some providers (e.g. Ollama with
+            // certain models) don't report token counts in the stream response.
+            // Estimate from content length so the UI doesn't show "0 tokens".
+            if stream_usage.input_tokens == 0 && stream_usage.output_tokens == 0 {
+                let est_input: u64 = request.messages.iter()
+                    .map(|m| estimate_tokens(&m.content) as u64)
+                    .sum::<u64>()
+                    + request.system_prompt.as_ref().map(|s| estimate_tokens(s) as u64).unwrap_or(0);
+                let est_output = estimate_tokens(&streamed_content) as u64;
+                stream_usage.input_tokens = est_input;
+                stream_usage.output_tokens = est_output;
+                debug!(
+                    est_input,
+                    est_output,
+                    "Provider returned 0 tokens — using character-based estimate"
+                );
+            }
 
             total_input_tokens += stream_usage.input_tokens;
             total_output_tokens += stream_usage.output_tokens;
