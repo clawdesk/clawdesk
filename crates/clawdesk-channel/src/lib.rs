@@ -103,6 +103,9 @@ pub trait Channel: Send + Sync + 'static {
 
     /// Stop the channel gracefully.
     async fn stop(&self) -> Result<(), String>;
+
+    /// Downcast to `&dyn Any` for runtime type inspection (e.g., typing indicators).
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 // ===========================================================================

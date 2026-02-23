@@ -95,6 +95,10 @@ impl Channel for WebChatChannel {
         info!("WebChat channel stopped");
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[async_trait]

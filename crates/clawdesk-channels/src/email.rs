@@ -717,6 +717,10 @@ impl Channel for EmailChannel {
         info!("Email channel stopped");
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[async_trait]

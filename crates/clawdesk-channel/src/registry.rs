@@ -147,6 +147,19 @@ impl ChannelRegistry {
     pub fn iter(&self) -> impl Iterator<Item = (&ChannelId, &Arc<dyn Channel>)> {
         self.channels.iter()
     }
+
+    /// Remove a channel from the registry, returning it if it was present.
+    ///
+    /// The caller is responsible for calling `Channel::stop()` on the returned
+    /// channel to shut it down gracefully before dropping it.
+    pub fn unregister(&mut self, id: &ChannelId) -> Option<Arc<dyn Channel>> {
+        self.provenance.remove(id);
+        let ch = self.channels.remove(id);
+        if ch.is_some() {
+            info!(%id, "channel unregistered from registry");
+        }
+        ch
+    }
 }
 
 impl Default for ChannelRegistry {

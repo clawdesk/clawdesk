@@ -317,6 +317,10 @@ impl Channel for TelegramChannel {
         info!("Telegram channel stopped");
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[async_trait]

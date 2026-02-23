@@ -654,6 +654,16 @@ impl clawdesk_cron::executor::AgentExecutor for NoopAgentExecutor {
 
 // ── Channel MessageSink — routes inbound channel messages through the agent ──
 
+/// Maximum number of messages to keep per sender in channel conversation history.
+/// Modeled after zeroclaw's MAX_CHANNEL_HISTORY. When exceeded, the oldest
+/// messages are dropped (FIFO compaction).
+const MAX_CHANNEL_HISTORY: usize = 50;
+
+/// Per-sender conversation history for channel messages.
+/// Key: "{channel_id}:{sender_id}" → Vec<ChatMessage>
+type ConversationHistoryMap =
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<clawdesk_providers::ChatMessage>>>>;
+
 /// `MessageSink` implementation that processes inbound messages from external
 /// channels (Discord, Telegram, Slack, etc.) through the agent pipeline and
 /// sends responses back via the originating channel.
@@ -667,12 +677,17 @@ impl clawdesk_cron::executor::AgentExecutor for NoopAgentExecutor {
 /// Uses `AppHandle` to read agents live from `AppState` instead of a
 /// stale startup snapshot — agents added/modified via the UI are visible
 /// immediately.
+///
+/// Maintains per-sender conversation history (modeled after zeroclaw) so
+/// multi-turn conversations work naturally in Discord, Telegram, etc.
 pub(crate) struct ChannelMessageSink {
     pub negotiator: Arc<RwLock<ProviderNegotiator>>,
     pub tool_registry: Arc<ToolRegistry>,
     pub app_handle: tauri::AppHandle,
     pub channel_registry: Arc<RwLock<ChannelRegistry>>,
     pub cancel: tokio_util::sync::CancellationToken,
+    /// Per-sender conversation history — keyed by "{channel}:{sender_id}".
+    pub conversation_histories: ConversationHistoryMap,
 }
 
 #[async_trait::async_trait]
@@ -811,10 +826,54 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             ..Default::default()
         };
 
-        let history = vec![clawdesk_providers::ChatMessage::new(
+        // Per-sender conversation history (modeled after zeroclaw).
+        // Key: "{channel}:{sender_id}" for per-user threads.
+        let history_key = format!("{channel_id}:{}", msg.sender.id);
+        let user_msg = clawdesk_providers::ChatMessage::new(
             clawdesk_providers::MessageRole::User,
             msg.body.as_str(),
-        )];
+        );
+
+        // Build the history: existing conversation + current user message
+        let history = {
+            let mut histories = self.conversation_histories.lock().await;
+            let entry = histories.entry(history_key.clone()).or_default();
+            entry.push(user_msg);
+            // FIFO compaction — keep the most recent MAX_CHANNEL_HISTORY messages
+            if entry.len() > MAX_CHANNEL_HISTORY {
+                let excess = entry.len() - MAX_CHANNEL_HISTORY;
+                entry.drain(..excess);
+            }
+            entry.clone()
+        };
+
+        info!(
+            channel = %channel_id,
+            sender = %sender_name,
+            history_len = history.len(),
+            "Routing with per-sender conversation history"
+        );
+
+        // 3b. Start typing indicator so the user sees the bot is working.
+        // Look up the channel to call start_typing if it supports it.
+        let typing_channel_id_str = match &msg.origin {
+            clawdesk_types::message::MessageOrigin::Discord { channel_id: cid, .. } => {
+                Some(cid.to_string())
+            }
+            _ => None,
+        };
+        let ch_for_typing = {
+            let reg = self.channel_registry.read().ok();
+            reg.and_then(|r| r.get(&channel_id).cloned())
+        };
+        if let (Some(ref cid_str), Some(ref ch)) = (&typing_channel_id_str, &ch_for_typing) {
+            // Downcast to DiscordChannel for typing indicator
+            if let Some(discord_ch) = ch.as_any().downcast_ref::<clawdesk_channels::discord::DiscordChannel>() {
+                if let Err(e) = discord_ch.start_typing(cid_str).await {
+                    warn!(error = %e, "Failed to start typing indicator");
+                }
+            }
+        }
 
         let runner = AgentRunner::new(
             provider,
@@ -828,9 +887,38 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             Ok(resp) => resp,
             Err(e) => {
                 error!(channel = %channel_id, error = %e, "Agent run failed for inbound message");
+                // Stop typing indicator on failure
+                if let (Some(ref cid_str), Some(ref ch)) = (&typing_channel_id_str, &ch_for_typing) {
+                    if let Some(discord_ch) = ch.as_any().downcast_ref::<clawdesk_channels::discord::DiscordChannel>() {
+                        let _ = discord_ch.stop_typing(cid_str).await;
+                    }
+                }
                 return;
             }
         };
+
+        // Stop typing indicator
+        if let (Some(ref cid_str), Some(ref ch)) = (&typing_channel_id_str, &ch_for_typing) {
+            if let Some(discord_ch) = ch.as_any().downcast_ref::<clawdesk_channels::discord::DiscordChannel>() {
+                let _ = discord_ch.stop_typing(cid_str).await;
+            }
+        }
+
+        // Append assistant response to conversation history
+        {
+            let mut histories = self.conversation_histories.lock().await;
+            if let Some(entry) = histories.get_mut(&history_key) {
+                entry.push(clawdesk_providers::ChatMessage::new(
+                    clawdesk_providers::MessageRole::Assistant,
+                    &*response.content,
+                ));
+                // Compaction after adding assistant response
+                if entry.len() > MAX_CHANNEL_HISTORY {
+                    let excess = entry.len() - MAX_CHANNEL_HISTORY;
+                    entry.drain(..excess);
+                }
+            }
+        }
 
         info!(
             channel = %channel_id,
@@ -2090,6 +2178,9 @@ impl AppState {
     /// Hot-start a channel adapter: create it from config, register it, and
     /// spawn a background thread running `Channel::start()`.
     ///
+    /// Stops any existing channel with the same ID first to avoid duplicate
+    /// gateway connections (modeled after zeroclaw's supervised listener pattern).
+    ///
     /// Called from `update_channel` so the user doesn't need to restart the app.
     pub fn hot_start_channel(
         channel_id: &str,
@@ -2100,6 +2191,35 @@ impl AppState {
     ) -> Result<(), String> {
         use clawdesk_channels::factory::ChannelConfig;
         use serde_json::Map;
+
+        // Stop and unregister any existing channel with this ID to avoid
+        // duplicate gateway connections (e.g., two Discord WebSocket sessions).
+        {
+            let channel_id_enum = match channel_id {
+                "telegram" => clawdesk_types::channel::ChannelId::Telegram,
+                "discord" => clawdesk_types::channel::ChannelId::Discord,
+                "slack" => clawdesk_types::channel::ChannelId::Slack,
+                "whatsapp" => clawdesk_types::channel::ChannelId::WhatsApp,
+                "webchat" => clawdesk_types::channel::ChannelId::WebChat,
+                "email" => clawdesk_types::channel::ChannelId::Email,
+                "imessage" => clawdesk_types::channel::ChannelId::IMessage,
+                "irc" => clawdesk_types::channel::ChannelId::Irc,
+                "internal" => clawdesk_types::channel::ChannelId::Internal,
+                other => return Err(format!("Unknown channel ID: {other}")),
+            };
+            let mut reg = channel_registry
+                .write()
+                .map_err(|e| format!("Channel registry lock: {e}"))?;
+            if let Some(old_ch) = reg.unregister(&channel_id_enum) {
+                info!(channel = %channel_id, "Stopping existing channel before hot-start replacement");
+                // Fire-and-forget stop — we can't await in a sync context, but
+                // the channel's internal running flag will be set to false.
+                let rt = tokio::runtime::Handle::try_current();
+                if let Ok(handle) = rt {
+                    let _ = handle.block_on(old_ch.stop());
+                }
+            }
+        }
 
         // Build a ChannelConfig from the user's key-value map
         let mut map = Map::new();
@@ -2131,6 +2251,9 @@ impl AppState {
             app_handle: app_handle.clone(),
             channel_registry: Arc::clone(channel_registry),
             cancel: state_ref.cancel.clone(),
+            conversation_histories: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         });
 
         let ch_name = channel_id.to_string();

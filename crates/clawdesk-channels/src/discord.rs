@@ -579,19 +579,49 @@ impl Channel for DiscordChannel {
         );
         gw_channel.running.store(true, Ordering::Relaxed);
 
+        // Supervised listener with exponential backoff (modeled after zeroclaw).
+        // Always reconnects unless `running` is set to false via stop().
+        // Backoff: 2s → 5s → 10s → 20s → 40s → 80s → 120s cap.
         tokio::spawn(async move {
+            const BACKOFF_STEPS: &[u64] = &[2, 5, 10, 20, 40, 80, 120];
+            let mut consecutive_failures: usize = 0;
+
             loop {
+                if !gw_channel.running.load(Ordering::Relaxed) {
+                    info!("Discord: shutdown requested — exiting supervised listener");
+                    break;
+                }
+
                 match gw_channel.gateway_loop(Arc::clone(&sink)).await {
                     Ok(()) => {
-                        info!("Discord gateway loop ended normally");
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("Discord gateway loop error: {e}, reconnecting in 5s…");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        // Normal exit (op 7 Reconnect, op 9 Invalid Session, or
+                        // clean WebSocket close). If running is still true, reconnect
+                        // immediately — this is expected Discord gateway behavior.
                         if !gw_channel.running.load(Ordering::Relaxed) {
+                            info!("Discord: gateway loop ended, shutdown requested");
                             break;
                         }
+                        info!("Discord: gateway loop ended normally — reconnecting in 2s");
+                        consecutive_failures = 0;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    Err(e) => {
+                        if !gw_channel.running.load(Ordering::Relaxed) {
+                            info!("Discord: gateway error during shutdown — exiting");
+                            break;
+                        }
+                        let delay = BACKOFF_STEPS
+                            .get(consecutive_failures)
+                            .copied()
+                            .unwrap_or(120);
+                        warn!(
+                            error = %e,
+                            attempt = consecutive_failures + 1,
+                            backoff_secs = delay,
+                            "Discord: gateway error — reconnecting with backoff"
+                        );
+                        consecutive_failures += 1;
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
                     }
                 }
             }
@@ -678,6 +708,10 @@ impl Channel for DiscordChannel {
 
         info!("Discord channel stopped");
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

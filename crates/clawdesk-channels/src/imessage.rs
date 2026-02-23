@@ -366,6 +366,10 @@ end tell"#
         self.shutdown.notify_waiters();
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════

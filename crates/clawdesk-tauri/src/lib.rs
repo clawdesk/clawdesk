@@ -432,6 +432,9 @@ pub fn run() {
                     app_handle: app.handle().clone(),
                     channel_registry: std::sync::Arc::clone(&state.channel_registry),
                     cancel: state.cancel.clone(),
+                    conversation_histories: std::sync::Arc::new(tokio::sync::Mutex::new(
+                        std::collections::HashMap::new(),
+                    )),
                 });
 
                 // Check which channels are registered and start their inbound loops

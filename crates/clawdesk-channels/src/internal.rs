@@ -93,6 +93,10 @@ impl Channel for InternalChannel {
         debug!("Internal channel stopped");
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl Default for InternalChannel {

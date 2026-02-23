@@ -353,6 +353,10 @@ impl Channel for SlackChannel {
         info!("Slack channel stopped");
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[async_trait]
