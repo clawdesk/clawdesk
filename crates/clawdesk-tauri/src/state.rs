@@ -902,6 +902,8 @@ impl AppState {
                 ("telegram", vec![("bot_token", "TELEGRAM_BOT_TOKEN")]),
                 ("discord", vec![("bot_token", "DISCORD_TOKEN"), ("application_id", "DISCORD_APP_ID")]),
                 ("slack", vec![("bot_token", "SLACK_BOT_TOKEN"), ("app_token", "SLACK_APP_TOKEN"), ("signing_secret", "SLACK_SIGNING_SECRET")]),
+                ("whatsapp", vec![("phone_number_id", "WHATSAPP_PHONE_ID"), ("access_token", "WHATSAPP_ACCESS_TOKEN")]),
+                ("email", vec![("imap_host", "EMAIL_IMAP_HOST"), ("smtp_host", "EMAIL_SMTP_HOST"), ("email", "EMAIL_ADDRESS"), ("password", "EMAIL_PASSWORD")]),
             ];
 
             for (kind, fields) in env_channels {

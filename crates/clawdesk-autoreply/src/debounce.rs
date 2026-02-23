@@ -205,7 +205,7 @@ pub fn debounce_config_for_channel(channel: &str) -> DebounceConfig {
             window: Duration::from_millis(600),
             max_burst: Duration::from_secs(4),
         },
-        "matrix" => DebounceConfig {
+        "irc" => DebounceConfig {
             window: Duration::from_millis(500),
             max_burst: Duration::from_secs(3),
         },

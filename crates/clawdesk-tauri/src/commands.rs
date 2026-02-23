@@ -4005,17 +4005,8 @@ pub async fn list_channels(
         ("discord", "Discord", "Discord", std::env::var("DISCORD_TOKEN").is_ok()),
         ("slack", "Slack", "Slack", std::env::var("SLACK_BOT_TOKEN").is_ok()),
         ("whatsapp", "WhatsApp", "WhatsApp", std::env::var("WHATSAPP_TOKEN").is_ok()),
-        ("signal", "Signal", "Signal", std::env::var("SIGNAL_CLI_PATH").is_ok()),
-        ("matrix", "Matrix", "Matrix", std::env::var("MATRIX_HOMESERVER").is_ok()),
         ("email", "Email", "Email", std::env::var("IMAP_HOST").is_ok()),
-        ("msteams", "MS Teams", "MsTeams", std::env::var("MSTEAMS_APP_ID").is_ok()),
-        ("googlechat", "Google Chat", "GoogleChat", std::env::var("GOOGLE_CHAT_CREDENTIALS").is_ok()),
-        ("nostr", "Nostr", "Nostr", std::env::var("NOSTR_PRIVATE_KEY").is_ok()),
         ("irc", "IRC", "Irc", std::env::var("IRC_SERVER").is_ok()),
-        ("mattermost", "Mattermost", "Mattermost", std::env::var("MATTERMOST_URL").is_ok()),
-        ("line", "LINE", "Line", std::env::var("LINE_CHANNEL_TOKEN").is_ok()),
-        ("feishu", "Feishu/Lark", "Feishu", std::env::var("FEISHU_APP_ID").is_ok()),
-        ("twitch", "Twitch", "Twitch", std::env::var("TWITCH_OAUTH_TOKEN").is_ok()),
         ("imessage", "iMessage", "IMessage", cfg!(target_os = "macos")),
     ];
 

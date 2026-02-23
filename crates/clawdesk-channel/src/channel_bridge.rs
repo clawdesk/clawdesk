@@ -56,24 +56,10 @@ impl ChannelBridge {
             ChannelId::Discord => "discord",
             ChannelId::Slack => "slack",
             ChannelId::WhatsApp => "whatsapp",
-            ChannelId::Signal => "signal",
-            ChannelId::IMessage => "imessage",
             ChannelId::WebChat => "webchat",
-            ChannelId::Matrix => "matrix",
-            ChannelId::Line => "line",
-            ChannelId::GoogleChat => "googlechat",
-            ChannelId::MsTeams => "msteams",
-            ChannelId::Nostr => "nostr",
-            ChannelId::Irc => "irc",
-            ChannelId::Mattermost => "mattermost",
             ChannelId::Email => "email",
-            ChannelId::Feishu => "feishu",
-            ChannelId::Twitch => "twitch",
-            ChannelId::NextcloudTalk => "nextcloud_talk",
-            ChannelId::Zalo => "zalo",
-            ChannelId::ZaloUser => "zalouser",
-            ChannelId::Tlon => "tlon",
-            ChannelId::BlueBubbles => "bluebubbles",
+            ChannelId::IMessage => "imessage",
+            ChannelId::Irc => "irc",
             ChannelId::Internal => "internal",
         }
     }
@@ -89,24 +75,10 @@ impl ChannelBridge {
             "discord" => Some(ChannelId::Discord),
             "slack" => Some(ChannelId::Slack),
             "whatsapp" => Some(ChannelId::WhatsApp),
-            "signal" => Some(ChannelId::Signal),
-            "imessage" => Some(ChannelId::IMessage),
             "webchat" => Some(ChannelId::WebChat),
-            "matrix" => Some(ChannelId::Matrix),
-            "line" => Some(ChannelId::Line),
-            "googlechat" | "google_chat" => Some(ChannelId::GoogleChat),
-            "msteams" | "ms_teams" | "teams" => Some(ChannelId::MsTeams),
-            "nostr" => Some(ChannelId::Nostr),
-            "irc" => Some(ChannelId::Irc),
-            "mattermost" => Some(ChannelId::Mattermost),
             "email" => Some(ChannelId::Email),
-            "feishu" | "lark" => Some(ChannelId::Feishu),
-            "twitch" => Some(ChannelId::Twitch),
-            "nextcloud_talk" | "nextcloudtalk" => Some(ChannelId::NextcloudTalk),
-            "zalo" => Some(ChannelId::Zalo),
-            "zalouser" | "zalo_user" => Some(ChannelId::ZaloUser),
-            "tlon" => Some(ChannelId::Tlon),
-            "bluebubbles" | "blue_bubbles" => Some(ChannelId::BlueBubbles),
+            "imessage" => Some(ChannelId::IMessage),
+            "irc" => Some(ChannelId::Irc),
             "internal" => Some(ChannelId::Internal),
             _ => None,
         };
@@ -131,10 +103,8 @@ impl ChannelBridge {
     /// List all canonical channel strings.
     pub fn all_canonical() -> Vec<&'static str> {
         vec![
-            "telegram", "discord", "slack", "whatsapp", "signal", "imessage",
-            "webchat", "matrix", "line", "googlechat", "msteams", "nostr",
-            "irc", "mattermost", "email", "feishu", "twitch", "nextcloud_talk",
-            "zalo", "zalouser", "tlon", "bluebubbles", "internal",
+            "telegram", "discord", "slack", "whatsapp",
+            "webchat", "email", "internal",
         ]
     }
 }
@@ -161,7 +131,7 @@ impl ChannelCapabilities {
     pub fn from_channel_id(id: ChannelId) -> Self {
         let name = ChannelBridge::to_string(id).to_string();
         match id {
-            ChannelId::Slack | ChannelId::Discord | ChannelId::MsTeams => Self {
+            ChannelId::Slack | ChannelId::Discord => Self {
                 channel: name,
                 supports_threading: true,
                 supports_streaming: true,
@@ -221,24 +191,8 @@ mod tests {
             ChannelId::Discord,
             ChannelId::Slack,
             ChannelId::WhatsApp,
-            ChannelId::Signal,
-            ChannelId::IMessage,
             ChannelId::WebChat,
-            ChannelId::Matrix,
-            ChannelId::Line,
-            ChannelId::GoogleChat,
-            ChannelId::MsTeams,
-            ChannelId::Nostr,
-            ChannelId::Irc,
-            ChannelId::Mattermost,
             ChannelId::Email,
-            ChannelId::Feishu,
-            ChannelId::Twitch,
-            ChannelId::NextcloudTalk,
-            ChannelId::Zalo,
-            ChannelId::ZaloUser,
-            ChannelId::Tlon,
-            ChannelId::BlueBubbles,
             ChannelId::Internal,
         ];
 
@@ -291,23 +245,6 @@ mod tests {
         assert_eq!(
             bridge.from_string("Discord"),
             ChannelMapping::Known(ChannelId::Discord)
-        );
-    }
-
-    #[test]
-    fn alternative_names() {
-        let bridge = ChannelBridge::new();
-        assert_eq!(
-            bridge.from_string("teams"),
-            ChannelMapping::Known(ChannelId::MsTeams)
-        );
-        assert_eq!(
-            bridge.from_string("lark"),
-            ChannelMapping::Known(ChannelId::Feishu)
-        );
-        assert_eq!(
-            bridge.from_string("google_chat"),
-            ChannelMapping::Known(ChannelId::GoogleChat)
         );
     }
 

@@ -5,9 +5,6 @@
 //! - **Discord**: `**bold**`, `*italic*`, `~~strike~~`, `` `code` ``, `> quote`
 //! - **Telegram**: `**bold**`, `__italic__`, `~~strike~~`, `` `code` ``, HTML also supported
 //! - **WhatsApp**: `*bold*`, `_italic_`, `~strike~`, `` ```code``` ``
-//! - **Matrix**: full CommonMark with HTML subset
-//! - **MsTeams**: subset of Markdown with HTML
-//! - **IRC**: mIRC color codes + bold (Ctrl-B) / italic (Ctrl-I) / underline (Ctrl-U)
 //! - **Email**: full HTML
 //! - **Plain**: strip all formatting
 //!
@@ -23,16 +20,7 @@ pub enum RenderTarget {
     Discord,
     Telegram,
     WhatsApp,
-    Matrix,
-    MsTeams,
-    Irc,
     Email,
-    Line,
-    GoogleChat,
-    Nostr,
-    Signal,
-    IMessage,
-    Mattermost,
     Plain,
 }
 
@@ -43,16 +31,7 @@ impl From<ChannelId> for RenderTarget {
             ChannelId::Discord => RenderTarget::Discord,
             ChannelId::Telegram => RenderTarget::Telegram,
             ChannelId::WhatsApp => RenderTarget::WhatsApp,
-            ChannelId::Matrix => RenderTarget::Matrix,
-            ChannelId::MsTeams => RenderTarget::MsTeams,
-            ChannelId::Irc => RenderTarget::Irc,
             ChannelId::Email => RenderTarget::Email,
-            ChannelId::Line => RenderTarget::Line,
-            ChannelId::GoogleChat => RenderTarget::GoogleChat,
-            ChannelId::Nostr => RenderTarget::Nostr,
-            ChannelId::Signal => RenderTarget::Signal,
-            ChannelId::IMessage => RenderTarget::IMessage,
-            ChannelId::Mattermost => RenderTarget::Mattermost,
             _ => RenderTarget::Plain,
         }
     }
@@ -436,56 +415,50 @@ fn render_span(span: &Span, target: RenderTarget) -> String {
             let content = render_spans(inner, target);
             match target {
                 RenderTarget::Slack | RenderTarget::WhatsApp => format!("*{}*", content),
-                RenderTarget::Discord | RenderTarget::Telegram | RenderTarget::Mattermost => {
+                RenderTarget::Discord | RenderTarget::Telegram => {
                     format!("**{}**", content)
                 }
-                RenderTarget::Matrix | RenderTarget::Email => {
+                RenderTarget::Email => {
                     format!("<b>{}</b>", content)
                 }
-                RenderTarget::Irc => format!("\x02{}\x02", content),
                 RenderTarget::Plain => content,
-                _ => format!("**{}**", content),
             }
         }
         Span::Italic(inner) => {
             let content = render_spans(inner, target);
             match target {
                 RenderTarget::Slack | RenderTarget::WhatsApp => format!("_{}_", content),
-                RenderTarget::Discord | RenderTarget::Telegram | RenderTarget::Mattermost => {
+                RenderTarget::Discord | RenderTarget::Telegram => {
                     format!("*{}*", content)
                 }
-                RenderTarget::Matrix | RenderTarget::Email => {
+                RenderTarget::Email => {
                     format!("<i>{}</i>", content)
                 }
-                RenderTarget::Irc => format!("\x1D{}\x1D", content),
                 RenderTarget::Plain => content,
-                _ => format!("*{}*", content),
             }
         }
         Span::Strike(inner) => {
             let content = render_spans(inner, target);
             match target {
                 RenderTarget::Slack | RenderTarget::WhatsApp => format!("~{}~", content),
-                RenderTarget::Discord | RenderTarget::Telegram | RenderTarget::Mattermost => {
+                RenderTarget::Discord | RenderTarget::Telegram => {
                     format!("~~{}~~", content)
                 }
-                RenderTarget::Matrix | RenderTarget::Email => {
+                RenderTarget::Email => {
                     format!("<s>{}</s>", content)
                 }
                 RenderTarget::Plain => content,
-                _ => format!("~~{}~~", content),
             }
         }
         Span::Link { text, url } => match target {
             RenderTarget::Slack => format!("<{}|{}>", url, text),
-            RenderTarget::Discord | RenderTarget::Telegram | RenderTarget::Mattermost => {
+            RenderTarget::Discord | RenderTarget::Telegram | RenderTarget::WhatsApp => {
                 format!("[{}]({})", text, url)
             }
-            RenderTarget::Matrix | RenderTarget::Email => {
+            RenderTarget::Email => {
                 format!("<a href=\"{}\">{}</a>", url, text)
             }
             RenderTarget::Plain => format!("{} ({})", text, url),
-            _ => format!("[{}]({})", text, url),
         },
     }
 }
@@ -495,10 +468,7 @@ fn render_code_block(language: Option<&str>, code: &str, target: RenderTarget) -
         RenderTarget::Slack => {
             format!("```\n{}\n```", code)
         }
-        RenderTarget::Discord
-        | RenderTarget::Telegram
-        | RenderTarget::Matrix
-        | RenderTarget::Mattermost => {
+        RenderTarget::Discord | RenderTarget::Telegram => {
             let lang = language.unwrap_or("");
             format!("```{}\n{}\n```", lang, code)
         }
@@ -577,7 +547,7 @@ fn render_ordered(items: &[Vec<Span>], target: RenderTarget) -> String {
 fn render_heading(level: u8, content: &[Span], target: RenderTarget) -> String {
     let text = render_spans(content, target);
     match target {
-        RenderTarget::Email | RenderTarget::Matrix => {
+        RenderTarget::Email => {
             format!("<h{}>{}</h{}>", level, text, level)
         }
         RenderTarget::Plain => {
@@ -588,7 +558,6 @@ fn render_heading(level: u8, content: &[Span], target: RenderTarget) -> String {
             };
             format!("{}{}", prefix, text)
         }
-        RenderTarget::Irc => format!("\x02{}\x02", text),
         _ => {
             let hashes = "#".repeat(level as usize);
             format!("{} {}", hashes, text)
@@ -598,7 +567,7 @@ fn render_heading(level: u8, content: &[Span], target: RenderTarget) -> String {
 
 fn render_hr(target: RenderTarget) -> String {
     match target {
-        RenderTarget::Email | RenderTarget::Matrix => "<hr/>".to_string(),
+        RenderTarget::Email => "<hr/>".to_string(),
         RenderTarget::Plain => "────────────────".to_string(),
         _ => "---".to_string(),
     }
@@ -708,10 +677,4 @@ mod tests {
         assert_eq!(RenderTarget::from(ChannelId::Email), RenderTarget::Email);
     }
 
-    #[test]
-    fn test_irc_bold() {
-        let input = "**bold**";
-        let result = render(input, RenderTarget::Irc);
-        assert!(result.contains("\x02bold\x02"));
-    }
 }

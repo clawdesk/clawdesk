@@ -469,7 +469,7 @@ pub async fn list_channels(
 /// - slack → SlackMrkdwn
 /// - telegram → TelegramMarkdownV2
 /// - whatsapp → WhatsApp
-/// - imessage, signal, sms → PlainText
+/// - imessage, irc → PlainText
 ///
 /// For channels with message length limits, the ReplyFormatter applies
 /// semantic chunking, returning the first chunk. Full multi-chunk delivery
@@ -481,7 +481,7 @@ fn format_for_channel(markdown: &str, channel: &ChannelId) -> String {
         s if s.contains("telegram") => (MarkupFormat::TelegramMarkdownV2, 4_096),
         s if s.contains("whatsapp") => (MarkupFormat::WhatsApp, 65_536),
         s if s.contains("discord") => (MarkupFormat::Markdown, 2_000),
-        s if s.contains("imessage") || s.contains("signal") || s.contains("sms") => {
+        s if s.contains("imessage") || s.contains("irc") => {
             (MarkupFormat::PlainText, 160_000)
         }
         // webchat, HTTP API, and unknown channels: passthrough Markdown

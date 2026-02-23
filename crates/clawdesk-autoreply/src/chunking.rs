@@ -19,8 +19,6 @@ pub mod limits {
     pub const TELEGRAM_MAX: usize = 4096;
     pub const DISCORD_MAX: usize = 2000;
     pub const SLACK_MAX: usize = 40_000;
-    pub const MATRIX_MAX: usize = 65_536;
-    pub const MSTEAMS_MAX: usize = 28_000;
     pub const IMESSAGE_MAX: usize = 20_000;
     pub const WHATSAPP_MAX: usize = 65_536;
     pub const DEFAULT_MAX: usize = 4096;
@@ -195,10 +193,10 @@ pub fn limit_for_channel(channel: &str) -> usize {
         "telegram" => limits::TELEGRAM_MAX,
         "discord" => limits::DISCORD_MAX,
         "slack" => limits::SLACK_MAX,
-        "matrix" => limits::MATRIX_MAX,
-        "msteams" | "ms_teams" => limits::MSTEAMS_MAX,
-        "imessage" | "bluebubbles" => limits::IMESSAGE_MAX,
+        "imessage" => limits::IMESSAGE_MAX,
         "whatsapp" => limits::WHATSAPP_MAX,
+        "irc" => limits::DEFAULT_MAX,
+        "email" => limits::DEFAULT_MAX,
         _ => limits::DEFAULT_MAX,
     }
 }

@@ -57,10 +57,9 @@ impl DockEntry {
         match id {
             ChannelId::Slack => MarkupFormat::SlackMrkdwn,
             ChannelId::Telegram => MarkupFormat::TelegramMarkdownV2,
-            ChannelId::WhatsApp => MarkupFormat::WhatsApp,
-            ChannelId::Signal | ChannelId::IMessage | ChannelId::BlueBubbles => MarkupFormat::PlainText,
+            ChannelId::WhatsApp => MarkupFormat::PlainText,
             ChannelId::Email => MarkupFormat::Html,
-            ChannelId::Discord | ChannelId::Matrix | ChannelId::WebChat => MarkupFormat::Markdown,
+            ChannelId::Discord | ChannelId::WebChat => MarkupFormat::Markdown,
             _ => MarkupFormat::PlainText,
         }
     }
@@ -90,24 +89,8 @@ impl ChannelDock {
             ChannelId::Discord,
             ChannelId::Slack,
             ChannelId::WhatsApp,
-            ChannelId::Signal,
-            ChannelId::IMessage,
             ChannelId::WebChat,
-            ChannelId::Matrix,
-            ChannelId::Line,
-            ChannelId::GoogleChat,
-            ChannelId::MsTeams,
-            ChannelId::Nostr,
-            ChannelId::Irc,
-            ChannelId::Mattermost,
             ChannelId::Email,
-            ChannelId::Feishu,
-            ChannelId::Twitch,
-            ChannelId::NextcloudTalk,
-            ChannelId::Zalo,
-            ChannelId::ZaloUser,
-            ChannelId::Tlon,
-            ChannelId::BlueBubbles,
             ChannelId::Internal,
         ];
         for id in &all_channels {
@@ -205,7 +188,7 @@ mod tests {
     #[test]
     fn dock_from_defaults() {
         let dock = ChannelDock::with_all_defaults();
-        assert_eq!(dock.count(), 23);
+        assert_eq!(dock.count(), 7);
 
         let slack = dock.get(ChannelId::Slack).unwrap();
         assert!(slack.capabilities.supports_threading);

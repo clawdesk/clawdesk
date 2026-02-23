@@ -14,6 +14,9 @@
 //! ├── TelegramChannel    — Telegram Bot API (long-polling)
 //! ├── DiscordChannel     — Discord Bot API (WebSocket gateway)
 //! ├── SlackChannel       — Slack Bot (Socket Mode / Events API)
+//! ├── EmailChannel       — Email via IMAP + SMTP
+//! ├── IMessageChannel    — macOS iMessage (AppleScript + chat.db polling)
+//! ├── IrcChannel         — IRC over TLS (SASL/NickServ auth)
 //! └── InternalChannel    — In-process testing channel
 //! ```
 //!
@@ -29,27 +32,13 @@
 pub mod discord;
 pub mod email;
 pub mod factory;
-pub mod feishu;
-pub mod googlechat;
 pub mod imessage;
 pub mod internal;
 pub mod irc;
-pub mod line;
-pub mod matrix;
-pub mod mattermost;
-pub mod msteams;
-pub mod nextcloud_talk;
-pub mod nostr;
+pub mod markdown;
 pub mod retry_policy;
-pub mod sidecar;
-pub mod signal;
 pub mod slack;
 pub mod telegram;
-pub mod tlon;
-pub mod twitch;
-pub mod markdown;
-pub mod bluebubbles;
 pub mod webchat;
 pub mod whatsapp;
-pub mod zalo;
-pub mod zalouser;
+pub mod whatsapp_storage;

@@ -5,6 +5,7 @@ import {
   ResponsiveContainer, PieChart, Pie, Cell,
 } from "recharts";
 import * as api from "../api";
+import { ChannelSetupJourney } from "../onboarding/ChannelSetupJourney";
 import type {
   DesktopAgent,
   ChannelInfo,
@@ -107,7 +108,6 @@ function ChannelsPanel({
 }) {
   const [typeSpecs, setTypeSpecs] = useState<ChannelTypeSpec[]>([]);
   const [configuring, setConfiguring] = useState<ChannelInfo | null>(null);
-  const [configDraft, setConfigDraft] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -121,23 +121,7 @@ function ChannelsPanel({
 
   const openConfig = useCallback((ch: ChannelInfo) => {
     setConfiguring(ch);
-    setConfigDraft({ ...(ch.config ?? {}) });
   }, []);
-
-  const saveConfig = useCallback(async () => {
-    if (!configuring) return;
-    setSaving(true);
-    try {
-      await api.updateChannel(configuring.id, configDraft);
-      pushToast(`${configuring.name} connected.`);
-      onRefreshChannels();
-      setConfiguring(null);
-    } catch {
-      pushToast(`Failed to save ${configuring.name} config.`);
-    } finally {
-      setSaving(false);
-    }
-  }, [configuring, configDraft, onRefreshChannels, pushToast]);
 
   const disconnect = useCallback(async (ch: ChannelInfo) => {
     try {
@@ -225,89 +209,32 @@ function ChannelsPanel({
         </div>
       )}
 
-      {configuring && (
+      {configuring && spec && (
         <div className="modal-backdrop" onClick={() => setConfiguring(null)}>
           <div className="modal channel-config-modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-head">
-              <h2>{spec?.icon ?? "📡"} {configuring.name} Configuration</h2>
+              <h2>{spec.icon} {configuring.name} Setup</h2>
               <button className="btn ghost" onClick={() => setConfiguring(null)}>✕</button>
             </div>
             <div className="modal-body">
-              {spec?.blurb && <p className="muted" style={{ marginBottom: 12 }}>{spec.blurb}</p>}
-
-              {spec && spec.configFields.length > 0 ? (
-                <div className="channel-config-fields">
-                  {spec.configFields.map((f) => (
-                    <div key={f.key} className="channel-config-field">
-                      <label className="channel-config-label">
-                        {f.label}
-                        {f.required && <span className="required-mark">*</span>}
-                      </label>
-                      {f.type === "select" ? (
-                        <select
-                          className="input"
-                          value={configDraft[f.key] ?? f.options?.[0] ?? ""}
-                          onChange={(e) => setConfigDraft((d) => ({ ...d, [f.key]: e.target.value }))}
-                        >
-                          {f.options?.map((o) => <option key={o} value={o}>{o}</option>)}
-                        </select>
-                      ) : f.type === "toggle" ? (
-                        <label className="toggle-label">
-                          <input
-                            type="checkbox"
-                            checked={configDraft[f.key] === "true"}
-                            onChange={(e) => setConfigDraft((d) => ({ ...d, [f.key]: String(e.target.checked) }))}
-                          />
-                          <span>{configDraft[f.key] === "true" ? "Enabled" : "Disabled"}</span>
-                        </label>
-                      ) : (
-                        <input
-                          className="input"
-                          type={f.type === "password" ? "password" : "text"}
-                          placeholder={f.placeholder}
-                          value={configDraft[f.key] ?? ""}
-                          onChange={(e) => setConfigDraft((d) => ({ ...d, [f.key]: e.target.value }))}
-                        />
-                      )}
-                      {f.help && <span className="channel-config-help">{f.help}</span>}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="muted">This channel requires no additional configuration.</p>
-              )}
-
-              {spec?.docs_url && (
-                <a
-                  className="channel-docs-link"
-                  href={spec.docs_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  📖 View documentation →
-                </a>
-              )}
-
-              {(configuring.capabilities ?? []).length > 0 && (
-                <div style={{ marginTop: 12 }}>
-                  <span className="channel-config-label" style={{ marginBottom: 4, display: "block" }}>Capabilities</span>
-                  <div className="channel-card-caps">
-                    {(configuring.capabilities ?? []).map((c) => (
-                      <span key={c} className="chip chip-sm">{c}</span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="modal-foot">
-              <button className="btn subtle" onClick={() => setConfiguring(null)}>Cancel</button>
-              <button
-                className="btn primary"
-                disabled={saving || (spec?.configFields.some((f) => f.required && !configDraft[f.key]) ?? false)}
-                onClick={saveConfig}
-              >
-                {saving ? "Saving..." : (configuring.configured ?? false) ? "Save Changes" : "Connect"}
-              </button>
+              <ChannelSetupJourney
+                spec={spec}
+                initialValues={configuring.config ?? {}}
+                onComplete={async (config) => {
+                  setSaving(true);
+                  try {
+                    await api.updateChannel(configuring.id, config);
+                    pushToast(`${configuring.name} connected.`);
+                    onRefreshChannels();
+                    setConfiguring(null);
+                  } catch {
+                    pushToast(`Failed to save ${configuring.name} config.`);
+                  } finally {
+                    setSaving(false);
+                  }
+                }}
+                onCancel={() => setConfiguring(null)}
+              />
             </div>
           </div>
         </div>

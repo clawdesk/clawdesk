@@ -1,272 +1,141 @@
-//! iMessage channel adapter via BlueBubbles HTTP API.
+//! iMessage channel adapter (macOS only).
 //!
-//! Connects to a BlueBubbles server instance for sending and receiving
-//! iMessage conversations. BlueBubbles runs on a Mac host and bridges
-//! iMessage to an HTTP/WebSocket API.
+//! Sends messages via the macOS AppleScript bridge (`osascript`) and
+//! receives inbound messages by polling the Messages.app SQLite database
+//! at `~/Library/Messages/chat.db`.
+//!
+//! ## Security
+//!
+//! - **CWE-78 mitigation**: All strings interpolated into AppleScript are
+//!   escaped via [`escape_applescript`] (backslashes, quotes, newlines).
+//! - **Target validation**: [`is_valid_imessage_target`] rejects targets
+//!   that don't look like phone numbers or email addresses before they
+//!   reach the AppleScript layer.
+//! - **Contact allowlist**: Only messages from `allowed_contacts` are
+//!   forwarded to the agent. `"*"` matches everyone.
 //!
 //! ## Architecture
 //!
 //! ```text
 //! IMessageChannel
-//! ├── poll_loop()      — polls GET /api/v1/message for new messages
-//! ├── normalize()      — BlueBubbles message → NormalizedMessage
-//! ├── send()           — OutboundMessage → POST /api/v1/message/text
-//! └── send_tapback()   — Tapback reaction → POST /api/v1/message/react
+//! ├── start(sink)       — poll loop: read chat.db → sink.on_message()
+//! ├── send(msg)         — escape + osascript → Messages.app
+//! ├── stop()            — flip AtomicBool
+//! └── health check      — verify macOS + chat.db exists
 //! ```
 //!
-//! ## BlueBubbles API
+//! ## Limitations
 //!
-//! The BlueBubbles REST API (https://bluebubbles.app/):
-//! - `GET  /api/v1/message`       — list/search messages
-//! - `POST /api/v1/message/text`  — send text message
-//! - `POST /api/v1/message/react` — send tapback reaction
-//! - `GET  /api/v1/chat`          — list chats
-//! - `GET  /api/v1/attachment/:guid/download` — download attachment
-//!
-//! ## Limits
-//!
-//! iMessage limits are OS-imposed:
-//! - No official rate limit (Apple's relay)
-//! - SMS fallback may occur (handled by carrier)
-//! - Max attachment size depends on carrier/iCloud settings
+//! - macOS only (AppleScript + Messages.app)
+//! - Requires Full Disk Access for `~/Library/Messages/chat.db`
+//! - Text-only (no media attachments from the DB query)
+//! - Polling interval defaults to 3 seconds
 
 use async_trait::async_trait;
-use clawdesk_channel::{Channel, MessageSink, Reactions, StreamHandle, Streaming};
+use clawdesk_channel::{Channel, MessageSink};
 use clawdesk_types::channel::{ChannelId, ChannelMeta};
 use clawdesk_types::message::{
-    DeliveryReceipt, MediaAttachment, NormalizedMessage, OutboundMessage, SenderIdentity,
+    DeliveryReceipt, NormalizedMessage, OutboundMessage, SenderIdentity,
 };
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use chrono::Utc;
+use directories::UserDirs;
+use rusqlite::{Connection, OpenFlags};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
-/// iMessage channel adapter via BlueBubbles HTTP API.
+/// iMessage channel — AppleScript bridge + Messages.app SQLite polling.
 pub struct IMessageChannel {
-    client: Client,
-    /// BlueBubbles server URL (e.g., `http://192.168.1.100:1234`).
-    server_url: String,
-    /// BlueBubbles server password (query param authentication).
-    password: String,
-    /// Allowed chat GUIDs. Empty = allow all.
-    allowed_chats: Vec<String>,
-    /// Last processed message timestamp (epoch ms) for polling.
-    last_timestamp: AtomicI64,
+    /// Contacts allowed to interact. `"*"` = everyone.
+    allowed_contacts: Vec<String>,
+    /// Polling interval in seconds (default: 3).
+    poll_interval_secs: u64,
     /// Shutdown flag.
     running: AtomicBool,
     /// Shutdown notifier.
     shutdown: Notify,
 }
 
-/// Configuration for the iMessage channel.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IMessageConfig {
-    pub server_url: String,
-    pub password: String,
-    #[serde(default)]
-    pub allowed_chats: Vec<String>,
-}
-
-/// Tapback reaction types supported by iMessage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TapbackType {
-    Love,
-    Like,
-    Dislike,
-    Laugh,
-    Emphasis,
-    Question,
-}
-
-impl TapbackType {
-    /// Convert to the BlueBubbles API reaction string.
-    fn api_value(&self) -> &'static str {
-        match self {
-            Self::Love => "love",
-            Self::Like => "like",
-            Self::Dislike => "dislike",
-            Self::Laugh => "laugh",
-            Self::Emphasis => "emphasize",
-            Self::Question => "question",
-        }
-    }
-
-    /// Parse an emoji string into a TapbackType.
-    fn from_emoji(emoji: &str) -> Option<Self> {
-        match emoji {
-            "❤️" | "♥️" | "love" => Some(Self::Love),
-            "👍" | "like" => Some(Self::Like),
-            "👎" | "dislike" => Some(Self::Dislike),
-            "😂" | "😆" | "laugh" => Some(Self::Laugh),
-            "‼️" | "❗" | "emphasize" => Some(Self::Emphasis),
-            "❓" | "?" | "question" => Some(Self::Question),
-            _ => None,
-        }
-    }
-}
-
 impl IMessageChannel {
-    pub fn new(config: IMessageConfig) -> Self {
+    pub fn new(allowed_contacts: Vec<String>, poll_interval_secs: u64) -> Self {
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("failed to build HTTP client"),
-            server_url: config.server_url.trim_end_matches('/').to_string(),
-            password: config.password,
-            allowed_chats: config.allowed_chats,
-            last_timestamp: AtomicI64::new(0),
+            allowed_contacts,
+            poll_interval_secs: if poll_interval_secs == 0 {
+                3
+            } else {
+                poll_interval_secs
+            },
             running: AtomicBool::new(false),
             shutdown: Notify::new(),
         }
     }
 
-    /// Build a full API URL with password authentication.
-    fn api_url(&self, path: &str) -> String {
-        let separator = if path.contains('?') { '&' } else { '?' };
-        format!(
-            "{}{}{}password={}",
-            self.server_url, path, separator, self.password
-        )
-    }
-
-    /// Check if a chat GUID is allowed.
-    fn is_allowed_chat(&self, chat_guid: &str) -> bool {
-        self.allowed_chats.is_empty() || self.allowed_chats.iter().any(|c| c == chat_guid)
-    }
-
-    /// Poll loop: fetches new messages and dispatches to sink.
-    async fn poll_loop(self: Arc<Self>, sink: Arc<dyn MessageSink>) {
-        info!("iMessage poll loop started");
-
-        while self.running.load(Ordering::Relaxed) {
-            let after = self.last_timestamp.load(Ordering::Relaxed);
-            let url = self.api_url(&format!(
-                "/api/v1/message?after={}&sort=ASC&limit=50",
-                after
-            ));
-
-            let result = self.client.get(&url).send().await;
-
-            match result {
-                Ok(response) => {
-                    if let Ok(body) = response.json::<BlueBubblesListResponse>().await {
-                        for message in body.data {
-                            // Update last seen timestamp
-                            if message.date_created > after {
-                                self.last_timestamp
-                                    .store(message.date_created, Ordering::Relaxed);
-                            }
-
-                            // Skip messages we sent ourselves
-                            if message.is_from_me {
-                                continue;
-                            }
-
-                            // Filter by allowed chats
-                            let chat_guid = message
-                                .chats
-                                .first()
-                                .map(|c| c.guid.as_str())
-                                .unwrap_or("");
-
-                            if !self.is_allowed_chat(chat_guid) {
-                                debug!(chat = %chat_guid, "ignoring message from unallowed chat");
-                                continue;
-                            }
-
-                            if let Some(normalized) = self.normalize_message(&message) {
-                                sink.on_message(normalized).await;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "iMessage poll error, retrying in 5s");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-            }
-
-            tokio::time::sleep(Duration::from_secs(2)).await;
+    /// Check if a sender is in the allowlist.
+    fn is_contact_allowed(&self, sender: &str) -> bool {
+        if self.allowed_contacts.iter().any(|u| u == "*") {
+            return true;
         }
-
-        info!("iMessage poll loop stopped");
-    }
-
-    /// Normalize a BlueBubbles message to NormalizedMessage.
-    fn normalize_message(&self, msg: &BlueBubblesMessage) -> Option<NormalizedMessage> {
-        let text = msg.text.clone()?;
-        let handle = msg.handle.as_ref()?;
-
-        let sender = SenderIdentity {
-            id: handle.address.clone(),
-            display_name: handle
-                .contact
-                .as_ref()
-                .and_then(|c| c.display_name.clone())
-                .unwrap_or_else(|| handle.address.clone()),
-            channel: ChannelId::IMessage,
-        };
-
-        let chat_guid = msg
-            .chats
-            .first()
-            .map(|c| c.guid.clone())
-            .unwrap_or_default();
-
-        let session_key =
-            clawdesk_types::session::SessionKey::new(ChannelId::IMessage, &chat_guid);
-
-        // Detect media attachments
-        let media = msg
-            .attachments
+        self.allowed_contacts
             .iter()
-            .map(|a| MediaAttachment {
-                media_type: mime_to_media_type(&a.mime_type),
-                url: Some(self.api_url(&format!(
-                    "/api/v1/attachment/{}/download",
-                    a.guid
-                ))),
-                data: None,
-                mime_type: a.mime_type.clone(),
-                filename: a.filename.clone(),
-                size_bytes: a.total_bytes.map(|b| b as u64),
-            })
-            .collect();
-
-        let origin = clawdesk_types::message::MessageOrigin::IMessage {
-            apple_id: handle.address.clone(),
-            message_id: msg.guid.clone(),
-        };
-
-        Some(NormalizedMessage {
-            id: uuid::Uuid::new_v4(),
-            session_key,
-            body: text,
-            body_for_agent: None,
-            sender,
-            media,
-            reply_context: None,
-            origin,
-            timestamp: chrono::Utc::now(),
-        })
+            .any(|u| u.eq_ignore_ascii_case(sender))
     }
 }
 
-/// Map MIME type string to MediaType.
-fn mime_to_media_type(mime: &str) -> clawdesk_types::message::MediaType {
-    if mime.starts_with("image/") {
-        clawdesk_types::message::MediaType::Image
-    } else if mime.starts_with("video/") {
-        clawdesk_types::message::MediaType::Video
-    } else if mime.starts_with("audio/") {
-        clawdesk_types::message::MediaType::Audio
-    } else {
-        clawdesk_types::message::MediaType::Document
+/// Escape a string for safe interpolation into AppleScript.
+///
+/// Prevents injection attacks by escaping:
+/// - Backslashes (`\` → `\\`)
+/// - Double quotes (`"` → `\"`)
+/// - Newlines (`\n` → `\\n`, `\r` → `\\r`) to prevent code injection via line breaks
+pub fn escape_applescript(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// Validate that a target looks like a valid phone number or email address.
+///
+/// Defense-in-depth measure to reject obviously malicious targets before
+/// they reach AppleScript interpolation.
+///
+/// Valid patterns:
+/// - Phone: starts with `+` followed by 7-15 digits (with optional spaces/dashes)
+/// - Email: contains `@` with alphanumeric chars on both sides
+pub fn is_valid_imessage_target(target: &str) -> bool {
+    let target = target.trim();
+    if target.is_empty() {
+        return false;
     }
+
+    // Phone number: +1234567890 or +1 234-567-8900
+    if target.starts_with('+') {
+        let digits_only: String = target.chars().filter(char::is_ascii_digit).collect();
+        return digits_only.len() >= 7 && digits_only.len() <= 15;
+    }
+
+    // Email: simple validation
+    if let Some(at_pos) = target.find('@') {
+        let local = &target[..at_pos];
+        let domain = &target[at_pos + 1..];
+
+        let local_valid = !local.is_empty()
+            && local
+                .chars()
+                .all(|c| c.is_alphanumeric() || "._+-".contains(c));
+
+        let domain_valid = !domain.is_empty()
+            && domain.contains('.')
+            && domain
+                .chars()
+                .all(|c| c.is_alphanumeric() || ".-".contains(c));
+
+        return local_valid && domain_valid;
+    }
+
+    false
 }
 
 #[async_trait]
@@ -276,279 +145,359 @@ impl Channel for IMessageChannel {
     }
 
     fn meta(&self) -> ChannelMeta {
-        ChannelMeta {
-            display_name: "iMessage".into(),
-            supports_threading: false,
-            supports_streaming: true,
-            supports_reactions: true,
-            supports_media: true,
-            supports_groups: true,
-            max_message_length: None, // No hard limit on iMessage text
-        }
+        ChannelMeta::basic("iMessage")
     }
 
-    async fn start(&self, _sink: Arc<dyn MessageSink>) -> Result<(), String> {
-        self.running.store(true, Ordering::Relaxed);
+    async fn start(&self, sink: Arc<dyn MessageSink>) -> Result<(), String> {
+        self.running.store(true, Ordering::SeqCst);
+        info!("iMessage channel starting (AppleScript bridge, poll={}s)...", self.poll_interval_secs);
 
-        // Verify server connectivity
-        let ping_url = self.api_url("/api/v1/server/info");
-        let resp = self
-            .client
-            .get(&ping_url)
-            .send()
-            .await
-            .map_err(|e| format!("BlueBubbles connectivity check failed: {}", e))?;
+        // Locate the Messages database
+        let db_path = match UserDirs::new() {
+            Some(dirs) => dirs.home_dir().join("Library/Messages/chat.db"),
+            None => {
+                warn!("iMessage: cannot determine home directory");
+                return Err("Cannot determine home directory".to_string());
+            }
+        };
 
-        if !resp.status().is_success() {
-            return Err(format!(
-                "BlueBubbles server returned HTTP {}",
-                resp.status().as_u16()
-            ));
+        if !db_path.exists() {
+            let msg = format!(
+                "iMessage: Messages database not found at {}. \
+                 Ensure Messages.app is set up and Full Disk Access is granted.",
+                db_path.display()
+            );
+            warn!("{msg}");
+            return Err(msg);
         }
 
-        info!(
-            server = %self.server_url,
-            "iMessage channel started (BlueBubbles polling mode)"
-        );
+        // Open a persistent read-only connection
+        let path = db_path.to_path_buf();
+        let conn = match tokio::task::spawn_blocking(move || {
+            Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+        })
+        .await
+        {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                warn!("iMessage: failed to open chat.db: {e}");
+                return Err(format!("Failed to open chat.db: {e}"));
+            }
+            Err(e) => {
+                warn!("iMessage: spawn_blocking join error: {e}");
+                return Err(format!("spawn_blocking join error: {e}"));
+            }
+        };
+
+        // Get the initial max ROWID
+        let (mut conn, initial_rowid) = match tokio::task::spawn_blocking(move || {
+            let rowid: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(ROWID), 0) FROM message WHERE is_from_me = 0",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            (conn, rowid)
+        })
+        .await
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                warn!("iMessage: failed to get initial rowid: {e}");
+                return Err(format!("Failed to get initial rowid: {e}"));
+            }
+        };
+
+        let mut last_rowid = initial_rowid;
+        debug!("iMessage: starting poll from ROWID {last_rowid}");
+
+        // Poll loop
+        while self.running.load(Ordering::SeqCst) {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(self.poll_interval_secs)) => {},
+                _ = self.shutdown.notified() => break,
+            }
+
+            let since = last_rowid;
+            let allowed = self.allowed_contacts.clone();
+            let (returned_conn, poll_result) = match tokio::task::spawn_blocking(move || {
+                let result: Result<Vec<(i64, String, String)>, rusqlite::Error> = (|| {
+                    let mut stmt = conn.prepare(
+                        "SELECT m.ROWID, h.id, m.text \
+                         FROM message m \
+                         JOIN handle h ON m.handle_id = h.ROWID \
+                         WHERE m.ROWID > ?1 \
+                         AND m.is_from_me = 0 \
+                         AND m.text IS NOT NULL \
+                         ORDER BY m.ROWID ASC \
+                         LIMIT 20",
+                    )?;
+                    let rows = stmt.query_map([since], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                })();
+                (conn, result)
+            })
+            .await
+            {
+                Ok(pair) => pair,
+                Err(e) => {
+                    warn!("iMessage: poll worker join error: {e}");
+                    break;
+                }
+            };
+            conn = returned_conn;
+
+            match poll_result {
+                Ok(messages) => {
+                    for (rowid, sender, text) in messages {
+                        if rowid > last_rowid {
+                            last_rowid = rowid;
+                        }
+
+                        // Allowlist filter
+                        let is_allowed = if allowed.iter().any(|u| u == "*") {
+                            true
+                        } else {
+                            allowed.iter().any(|u| u.eq_ignore_ascii_case(&sender))
+                        };
+                        if !is_allowed {
+                            continue;
+                        }
+
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+
+                        let normalized = NormalizedMessage {
+                            id: Uuid::new_v4(),
+                            session_key: clawdesk_types::session::SessionKey::new(
+                                ChannelId::IMessage,
+                                &sender,
+                            ),
+                            body: text,
+                            body_for_agent: None,
+                            sender: SenderIdentity {
+                                id: sender.clone(),
+                                display_name: sender.clone(),
+                                channel: ChannelId::IMessage,
+                            },
+                            media: vec![],
+                            reply_context: None,
+                            origin: clawdesk_types::message::MessageOrigin::IMessage {
+                                rowid,
+                                sender,
+                            },
+                            timestamp: Utc::now(),
+                        };
+
+                        sink.on_message(normalized).await;
+                    }
+                }
+                Err(e) => {
+                    warn!("iMessage: poll error: {e}");
+                }
+            }
+        }
+
+        info!("iMessage channel stopped");
         Ok(())
     }
 
-    async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, String> {
-        let chat_guid = match &msg.origin {
-            clawdesk_types::message::MessageOrigin::IMessage { apple_id, .. } => {
-                // BlueBubbles uses chat GUIDs; for DMs it's typically
-                // `iMessage;-;<apple_id>` or `SMS;-;<phone>`
-                format!("iMessage;-;{}", apple_id)
-            }
-            _ => return Err("cannot send iMessage without iMessage origin".into()),
+    async fn send(&self, message: OutboundMessage) -> Result<DeliveryReceipt, String> {
+        // Extract recipient from origin
+        let recipient = match &message.origin {
+            clawdesk_types::message::MessageOrigin::IMessage { sender, .. } => sender.clone(),
+            _ => return Err("iMessage send: invalid origin (not IMessage)".to_string()),
         };
 
-        let body = serde_json::json!({
-            "chatGuid": chat_guid,
-            "message": msg.body,
-            "method": "private-api",
-        });
-
-        let url = self.api_url("/api/v1/message/text");
-        let response = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("iMessage send failed: {}", e))?;
-
-        if !response.status().is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(format!("BlueBubbles API error: {}", error_body));
+        // Defense-in-depth: validate target format
+        if !is_valid_imessage_target(&recipient) {
+            return Err(format!(
+                "Invalid iMessage target: must be a phone number (+1234567890) or email (user@example.com), got: {recipient}"
+            ));
         }
 
-        let result: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| format!("failed to parse send response: {}", e))?;
+        // Escape both message AND target to prevent AppleScript injection
+        let escaped_msg = escape_applescript(&message.body);
+        let escaped_target = escape_applescript(&recipient);
 
-        let message_guid = result
-            .get("data")
-            .and_then(|d| d.get("guid"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let script = format!(
+            r#"tell application "Messages"
+    set targetService to 1st account whose service type = iMessage
+    set targetBuddy to participant "{escaped_target}" of targetService
+    send "{escaped_msg}" to targetBuddy
+end tell"#
+        );
+
+        let output = tokio::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .await
+            .map_err(|e| format!("iMessage: failed to run osascript: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("iMessage send failed: {stderr}"));
+        }
 
         Ok(DeliveryReceipt {
             channel: ChannelId::IMessage,
-            message_id: message_guid,
-            timestamp: chrono::Utc::now(),
+            message_id: Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
             success: true,
             error: None,
         })
     }
 
     async fn stop(&self) -> Result<(), String> {
-        self.running.store(false, Ordering::Relaxed);
+        info!("iMessage channel stopping...");
+        self.running.store(false, Ordering::SeqCst);
         self.shutdown.notify_waiters();
-        info!("iMessage channel stopped");
         Ok(())
     }
 }
 
-#[async_trait]
-impl Streaming for IMessageChannel {
-    async fn send_streaming(&self, initial: OutboundMessage) -> Result<StreamHandle, String> {
-        let receipt = self.send(initial).await?;
-        let msg_id = receipt.message_id.clone();
-
-        // iMessage doesn't support message editing. For streaming, we send
-        // successive messages. The handle tracks the conversation context.
-        Ok(StreamHandle {
-            message_id: msg_id,
-            update_fn: Box::new(|_text| Ok(())),
-        })
-    }
-}
-
-#[async_trait]
-impl Reactions for IMessageChannel {
-    async fn add_reaction(&self, msg_id: &str, emoji: &str) -> Result<(), String> {
-        let tapback = TapbackType::from_emoji(emoji)
-            .ok_or_else(|| format!("unsupported iMessage tapback: {}", emoji))?;
-
-        let body = serde_json::json!({
-            "chatGuid": msg_id,
-            "reaction": tapback.api_value(),
-            "partIndex": 0,
-        });
-
-        let url = self.api_url("/api/v1/message/react");
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("iMessage tapback failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let error_body = resp.text().await.unwrap_or_default();
-            return Err(format!("BlueBubbles reaction error: {}", error_body));
-        }
-
-        debug!(msg_id, emoji, "added iMessage tapback");
-        Ok(())
-    }
-
-    async fn remove_reaction(&self, msg_id: &str, emoji: &str) -> Result<(), String> {
-        // iMessage tapbacks are toggles; sending the same reaction again removes it
-        debug!(msg_id, emoji, "removing iMessage tapback (toggle)");
-        self.add_reaction(msg_id, emoji).await
-    }
-}
-
-// ─── BlueBubbles API types ──────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct BlueBubblesListResponse {
-    status: i32,
-    data: Vec<BlueBubblesMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BlueBubblesMessage {
-    guid: String,
-    text: Option<String>,
-    #[serde(rename = "isFromMe")]
-    is_from_me: bool,
-    #[serde(rename = "dateCreated")]
-    date_created: i64,
-    handle: Option<BlueBubblesHandle>,
-    chats: Vec<BlueBubblesChat>,
-    #[serde(default)]
-    attachments: Vec<BlueBubblesAttachment>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BlueBubblesHandle {
-    address: String,
-    contact: Option<BlueBubblesContact>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BlueBubblesContact {
-    #[serde(rename = "displayName")]
-    display_name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BlueBubblesChat {
-    guid: String,
-    #[serde(rename = "displayName")]
-    display_name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BlueBubblesAttachment {
-    guid: String,
-    #[serde(rename = "mimeType")]
-    mime_type: String,
-    filename: Option<String>,
-    #[serde(rename = "totalBytes")]
-    total_bytes: Option<i64>,
-}
-
-// ─── Tests ──────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn test_config() -> IMessageConfig {
-        IMessageConfig {
-            server_url: "http://192.168.1.100:1234".into(),
-            password: "test-password".into(),
-            allowed_chats: vec!["iMessage;-;+1234567890".into()],
-        }
+    // ── AppleScript escaping ──────────────────────────────────
+
+    #[test]
+    fn escape_plain_text() {
+        assert_eq!(escape_applescript("hello world"), "hello world");
     }
 
     #[test]
-    fn test_imessage_channel_creation() {
-        let channel = IMessageChannel::new(test_config());
-        assert_eq!(channel.id(), ChannelId::IMessage);
-        assert_eq!(channel.server_url, "http://192.168.1.100:1234");
-        assert_eq!(channel.password, "test-password");
+    fn escape_double_quotes() {
+        assert_eq!(escape_applescript(r#"say "hi""#), r#"say \"hi\""#);
     }
 
     #[test]
-    fn test_imessage_meta() {
-        let channel = IMessageChannel::new(test_config());
-        let meta = channel.meta();
+    fn escape_backslashes() {
+        assert_eq!(escape_applescript(r"path\to\file"), r"path\\to\\file");
+    }
+
+    #[test]
+    fn escape_newlines() {
+        assert_eq!(escape_applescript("line1\nline2"), "line1\\nline2");
+        assert_eq!(escape_applescript("line1\rline2"), "line1\\rline2");
+    }
+
+    #[test]
+    fn escape_combined_injection() {
+        // Attempt: end tell" & do shell script "rm -rf /"
+        let malicious = r#"end tell" & do shell script "rm -rf /""#;
+        let escaped = escape_applescript(malicious);
+        assert!(!escaped.contains("\"\n"));
+        assert!(escaped.contains("\\\""));
+    }
+
+    #[test]
+    fn escape_empty_string() {
+        assert_eq!(escape_applescript(""), "");
+    }
+
+    // ── Target validation ──────────────────────────────────
+
+    #[test]
+    fn valid_phone_numbers() {
+        assert!(is_valid_imessage_target("+1234567890"));
+        assert!(is_valid_imessage_target("+1 234-567-8900"));
+        assert!(is_valid_imessage_target("+44 7911 123456"));
+    }
+
+    #[test]
+    fn valid_emails() {
+        assert!(is_valid_imessage_target("user@example.com"));
+        assert!(is_valid_imessage_target("test.user+tag@mail.co.uk"));
+    }
+
+    #[test]
+    fn invalid_targets() {
+        assert!(!is_valid_imessage_target(""));
+        assert!(!is_valid_imessage_target("   "));
+        assert!(!is_valid_imessage_target("random string"));
+        assert!(!is_valid_imessage_target("1234567890")); // no +
+        assert!(!is_valid_imessage_target("@example.com")); // no local part
+        assert!(!is_valid_imessage_target("user@")); // no domain
+        assert!(!is_valid_imessage_target("user@nodot")); // no dot in domain
+    }
+
+    #[test]
+    fn short_phone_rejected() {
+        assert!(!is_valid_imessage_target("+123")); // too short (< 7 digits)
+    }
+
+    #[test]
+    fn long_phone_rejected() {
+        assert!(!is_valid_imessage_target("+1234567890123456")); // > 15 digits
+    }
+
+    // ── Contact allowlist ──────────────────────────────────
+
+    #[test]
+    fn wildcard_allows_all() {
+        let ch = IMessageChannel::new(vec!["*".to_string()], 3);
+        assert!(ch.is_contact_allowed("+1234567890"));
+        assert!(ch.is_contact_allowed("anyone@example.com"));
+    }
+
+    #[test]
+    fn specific_contacts_only() {
+        let ch = IMessageChannel::new(vec!["+1234567890".to_string()], 3);
+        assert!(ch.is_contact_allowed("+1234567890"));
+        assert!(!ch.is_contact_allowed("+9876543210"));
+    }
+
+    #[test]
+    fn case_insensitive_contacts() {
+        let ch = IMessageChannel::new(vec!["User@Example.COM".to_string()], 3);
+        assert!(ch.is_contact_allowed("user@example.com"));
+        assert!(ch.is_contact_allowed("USER@EXAMPLE.COM"));
+    }
+
+    #[test]
+    fn empty_contacts_blocks_all() {
+        let ch = IMessageChannel::new(vec![], 3);
+        assert!(!ch.is_contact_allowed("+1234567890"));
+    }
+
+    // ── Channel trait ──────────────────────────────────
+
+    #[test]
+    fn channel_id() {
+        let ch = IMessageChannel::new(vec!["*".to_string()], 3);
+        assert_eq!(ch.id(), ChannelId::IMessage);
+    }
+
+    #[test]
+    fn channel_meta() {
+        let ch = IMessageChannel::new(vec!["*".to_string()], 3);
+        let meta = ch.meta();
         assert_eq!(meta.display_name, "iMessage");
-        assert!(meta.supports_reactions);
-        assert!(meta.supports_media);
-        assert!(meta.supports_groups);
-        assert!(meta.max_message_length.is_none());
+        assert!(!meta.supports_threading);
+        assert!(!meta.supports_streaming);
     }
 
     #[test]
-    fn test_imessage_api_url() {
-        let channel = IMessageChannel::new(test_config());
-        assert_eq!(
-            channel.api_url("/api/v1/message"),
-            "http://192.168.1.100:1234/api/v1/message?password=test-password"
-        );
-        assert_eq!(
-            channel.api_url("/api/v1/message?after=123"),
-            "http://192.168.1.100:1234/api/v1/message?after=123&password=test-password"
-        );
-    }
-
-    #[test]
-    fn test_imessage_allowed_chats() {
-        let channel = IMessageChannel::new(test_config());
-        assert!(channel.is_allowed_chat("iMessage;-;+1234567890"));
-        assert!(!channel.is_allowed_chat("iMessage;-;+9999999999"));
-
-        // Empty = allow all
-        let mut config = test_config();
-        config.allowed_chats = vec![];
-        let open = IMessageChannel::new(config);
-        assert!(open.is_allowed_chat("anything"));
-    }
-
-    #[test]
-    fn test_tapback_type_from_emoji() {
-        assert_eq!(TapbackType::from_emoji("❤️"), Some(TapbackType::Love));
-        assert_eq!(TapbackType::from_emoji("👍"), Some(TapbackType::Like));
-        assert_eq!(TapbackType::from_emoji("👎"), Some(TapbackType::Dislike));
-        assert_eq!(TapbackType::from_emoji("😂"), Some(TapbackType::Laugh));
-        assert_eq!(TapbackType::from_emoji("‼️"), Some(TapbackType::Emphasis));
-        assert_eq!(TapbackType::from_emoji("❓"), Some(TapbackType::Question));
-        assert_eq!(TapbackType::from_emoji("🤷"), None);
-    }
-
-    #[test]
-    fn test_tapback_api_value() {
-        assert_eq!(TapbackType::Love.api_value(), "love");
-        assert_eq!(TapbackType::Like.api_value(), "like");
-        assert_eq!(TapbackType::Emphasis.api_value(), "emphasize");
+    fn default_poll_interval() {
+        let ch = IMessageChannel::new(vec![], 0);
+        assert_eq!(ch.poll_interval_secs, 3);
     }
 }

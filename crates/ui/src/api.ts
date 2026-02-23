@@ -127,13 +127,6 @@ const _channelTypeSpecs: ChannelTypeSpec[] = [
   { id: "WebChat", label: "Web Chat", icon: "💬", blurb: "Built-in web chat interface", docs_url: "", configFields: [], capabilities: ["direct", "media", "threads"] },
   { id: "Internal", label: "Internal", icon: "🏠", blurb: "Internal system messages", docs_url: "", configFields: [], capabilities: ["direct", "group"] },
   {
-    id: "IMessage", label: "iMessage", icon: "💬", blurb: "Apple iMessage bridge via command-line tool", docs_url: "",
-    configFields: [
-      { key: "cli_path", label: "CLI Path", type: "text", placeholder: "/usr/local/bin/imessage-bridge", help: "Path to the iMessage CLI bridge binary", required: true },
-      { key: "db_path", label: "Database Path", type: "text", placeholder: "~/Library/Messages/chat.db", help: "Path to the iMessage database" },
-    ], capabilities: ["direct", "group", "media", "reactions"]
-  },
-  {
     id: "Telegram", label: "Telegram", icon: "✈️", blurb: "Telegram Bot API for direct and group chats", docs_url: "https://core.telegram.org/bots",
     configFields: [
       { key: "bot_token", label: "Bot Token", type: "password", placeholder: "123456:ABC-DEF...", help: "Token from @BotFather", required: true },
@@ -165,21 +158,6 @@ const _channelTypeSpecs: ChannelTypeSpec[] = [
     ], capabilities: ["direct", "group", "media"]
   },
   {
-    id: "Signal", label: "Signal", icon: "🔒", blurb: "Signal messenger via signal-cli REST API", docs_url: "https://signal.org/",
-    configFields: [
-      { key: "base_url", label: "API Base URL", type: "url", placeholder: "http://localhost:8080", help: "Signal CLI REST API endpoint", required: true },
-      { key: "phone_number", label: "Phone Number", type: "text", placeholder: "+1234567890", help: "Registered Signal phone number", required: true },
-    ], capabilities: ["direct", "group", "media", "reactions"]
-  },
-  {
-    id: "Matrix", label: "Matrix", icon: "🟩", blurb: "Matrix/Element homeserver integration", docs_url: "https://matrix.org/",
-    configFields: [
-      { key: "homeserver", label: "Homeserver URL", type: "url", placeholder: "https://matrix.org", help: "Matrix homeserver base URL", required: true },
-      { key: "access_token", label: "Access Token", type: "password", placeholder: "", help: "Matrix access token", required: true },
-      { key: "user_id", label: "User ID", type: "text", placeholder: "@bot:matrix.org", help: "Matrix user ID for the bot" },
-    ], capabilities: ["direct", "group", "media", "threads", "reactions"]
-  },
-  {
     id: "Email", label: "Email", icon: "📧", blurb: "IMAP/SMTP email integration", docs_url: "",
     configFields: [
       { key: "imap_host", label: "IMAP Host", type: "text", placeholder: "imap.gmail.com", help: "IMAP server hostname", required: true },
@@ -189,65 +167,22 @@ const _channelTypeSpecs: ChannelTypeSpec[] = [
     ], capabilities: ["direct", "media"]
   },
   {
-    id: "MsTeams", label: "MS Teams", icon: "🟦", blurb: "Microsoft Teams bot via Azure Bot Service", docs_url: "https://learn.microsoft.com/en-us/microsoftteams/",
+    id: "IMessage", label: "iMessage", icon: "🍏", blurb: "macOS iMessage via AppleScript bridge", docs_url: "",
     configFields: [
-      { key: "app_id", label: "App ID", type: "text", placeholder: "", help: "Azure Bot app registration ID", required: true },
-      { key: "app_secret", label: "App Secret", type: "password", placeholder: "", help: "Azure Bot app secret", required: true },
-      { key: "tenant_id", label: "Tenant ID", type: "text", placeholder: "", help: "Azure AD tenant ID" },
-    ], capabilities: ["direct", "group", "media", "threads", "reactions"]
+      { key: "allowed_contacts", label: "Allowed Contacts", type: "text", placeholder: "+1234567890, user@example.com", help: "Comma-separated phone/email. Leave blank for everyone (*)" },
+      { key: "poll_interval_secs", label: "Poll Interval", type: "text", placeholder: "3", help: "How often to check for new messages (seconds)" },
+    ], capabilities: ["direct"]
   },
   {
-    id: "GoogleChat", label: "Google Chat", icon: "💚", blurb: "Google Workspace Chat via service account", docs_url: "https://developers.google.com/chat",
-    configFields: [
-      { key: "credentials_json", label: "Service Account JSON", type: "password", placeholder: "", help: "Google service account credentials JSON", required: true },
-      { key: "webhook_url", label: "Webhook URL", type: "url", placeholder: "", help: "Google Chat webhook URL" },
-    ], capabilities: ["direct", "group", "threads"]
-  },
-  {
-    id: "Nostr", label: "Nostr", icon: "🟣", blurb: "Nostr protocol relay messaging", docs_url: "https://nostr.com/",
-    configFields: [
-      { key: "private_key", label: "Private Key (nsec)", type: "password", placeholder: "nsec1...", help: "Nostr private key", required: true },
-      { key: "relays", label: "Relays", type: "text", placeholder: "wss://relay.damus.io,wss://nos.lol", help: "Comma-separated relay URLs" },
-    ], capabilities: ["direct", "group"]
-  },
-  {
-    id: "Irc", label: "IRC", icon: "📟", blurb: "IRC server connection", docs_url: "",
+    id: "Irc", label: "IRC", icon: "💻", blurb: "IRC over TLS with SASL/NickServ auth", docs_url: "https://ircv3.net/",
     configFields: [
       { key: "server", label: "Server", type: "text", placeholder: "irc.libera.chat", help: "IRC server hostname", required: true },
-      { key: "port", label: "Port", type: "text", placeholder: "6697", help: "IRC server port" },
-      { key: "nick", label: "Nickname", type: "text", placeholder: "clawdesk-bot", help: "Bot nickname", required: true },
-      { key: "channels", label: "Channels", type: "text", placeholder: "#general,#dev", help: "Comma-separated channels to join" },
-      { key: "password", label: "Password", type: "password", placeholder: "", help: "NickServ/server password" },
+      { key: "nickname", label: "Nickname", type: "text", placeholder: "clawdesk-bot", help: "Bot nickname", required: true },
+      { key: "port", label: "Port", type: "text", placeholder: "6697", help: "Server port (default: 6697 TLS)" },
+      { key: "channels", label: "Channels", type: "text", placeholder: "#general, #dev", help: "Comma-separated channels to join" },
+      { key: "sasl_password", label: "SASL Password", type: "password", placeholder: "", help: "SASL PLAIN authentication password" },
+      { key: "nickserv_password", label: "NickServ Password", type: "password", placeholder: "", help: "NickServ IDENTIFY password" },
     ], capabilities: ["direct", "group"]
-  },
-  {
-    id: "Mattermost", label: "Mattermost", icon: "🔵", blurb: "Self-hosted Mattermost server integration", docs_url: "https://developers.mattermost.com/",
-    configFields: [
-      { key: "url", label: "Server URL", type: "url", placeholder: "https://mattermost.example.com", help: "Mattermost server base URL", required: true },
-      { key: "bot_token", label: "Bot Token", type: "password", placeholder: "", help: "Mattermost bot access token", required: true },
-    ], capabilities: ["direct", "group", "media", "threads", "reactions"]
-  },
-  {
-    id: "Line", label: "LINE", icon: "🟢", blurb: "LINE Messaging API", docs_url: "https://developers.line.biz/",
-    configFields: [
-      { key: "channel_access_token", label: "Channel Access Token", type: "password", placeholder: "", help: "LINE channel access token", required: true },
-      { key: "channel_secret", label: "Channel Secret", type: "password", placeholder: "", help: "LINE channel secret", required: true },
-    ], capabilities: ["direct", "group", "media"]
-  },
-  {
-    id: "Feishu", label: "Feishu/Lark", icon: "🪶", blurb: "Feishu (Lark) enterprise messaging", docs_url: "https://open.feishu.cn/",
-    configFields: [
-      { key: "app_id", label: "App ID", type: "text", placeholder: "", help: "Feishu app ID", required: true },
-      { key: "app_secret", label: "App Secret", type: "password", placeholder: "", help: "Feishu app secret", required: true },
-    ], capabilities: ["direct", "group", "media", "threads"]
-  },
-  {
-    id: "Twitch", label: "Twitch", icon: "🟪", blurb: "Twitch IRC chat integration", docs_url: "https://dev.twitch.tv/",
-    configFields: [
-      { key: "oauth_token", label: "OAuth Token", type: "password", placeholder: "oauth:...", help: "Twitch OAuth token", required: true },
-      { key: "channel", label: "Channel", type: "text", placeholder: "your_channel", help: "Twitch channel to join", required: true },
-      { key: "bot_name", label: "Bot Username", type: "text", placeholder: "clawdesk_bot" },
-    ], capabilities: ["group"]
   },
 ];
 
@@ -412,22 +347,13 @@ function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const defaults: ChannelInfo[] = [
       { id: "web-chat", name: "Web Chat", channel_type: "WebChat", status: "active", configured: true, config: {}, capabilities: ["direct", "media", "threads"], docs_url: "" },
       { id: "internal", name: "Internal", channel_type: "Internal", status: "active", configured: true, config: {}, capabilities: ["direct", "group"], docs_url: "" },
-      { id: "imessage", name: "iMessage", channel_type: "IMessage", status: "active", configured: true, config: { cli_path: "/usr/local/bin/imessage-bridge", db_path: "~/Library/Messages/chat.db" }, capabilities: ["direct", "group", "media", "reactions"], docs_url: "" },
       { id: "telegram", name: "Telegram", channel_type: "Telegram", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "media", "threads", "reactions"], docs_url: "https://core.telegram.org/bots" },
       { id: "discord", name: "Discord", channel_type: "Discord", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "media", "threads", "reactions"], docs_url: "https://discord.com/developers/docs" },
       { id: "slack", name: "Slack", channel_type: "Slack", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "media", "threads", "reactions"], docs_url: "https://api.slack.com/" },
       { id: "whatsapp", name: "WhatsApp", channel_type: "WhatsApp", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "media"], docs_url: "https://developers.facebook.com/docs/whatsapp" },
-      { id: "signal", name: "Signal", channel_type: "Signal", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "media", "reactions"], docs_url: "https://signal.org/" },
-      { id: "matrix", name: "Matrix", channel_type: "Matrix", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "media", "threads", "reactions"], docs_url: "https://matrix.org/" },
       { id: "email", name: "Email", channel_type: "Email", status: "available", configured: false, config: {}, capabilities: ["direct", "media"], docs_url: "" },
-      { id: "msteams", name: "MS Teams", channel_type: "MsTeams", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "media", "threads", "reactions"], docs_url: "https://learn.microsoft.com/en-us/microsoftteams/" },
-      { id: "googlechat", name: "Google Chat", channel_type: "GoogleChat", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "threads"], docs_url: "https://developers.google.com/chat" },
-      { id: "nostr", name: "Nostr", channel_type: "Nostr", status: "available", configured: false, config: {}, capabilities: ["direct", "group"], docs_url: "https://nostr.com/" },
-      { id: "irc", name: "IRC", channel_type: "Irc", status: "available", configured: false, config: {}, capabilities: ["direct", "group"], docs_url: "" },
-      { id: "mattermost", name: "Mattermost", channel_type: "Mattermost", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "media", "threads", "reactions"], docs_url: "https://developers.mattermost.com/" },
-      { id: "line", name: "LINE", channel_type: "Line", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "media"], docs_url: "https://developers.line.biz/" },
-      { id: "feishu", name: "Feishu/Lark", channel_type: "Feishu", status: "available", configured: false, config: {}, capabilities: ["direct", "group", "media", "threads"], docs_url: "https://open.feishu.cn/" },
-      { id: "twitch", name: "Twitch", channel_type: "Twitch", status: "available", configured: false, config: {}, capabilities: ["group"], docs_url: "https://dev.twitch.tv/" },
+      { id: "imessage", name: "iMessage", channel_type: "IMessage", status: "available", configured: false, config: {}, capabilities: ["direct"], docs_url: "" },
+      { id: "irc", name: "IRC", channel_type: "Irc", status: "available", configured: false, config: {}, capabilities: ["direct", "group"], docs_url: "https://ircv3.net/" },
     ];
     localStorage.setItem("clawdesk._mockChannels", JSON.stringify(defaults));
     return Promise.resolve(defaults as unknown as T);

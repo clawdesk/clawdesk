@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { HealthResponse, SkillDescriptor, ChannelInfo, ChannelTypeSpec } from "../types";
 import { AGENT_TEMPLATES } from "../types";
 import { Modal } from "../components/Modal";
+import { ChannelSetupJourney } from "./ChannelSetupJourney";
 import * as api from "../api";
 
 // Provider → available models mapping
@@ -89,7 +90,7 @@ const SKILL_CATEGORY_ICONS: Record<string, string> = {
   communication: "💬", data: "📊", media: "🎨", system: "🔧",
 };
 
-const POPULAR_CHANNELS = ["Telegram", "Discord", "Slack", "WhatsApp", "Email", "MsTeams"];
+const POPULAR_CHANNELS = ["Telegram", "Discord", "Slack", "WhatsApp", "Email", "IMessage", "Irc"];
 
 export function OnboardingWizard({
   open,
@@ -121,7 +122,6 @@ export function OnboardingWizard({
   // ── Step 3: Channels ──────────────────────────────────────
   const [channelSetups, setChannelSetups] = useState<Map<string, Record<string, string>>>(new Map());
   const [configuringChannel, setConfiguringChannel] = useState<ChannelInfo | null>(null);
-  const [channelDraft, setChannelDraft] = useState<Record<string, string>>({});
   const [typeSpecs, setTypeSpecs] = useState<ChannelTypeSpec[]>([]);
 
   // Load channel type specs on mount
@@ -220,18 +220,7 @@ export function OnboardingWizard({
 
   const openChannelConfig = useCallback((ch: ChannelInfo) => {
     setConfiguringChannel(ch);
-    setChannelDraft({ ...(channelSetups.get(ch.id) ?? ch.config ?? {}) });
-  }, [channelSetups]);
-
-  const saveChannelConfig = useCallback(() => {
-    if (!configuringChannel) return;
-    setChannelSetups((prev) => {
-      const next = new Map(prev);
-      next.set(configuringChannel.id, { ...channelDraft });
-      return next;
-    });
-    setConfiguringChannel(null);
-  }, [configuringChannel, channelDraft]);
+  }, []);
 
   const removeChannelSetup = useCallback((channelId: string) => {
     setChannelSetups((prev) => {
@@ -541,53 +530,21 @@ export function OnboardingWizard({
           </section>
         )}
 
-        {/* ── Channel config sub-modal ── */}
+        {/* ── Channel setup journey sub-view ── */}
         {step === 3 && configuringChannel && spec && (
-          <section className="section-card onboarding-step">
-            <button
-              className="btn ghost"
-              onClick={() => setConfiguringChannel(null)}
-              style={{ alignSelf: "flex-start", marginBottom: "0.5rem" }}
-            >
-              ← Back to channels
-            </button>
-            <h3>{spec.icon} Configure {configuringChannel.name}</h3>
-            <p className="onboarding-hint">{spec.blurb}</p>
-
-            {spec.configFields.length === 0 ? (
-              <p className="onboarding-hint">This channel has no configuration fields — it's ready to use.</p>
-            ) : (
-              spec.configFields.map((field) => (
-                <label key={field.key} className="field-label">
-                  {field.label} {field.required && <span style={{ color: "var(--danger)" }}>*</span>}
-                  {field.type === "select" ? (
-                    <select
-                      value={channelDraft[field.key] ?? ""}
-                      onChange={(e) => setChannelDraft((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                    >
-                      <option value="">Select...</option>
-                      {(field.options ?? []).map((opt) => <option key={opt}>{opt}</option>)}
-                    </select>
-                  ) : (
-                    <input
-                      type={field.type === "password" ? "password" : "text"}
-                      value={channelDraft[field.key] ?? ""}
-                      placeholder={field.placeholder ?? ""}
-                      onChange={(e) => setChannelDraft((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                    />
-                  )}
-                  {field.help && <span className="row-sub" style={{ display: "block", marginTop: 2 }}>{field.help}</span>}
-                </label>
-              ))
-            )}
-
-            <div className="row-actions" style={{ justifyContent: "flex-end", marginTop: "0.75rem" }}>
-              <button className="btn ghost" onClick={() => setConfiguringChannel(null)}>Cancel</button>
-              <button className="btn primary" onClick={saveChannelConfig}>
-                {spec.configFields.length === 0 ? "Add" : "Save & Add"}
-              </button>
-            </div>
-          </section>
+          <ChannelSetupJourney
+            spec={spec}
+            initialValues={channelSetups.get(configuringChannel.id) ?? configuringChannel.config ?? {}}
+            onComplete={(config) => {
+              setChannelSetups((prev) => {
+                const next = new Map(prev);
+                next.set(configuringChannel.id, config);
+                return next;
+              });
+              setConfiguringChannel(null);
+            }}
+            onCancel={() => setConfiguringChannel(null)}
+          />
         )}
 
         {/* ── Navigation buttons ── */}

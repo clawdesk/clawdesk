@@ -97,18 +97,17 @@ pub fn slack_policy() -> ChannelRetryPolicy {
     }
 }
 
-/// Matrix retry policy.
-pub fn matrix_policy() -> ChannelRetryPolicy {
+/// IRC retry policy.
+pub fn irc_policy() -> ChannelRetryPolicy {
     ChannelRetryPolicy {
-        channel: "matrix".to_string(),
+        channel: "irc".to_string(),
         max_retries: 3,
-        base_delay: Duration::from_secs(1),
-        max_delay: Duration::from_secs(30),
+        base_delay: Duration::from_secs(2),
+        max_delay: Duration::from_secs(60),
         retryable_patterns: vec![
-            "429".to_string(),
-            "limit exceeded".to_string(),
             "timeout".to_string(),
-            "M_LIMIT_EXCEEDED".to_string(),
+            "connection reset".to_string(),
+            "broken pipe".to_string(),
         ],
     }
 }
@@ -134,7 +133,7 @@ pub fn policy_for_channel(channel: &str) -> ChannelRetryPolicy {
         "telegram" => telegram_policy(),
         "discord" => discord_policy(),
         "slack" => slack_policy(),
-        "matrix" => matrix_policy(),
+        "irc" => irc_policy(),
         other => generic_policy(other),
     }
 }

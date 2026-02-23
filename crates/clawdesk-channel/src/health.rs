@@ -70,34 +70,20 @@ impl Default for HealthThresholds {
 }
 
 /// Number of `ChannelId` variants. Must be kept in sync with the enum.
-const NUM_CHANNELS: usize = 23;
+const NUM_CHANNELS: usize = 9;
 
-/// Map a `ChannelId` to a fixed array index (0..12).
+/// Map a `ChannelId` to a fixed array index.
 fn channel_index(id: ChannelId) -> usize {
     match id {
         ChannelId::Telegram => 0,
         ChannelId::Discord => 1,
         ChannelId::Slack => 2,
         ChannelId::WhatsApp => 3,
-        ChannelId::Signal => 4,
-        ChannelId::IMessage => 5,
-        ChannelId::WebChat => 6,
-        ChannelId::Matrix => 7,
-        ChannelId::Line => 8,
-        ChannelId::GoogleChat => 9,
-        ChannelId::MsTeams => 10,
-        ChannelId::Nostr => 11,
-        ChannelId::Irc => 12,
-        ChannelId::Mattermost => 13,
-        ChannelId::Email => 14,
-        ChannelId::Feishu => 15,
-        ChannelId::Twitch => 16,
-        ChannelId::NextcloudTalk => 17,
-        ChannelId::Zalo => 18,
-        ChannelId::ZaloUser => 19,
-        ChannelId::Tlon => 20,
-        ChannelId::BlueBubbles => 21,
-        ChannelId::Internal => 22,
+        ChannelId::WebChat => 4,
+        ChannelId::Email => 5,
+        ChannelId::IMessage => 6,
+        ChannelId::Irc => 7,
+        ChannelId::Internal => 8,
     }
 }
 
@@ -107,24 +93,10 @@ const ALL_CHANNELS: [ChannelId; NUM_CHANNELS] = [
     ChannelId::Discord,
     ChannelId::Slack,
     ChannelId::WhatsApp,
-    ChannelId::Signal,
-    ChannelId::IMessage,
     ChannelId::WebChat,
-    ChannelId::Matrix,
-    ChannelId::Line,
-    ChannelId::GoogleChat,
-    ChannelId::MsTeams,
-    ChannelId::Nostr,
-    ChannelId::Irc,
-    ChannelId::Mattermost,
     ChannelId::Email,
-    ChannelId::Feishu,
-    ChannelId::Twitch,
-    ChannelId::NextcloudTalk,
-    ChannelId::Zalo,
-    ChannelId::ZaloUser,
-    ChannelId::Tlon,
-    ChannelId::BlueBubbles,
+    ChannelId::IMessage,
+    ChannelId::Irc,
     ChannelId::Internal,
 ];
 

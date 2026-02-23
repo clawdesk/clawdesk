@@ -29,8 +29,8 @@
 //! ```rust,no_run
 //! # use clawdesk_channels::factory::{ChannelFactory, ChannelConfig, ChannelConfigError};
 //! let mut factory = ChannelFactory::with_builtins();
-//! // factory.register("matrix", |config| {
-//! //     Ok(Arc::new(MatrixChannel::new(config.require_string("homeserver")?)))
+//! // factory.register("my_custom_channel", |config| {
+//! //     Ok(Arc::new(CustomChannel::new(config.require_string("endpoint")?)))
 //! // });
 //! ```
 
@@ -49,6 +49,7 @@ use tracing::info;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigFieldType {
     String,
+    StringArray,
     Bool,
     Integer,
     IntegerArray,
@@ -62,6 +63,7 @@ impl std::fmt::Display for ConfigFieldType {
             Self::Bool => write!(f, "bool"),
             Self::Integer => write!(f, "integer"),
             Self::IntegerArray => write!(f, "array<integer>"),
+            Self::StringArray => write!(f, "array<string>"),
             Self::UnsignedArray => write!(f, "array<unsigned>"),
         }
     }
@@ -133,6 +135,10 @@ impl ConfigSchema {
                         ConfigFieldType::IntegerArray => val
                             .as_array()
                             .map(|a| a.iter().all(|v| v.is_i64()))
+                            .unwrap_or(false),
+                        ConfigFieldType::StringArray => val
+                            .as_array()
+                            .map(|a| a.iter().all(|v| v.is_string()))
                             .unwrap_or(false),
                         ConfigFieldType::UnsignedArray => val
                             .as_array()
@@ -281,6 +287,15 @@ impl ChannelConfig {
             .get(key)
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Array of strings (e.g., Discord allowed user IDs).
+    pub fn string_array(&self, key: &str) -> Vec<String> {
+        self.inner
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default()
     }
 
@@ -447,15 +462,27 @@ impl ChannelFactory {
         let discord_schema = ConfigSchema::new("discord")
             .required("bot_token", ConfigFieldType::String, "Discord bot token")
             .required("application_id", ConfigFieldType::String, "Discord application ID")
-            .optional("allowed_guild_ids", ConfigFieldType::UnsignedArray, "Restrict to these guild IDs");
+            .optional("allowed_guild_ids", ConfigFieldType::UnsignedArray, "Restrict to these guild IDs")
+            .optional("allowed_users", ConfigFieldType::StringArray, "Allowed user IDs (\"*\" = everyone)")
+            .optional("listen_to_bots", ConfigFieldType::Bool, "Process messages from other bots")
+            .optional("mention_only", ConfigFieldType::Bool, "Only respond when @mentioned");
         f.register_with_schema("discord", discord_schema, |config| {
             let bot_token = config.require_string("bot_token")?;
             let application_id = config.require_string("application_id")?;
             let allowed_guild_ids = config.u64_array("allowed_guild_ids");
+            let allowed_users = {
+                let users = config.string_array("allowed_users");
+                if users.is_empty() { vec!["*".to_string()] } else { users }
+            };
+            let listen_to_bots = config.bool_or("listen_to_bots", false);
+            let mention_only = config.bool_or("mention_only", false);
             Ok(Arc::new(crate::discord::DiscordChannel::new(
                 bot_token,
                 application_id,
                 allowed_guild_ids,
+                allowed_users,
+                listen_to_bots,
+                mention_only,
             )))
         });
 
@@ -506,75 +533,99 @@ impl ChannelFactory {
             )))
         });
 
-        // --- Matrix ---
-        // Required: homeserver, access_token
-        let matrix_schema = ConfigSchema::new("matrix")
-            .required("homeserver", ConfigFieldType::String, "Matrix homeserver URL")
-            .required("access_token", ConfigFieldType::String, "Matrix access token");
-        f.register_with_schema("matrix", matrix_schema, |config| {
-            let homeserver = config.require_string("homeserver")?;
-            let access_token = config.require_string("access_token")?;
-            Ok(Arc::new(crate::matrix::MatrixChannel::new(
-                homeserver,
-                access_token,
-            )))
-        });
-
-        // --- Microsoft Teams ---
-        // Required: app_id, app_password
-        let msteams_schema = ConfigSchema::new("msteams")
-            .required("app_id", ConfigFieldType::String, "Teams app ID")
-            .required("app_password", ConfigFieldType::String, "Teams app password");
-        f.register_with_schema("msteams", msteams_schema, |config| {
-            let app_id = config.require_string("app_id")?;
-            let app_password = config.require_string("app_password")?;
-            Ok(Arc::new(crate::msteams::MsTeamsChannel::new(
-                app_id,
-                app_password,
-            )))
-        });
-
-        // --- BlueBubbles ---
-        // Required: server_url, password
-        // Optional: allowed_chats, enable_groups, use_private_api
-        let bluebubbles_schema = ConfigSchema::new("bluebubbles")
-            .required("server_url", ConfigFieldType::String, "BlueBubbles server URL")
-            .required("password", ConfigFieldType::String, "BlueBubbles server password")
-            .optional("enable_groups", ConfigFieldType::Bool, "Allow group chats")
-            .optional("use_private_api", ConfigFieldType::Bool, "Use private API mode");
-        f.register_with_schema("bluebubbles", bluebubbles_schema, |config| {
-            let server_url = config.require_string("server_url")?;
+        // --- Email ---
+        // Required: imap_host, smtp_host, email, password
+        let email_schema = ConfigSchema::new("email")
+            .required("imap_host", ConfigFieldType::String, "IMAP server hostname")
+            .required("smtp_host", ConfigFieldType::String, "SMTP server hostname")
+            .required("email", ConfigFieldType::String, "Email address")
+            .required("password", ConfigFieldType::String, "Email password or app password");
+        f.register_with_schema("email", email_schema, |config| {
+            let imap_host = config.require_string("imap_host")?;
+            let smtp_host = config.require_string("smtp_host")?;
+            let email_addr = config.require_string("email")?;
             let password = config.require_string("password")?;
-            let enable_groups = config.bool_or("enable_groups", true);
-            let use_private_api = config.bool_or("use_private_api", true);
-            Ok(Arc::new(crate::bluebubbles::BlueBubblesChannel::new(
-                crate::bluebubbles::BlueBubblesConfig {
-                    server_url,
-                    password,
-                    allowed_chats: vec![],
-                    enable_groups,
-                    use_private_api,
+            Ok(Arc::new(crate::email::EmailChannel::new(
+                crate::email::EmailConfig {
+                    imap: crate::email::ImapConfig {
+                        host: imap_host,
+                        port: 993,
+                        username: email_addr.clone(),
+                        password: password.clone(),
+                        use_tls: true,
+                    },
+                    smtp: crate::email::SmtpConfig {
+                        host: smtp_host,
+                        port: 587,
+                        username: email_addr.clone(),
+                        password,
+                        use_tls: true,
+                    },
+                    from_address: email_addr,
+                    from_name: "ClawDesk".into(),
+                    mailbox: "INBOX".into(),
+                    poll_interval_secs: 30,
                 },
             )))
         });
 
-        // --- Zalo User (Personal) ---
-        // Optional: profile_name, zca_binary, enable_groups
-        let zalouser_schema = ConfigSchema::new("zalouser")
-            .optional("profile_name", ConfigFieldType::String, "zca CLI profile name")
-            .optional("zca_binary", ConfigFieldType::String, "Path to zca binary")
-            .optional("enable_groups", ConfigFieldType::Bool, "Allow group chats");
-        f.register_with_schema("zalouser", zalouser_schema, |config| {
-            let profile_name = config.string_or("profile_name", "default");
-            let zca_binary = config.string_or("zca_binary", "zca");
-            let enable_groups = config.bool_or("enable_groups", true);
-            Ok(Arc::new(crate::zalouser::ZaloUserChannel::new(
-                crate::zalouser::ZaloUserConfig {
-                    profile_name,
-                    zca_binary,
-                    enable_groups,
-                    allowed_users: vec![],
-                    allowed_groups: vec![],
+        // --- iMessage (macOS only) ---
+        // Optional: allowed_contacts (default: ["*"]), poll_interval_secs (default: 3)
+        let imessage_schema = ConfigSchema::new("imessage")
+            .optional("allowed_contacts", ConfigFieldType::StringArray, "Allowed contacts (phone/email). [\"*\"] = everyone")
+            .optional("poll_interval_secs", ConfigFieldType::Integer, "Polling interval in seconds (default: 3)");
+        f.register_with_schema("imessage", imessage_schema, |config| {
+            let allowed_contacts = {
+                let contacts = config.string_array("allowed_contacts");
+                if contacts.is_empty() { vec!["*".to_string()] } else { contacts }
+            };
+            let poll_interval = config.usize_or("poll_interval_secs", 3) as u64;
+            Ok(Arc::new(crate::imessage::IMessageChannel::new(
+                allowed_contacts,
+                poll_interval,
+            )))
+        });
+
+        // --- IRC ---
+        // Required: server, nickname
+        // Optional: port, username, channels, allowed_users, passwords, verify_tls
+        let irc_schema = ConfigSchema::new("irc")
+            .required("server", ConfigFieldType::String, "IRC server hostname")
+            .required("nickname", ConfigFieldType::String, "Bot nickname")
+            .optional("port", ConfigFieldType::Integer, "Server port (default: 6697)")
+            .optional("username", ConfigFieldType::String, "IRC username (default: nickname)")
+            .optional("channels", ConfigFieldType::StringArray, "Channels to join (e.g. [\"#general\"])")
+            .optional("allowed_users", ConfigFieldType::StringArray, "Allowed user nicks (\"*\" = everyone)")
+            .optional("server_password", ConfigFieldType::String, "Server password")
+            .optional("nickserv_password", ConfigFieldType::String, "NickServ IDENTIFY password")
+            .optional("sasl_password", ConfigFieldType::String, "SASL PLAIN password")
+            .optional("verify_tls", ConfigFieldType::Bool, "Verify TLS certificates (default: true)");
+        f.register_with_schema("irc", irc_schema, |config| {
+            let server = config.require_string("server")?;
+            let nickname = config.require_string("nickname")?;
+            let port = config.usize_or("port", 6697) as u16;
+            let username = config.raw().get("username").and_then(|v| v.as_str()).map(String::from);
+            let channels = config.string_array("channels");
+            let allowed_users = {
+                let users = config.string_array("allowed_users");
+                if users.is_empty() { vec!["*".to_string()] } else { users }
+            };
+            let server_password = config.raw().get("server_password").and_then(|v| v.as_str()).map(String::from);
+            let nickserv_password = config.raw().get("nickserv_password").and_then(|v| v.as_str()).map(String::from);
+            let sasl_password = config.raw().get("sasl_password").and_then(|v| v.as_str()).map(String::from);
+            let verify_tls = config.bool_or("verify_tls", true);
+            Ok(Arc::new(crate::irc::IrcChannel::new(
+                crate::irc::IrcChannelConfig {
+                    server,
+                    port,
+                    nickname,
+                    username,
+                    channels,
+                    allowed_users,
+                    server_password,
+                    nickserv_password,
+                    sasl_password,
+                    verify_tls,
                 },
             )))
         });

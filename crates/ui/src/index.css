@@ -2301,6 +2301,92 @@ h3 {
   margin-bottom: 12px;
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   Channel Setup Journey
+   ═══════════════════════════════════════════════════════════════ */
+
+.channel-journey {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.channel-journey-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.channel-journey-icon {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.channel-journey-steps {
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)) !important;
+}
+
+.channel-journey-content {
+  min-height: 180px;
+}
+
+.channel-journey-step-title {
+  margin: 0 0 8px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.channel-journey-description p {
+  margin: 0 0 6px 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-soft);
+}
+
+.channel-journey-description code {
+  background: var(--panel-subtle);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.channel-journey-description a {
+  color: var(--brand);
+  text-decoration: underline;
+}
+
+.channel-journey-description strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.channel-journey-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.channel-journey-error {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  font-size: 12px;
+}
+
+.channel-journey-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-subtle);
+  font-size: 12px;
+}
+
 .toast-stack {
   position: fixed;
   top: 52px;

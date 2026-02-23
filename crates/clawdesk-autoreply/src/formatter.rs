@@ -65,31 +65,13 @@ impl ChannelConstraints {
                 max_split_parts: 5,
                 continuation_prefix: None,
             },
-            ChannelId::Signal => Self {
-                max_length: 4096,
-                supports_markdown: false,
-                supports_html: false,
-                supports_code_blocks: false,
-                supports_media: true,
-                max_split_parts: 3,
-                continuation_prefix: None,
-            },
-            ChannelId::IMessage => Self {
-                max_length: 20000,
-                supports_markdown: false,
-                supports_html: false,
-                supports_code_blocks: false,
-                supports_media: true,
-                max_split_parts: 3,
-                continuation_prefix: None,
-            },
-            ChannelId::Matrix => Self {
+            ChannelId::Internal | ChannelId::WebChat => Self {
                 max_length: 65536,
-                supports_markdown: true,
-                supports_html: true,
-                supports_code_blocks: true,
+                supports_markdown: false,
+                supports_html: false,
+                supports_code_blocks: false,
                 supports_media: true,
-                max_split_parts: 5,
+                max_split_parts: 1,
                 continuation_prefix: None,
             },
             _ => Self {
@@ -286,9 +268,9 @@ mod tests {
     }
 
     #[test]
-    fn test_markdown_stripped_for_signal() {
+    fn test_plain_text_stripped() {
         let md = "**bold** and _italic_ and ## heading";
-        let segments = ResponseFormatter::format(md, &ChannelId::Signal);
+        let segments = ResponseFormatter::format(md, &ChannelId::Internal);
         assert_eq!(segments.len(), 1);
         assert!(!segments[0].text.contains("**"));
         assert!(!segments[0].text.contains("##"));
@@ -313,6 +295,6 @@ mod tests {
             ChannelConstraints::for_channel(&ChannelId::Telegram).max_length,
             4096
         );
-        assert!(!ChannelConstraints::for_channel(&ChannelId::Signal).supports_markdown);
+        assert!(!ChannelConstraints::for_channel(&ChannelId::Internal).supports_markdown);
     }
 }

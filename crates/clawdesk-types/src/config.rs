@@ -167,12 +167,6 @@ pub struct ChannelConfigs {
     pub slack: Option<SlackConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub whatsapp: Option<WhatsAppConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signal: Option<SignalConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub matrix: Option<MatrixConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub msteams: Option<MsTeamsConfig>,
 }
 
 /// LLM provider configurations.
@@ -270,25 +264,6 @@ pub struct SlackConfig {
 pub struct WhatsAppConfig {
     pub phone_number: String,
     pub api_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignalConfig {
-    pub phone_number: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MatrixConfig {
-    pub homeserver_url: String,
-    pub user_id: String,
-    pub access_token: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MsTeamsConfig {
-    pub app_id: String,
-    pub app_secret: String,
-    pub tenant_id: String,
 }
 
 // ---------------------------------------------------------------------------

@@ -167,6 +167,12 @@ im = "15"
 parking_lot = "0.12"
 dashmap = "5.5"
 
+# --- iMessage / IRC / WhatsApp storage ---
+rusqlite = { version = "0.32", features = ["bundled"] }
+directories = "5"
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
+
 [profile.release]
 opt-level = 3
 lto = "fat"
