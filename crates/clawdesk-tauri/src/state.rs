@@ -589,7 +589,7 @@ impl clawdesk_cron::executor::AgentExecutor for CronAgentExecutor {
 }
 
 /// No-op delivery handler for desktop — results are delivered through Tauri events.
-struct NoOpDelivery;
+pub(crate) struct NoOpDelivery;
 
 #[async_trait::async_trait]
 impl clawdesk_cron::executor::DeliveryHandler for NoOpDelivery {
@@ -601,6 +601,32 @@ impl clawdesk_cron::executor::DeliveryHandler for NoOpDelivery {
         // Desktop app delivers cron results via emit("routine:executed") events,
         // not through the DeliveryHandler trait.
         Ok(())
+    }
+}
+
+/// No-op plugin factory — plugins loaded at runtime, not at boot.
+pub(crate) struct NoopPluginFactory;
+
+#[async_trait::async_trait]
+impl clawdesk_plugin::PluginFactory for NoopPluginFactory {
+    async fn create(
+        &self,
+        manifest: &clawdesk_types::plugin::PluginManifest,
+    ) -> Result<std::sync::Arc<dyn clawdesk_plugin::PluginInstance>, clawdesk_types::error::PluginError> {
+        Err(clawdesk_types::error::PluginError::LoadFailed {
+            name: manifest.name.clone(),
+            detail: "No plugin factory configured".into(),
+        })
+    }
+}
+
+/// No-op agent executor — cron tasks are handled differently in the desktop app.
+pub(crate) struct NoopAgentExecutor;
+
+#[async_trait::async_trait]
+impl clawdesk_cron::executor::AgentExecutor for NoopAgentExecutor {
+    async fn execute(&self, _prompt: &str, _agent_id: Option<&str>) -> Result<String, String> {
+        Err("no-op executor".to_string())
     }
 }
 

@@ -312,6 +312,96 @@ pub fn run() {
                 warn!("Startup health check: {} warning(s)", warnings.len());
             }
 
+            // ── Embedded gateway server ──────────────────────────────
+            // Spawn the HTTP/WS gateway on localhost:18789 so channel
+            // webhooks, the OpenAI-compatible API, and A2A protocol
+            // work without running `clawdesk-cli serve` separately.
+            {
+                use clawdesk_channel::inbound_adapter::InboundAdapterRegistry;
+                use clawdesk_channel::registry::ChannelRegistry;
+                use clawdesk_channels::factory::ChannelFactory;
+                use clawdesk_gateway::{GatewayConfig, state::GatewayState};
+
+                // Build fresh registries for the gateway — the gateway uses ArcSwap
+                // for lock-free reads, while AppState uses RwLock. They operate
+                // independently; the gateway handles external HTTP/WS traffic.
+                let gw_channels = ChannelRegistry::new();
+                let gw_providers = clawdesk_providers::registry::ProviderRegistry::new();
+                let gw_tools = clawdesk_agents::ToolRegistry::new();
+
+                // Open an in-memory SochStore for the gateway (the desktop app
+                // owns the on-disk store — the gateway is just the HTTP layer).
+                let gw_store = match clawdesk_sochdb::SochStore::open_in_memory() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("Gateway SochStore failed, skipping embedded gateway: {}", e);
+                        // Skip gateway but continue the rest of setup
+                        return Ok(());
+                    }
+                };
+
+                let gw_plugin_host = clawdesk_plugin::PluginHost::new(
+                    std::sync::Arc::new(state::NoopPluginFactory),
+                    128,
+                );
+                let gw_cron = clawdesk_cron::CronManager::new(
+                    std::sync::Arc::new(state::NoopAgentExecutor),
+                    std::sync::Arc::new(state::NoOpDelivery),
+                );
+
+                // Skills
+                let skills_dir = std::env::var("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(".clawdesk")
+                    .join("data")
+                    .join("skills");
+                let _ = std::fs::create_dir_all(&skills_dir);
+                let gw_skill_loader = clawdesk_skills::loader::SkillLoader::new(skills_dir);
+                let gw_skills = clawdesk_skills::registry::SkillRegistry::new();
+
+                let gw_factory = ChannelFactory::with_builtins();
+                let gw_inbound = InboundAdapterRegistry::new(256);
+
+                let cancel = state.cancel.clone();
+
+                let gw_state = std::sync::Arc::new(GatewayState::new(
+                    gw_channels,
+                    gw_providers,
+                    gw_tools,
+                    gw_store,
+                    gw_plugin_host,
+                    gw_cron,
+                    gw_skills,
+                    gw_skill_loader,
+                    gw_factory,
+                    cancel.clone(),
+                    gw_inbound,
+                ));
+
+                let port: u16 = std::env::var("CLAWDESK_GATEWAY_PORT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(18789);
+
+                let config = GatewayConfig {
+                    host: "127.0.0.1".to_string(),
+                    port,
+                    ..Default::default()
+                };
+
+                // Spawn on the Tokio runtime — runs until the app's
+                // CancellationToken is triggered on exit.
+                tokio::spawn(async move {
+                    info!(port, "Starting embedded gateway server");
+                    if let Err(e) = clawdesk_gateway::serve(config, gw_state, cancel).await {
+                        error!("Embedded gateway exited with error: {}", e);
+                    }
+                });
+
+                info!(port, "Embedded gateway server spawned on localhost");
+            }
+
             // T25: Initialize OTEL tracer if endpoint is configured
             if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
                 info!(endpoint = %endpoint, "Initializing OpenTelemetry tracer");
@@ -359,6 +449,9 @@ pub fn run() {
                 tauri::RunEvent::ExitRequested { .. } => {
                     // Flush all pending state to SochDB + ThreadStore before exit
                     let state: tauri::State<'_, AppState> = app_handle.state();
+                    // Signal the embedded gateway (and any other CancellationToken
+                    // consumers) to shut down gracefully.
+                    state.cancel.cancel();
                     info!("App exit requested — flushing state to SochDB + ThreadStore");
                     // Capture session count before persist for debug logging
                     let session_count = state.sessions.read().map(|s| s.len()).unwrap_or(0);
