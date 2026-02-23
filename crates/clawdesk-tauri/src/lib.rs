@@ -94,6 +94,7 @@ pub fn run() {
             commands::update_channel,
             commands::disconnect_channel,
             commands::test_llm_connection,
+            commands::sync_channel_provider,
             // ── T15: Session Export ────────────────────────────────
             commands::export_session_markdown,
             commands::export_session_json,

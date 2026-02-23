@@ -71,6 +71,19 @@ use tracing::{error, info, warn};
 
 // Types serialized to the frontend
 
+/// Provider configuration synced from the UI for use by channel adapters.
+///
+/// When the user picks a provider in the UI (e.g. "Local (OpenAI Compatible)"
+/// with a base URL), this gets stored in `AppState` so the `ChannelMessageSink`
+/// can construct the same provider for inbound Discord/Telegram messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelProviderOverride {
+    pub provider: String,
+    pub model: String,
+    pub api_key: String,
+    pub base_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DesktopAgent {
@@ -464,6 +477,11 @@ pub struct AppState {
     // ── Notifications (hot cache — persisted to SochDB) ──
     pub notification_history: RwLock<Vec<NotificationInfo>>,
 
+    // ── Channel provider override (synced from UI) ──
+    /// The active provider configuration from the UI, used by ChannelMessageSink
+    /// to construct one-shot providers for inbound channel messages (Discord, etc.).
+    pub channel_provider: RwLock<Option<ChannelProviderOverride>>,
+
     // ── Clipboard (hot cache — persisted to SochDB) ──
     pub clipboard_history: RwLock<Vec<ClipboardEntry>>,
 
@@ -691,22 +709,94 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             return;
         };
 
-        // 2. Resolve provider from negotiator
+        // 2. Resolve provider — try channel_provider override first, then negotiator
         let model_id = AppState::resolve_model_id(&agent.model);
         let required = ProviderCaps::TEXT_COMPLETION.union(ProviderCaps::SYSTEM_PROMPT);
+
+        // Try the UI-synced channel provider override first.
+        // This creates a one-shot provider from the user's saved settings
+        // (e.g. "Local (OpenAI Compatible)" with a custom base URL).
         let provider: Arc<dyn Provider> = {
-            let neg = match self.negotiator.read() {
-                Ok(n) => n,
-                Err(e) => {
-                    error!("Negotiator lock poisoned: {e}");
-                    return;
-                }
+            let channel_prov = {
+                let state = self.app_handle.state::<AppState>();
+                state.channel_provider.read().ok().and_then(|g| g.clone())
             };
-            match neg.resolve_model(&model_id, required) {
-                Some((p, _)) => Arc::clone(p),
-                None => {
-                    warn!(model = %agent.model, "No provider for model — dropping message");
-                    return;
+
+            if let Some(ref cp) = channel_prov {
+                info!(
+                    provider = %cp.provider,
+                    model = %cp.model,
+                    base_url = %cp.base_url,
+                    "Using channel_provider override for inbound message"
+                );
+                match cp.provider.as_str() {
+                    "Anthropic" => {
+                        use clawdesk_providers::anthropic::AnthropicProvider;
+                        Arc::new(AnthropicProvider::new(cp.api_key.clone(), Some(model_id.clone())))
+                    }
+                    "OpenAI" => {
+                        use clawdesk_providers::openai::OpenAiProvider;
+                        let base = if cp.base_url.is_empty() { None } else { Some(cp.base_url.clone()) };
+                        Arc::new(OpenAiProvider::new(cp.api_key.clone(), base, Some(model_id.clone())))
+                    }
+                    "Ollama (Local)" | "ollama" => {
+                        use clawdesk_providers::ollama::OllamaProvider;
+                        let base = if cp.base_url.is_empty() { None } else { Some(cp.base_url.clone()) };
+                        Arc::new(OllamaProvider::new(base, Some(model_id.clone())))
+                    }
+                    "Local (OpenAI Compatible)" | "local_compatible" => {
+                        use clawdesk_providers::compatible::{CompatibleConfig, OpenAiCompatibleProvider};
+                        let base_url = if cp.base_url.is_empty() {
+                            "http://localhost:8080/v1".to_string()
+                        } else {
+                            cp.base_url.clone()
+                        };
+                        let config = CompatibleConfig::new("local_compatible", &base_url, &cp.api_key)
+                            .with_default_model(model_id.clone());
+                        Arc::new(OpenAiCompatibleProvider::new(config))
+                    }
+                    "Google" => {
+                        use clawdesk_providers::gemini::GeminiProvider;
+                        Arc::new(GeminiProvider::new(cp.api_key.clone(), Some(model_id.clone())))
+                    }
+                    _ => {
+                        // Unknown override provider — fall through to negotiator
+                        warn!(provider = %cp.provider, "Unknown channel_provider — trying negotiator");
+                        let neg = match self.negotiator.read() {
+                            Ok(n) => n,
+                            Err(e) => { error!("Negotiator lock poisoned: {e}"); return; }
+                        };
+                        match neg.resolve_model(&model_id, required) {
+                            Some((p, _)) => Arc::clone(p),
+                            None => {
+                                let state = self.app_handle.state::<AppState>();
+                                match state.resolve_provider(&agent.model) {
+                                    Ok(p) => p,
+                                    Err(e) => { warn!(error = %e, "No provider available — dropping message"); return; }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No channel_provider override — use negotiator → resolve_provider fallback
+                let neg = match self.negotiator.read() {
+                    Ok(n) => n,
+                    Err(e) => { error!("Negotiator lock poisoned: {e}"); return; }
+                };
+                match neg.resolve_model(&model_id, required) {
+                    Some((p, _)) => Arc::clone(p),
+                    None => {
+                        drop(neg);
+                        let state = self.app_handle.state::<AppState>();
+                        match state.resolve_provider(&agent.model) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                warn!(model = %agent.model, error = %e, "No provider for model — dropping message");
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         };
@@ -1435,6 +1525,9 @@ impl AppState {
 
             // ── Notifications (hydrated from SochDB) ──
             notification_history: RwLock::new(notification_history),
+
+            // ── Channel provider override (not yet synced from UI) ──
+            channel_provider: RwLock::new(None),
 
             // ── Clipboard (hydrated from SochDB) ──
             clipboard_history: RwLock::new(clipboard_history),

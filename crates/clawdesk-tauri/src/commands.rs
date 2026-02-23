@@ -4567,3 +4567,40 @@ fn build_dynamic_spawn_fn(
         })
     })
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Channel provider sync — lets the UI push its active provider config
+// to the Rust backend so channel adapters (Discord, Telegram, etc.)
+// can use the same provider/model the user picked in the UI.
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SyncChannelProviderRequest {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub base_url: String,
+}
+
+#[tauri::command]
+pub async fn sync_channel_provider(
+    request: SyncChannelProviderRequest,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let override_cfg = ChannelProviderOverride {
+        provider: request.provider.clone(),
+        model: request.model.clone(),
+        api_key: request.api_key.clone(),
+        base_url: request.base_url.clone(),
+    };
+    tracing::info!(
+        provider = %request.provider,
+        model = %request.model,
+        base_url = %request.base_url,
+        "Channel provider override synced from UI"
+    );
+    *state.channel_provider.write().map_err(|e| format!("Lock poisoned: {e}"))? = Some(override_cfg);
+    Ok("ok".into())
+}

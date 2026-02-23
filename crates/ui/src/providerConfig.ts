@@ -9,6 +9,8 @@
  * are kept in sync with the active provider for backward compatibility.
  */
 
+import { invoke } from "@tauri-apps/api/core";
+
 export interface ProviderConfig {
   /** Unique id (nanoid-style, generated on creation) */
   id: string;
@@ -94,14 +96,40 @@ export function syncLegacyKeys(config: ProviderConfig): void {
   window.localStorage.setItem("clawdesk.base_url", config.baseUrl);
   window.localStorage.setItem("clawdesk.project_id", config.projectId);
   window.localStorage.setItem("clawdesk.location", config.location);
+  // Push the active provider to the Rust backend so channel adapters
+  // (Discord, Telegram, etc.) can use the same provider/model.
+  syncChannelProviderToBackend(config);
 }
 
-/** Get the active provider config (or first one, or null) */
+/**
+ * Push the active provider config to the Rust backend.
+ * Channel adapters (Discord, Telegram) run server-side and cannot read
+ * browser localStorage — this IPC call bridges that gap.
+ */
+function syncChannelProviderToBackend(config: ProviderConfig): void {
+  invoke("sync_channel_provider", {
+    request: {
+      provider: config.provider,
+      model: config.model,
+      api_key: config.apiKey,
+      base_url: config.baseUrl,
+    },
+  }).catch((err) => {
+    console.warn("[providerConfig] Failed to sync channel provider:", err);
+  });
+}
+
+/** Get the active provider config (or first one, or null).
+ *  Also syncs the active provider to the Rust backend on first call
+ *  so channel adapters (Discord, Telegram) know which provider to use. */
 export function getActiveProvider(): ProviderConfig | null {
   const configs = loadProviders();
   if (configs.length === 0) return null;
   const activeId = getActiveProviderId();
-  return configs.find((c) => c.id === activeId) || configs[0];
+  const active = configs.find((c) => c.id === activeId) || configs[0];
+  // Ensure the backend knows about the active provider at startup
+  if (active) syncChannelProviderToBackend(active);
+  return active;
 }
 
 /** Create a new blank provider config */
