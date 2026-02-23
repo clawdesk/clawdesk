@@ -22,11 +22,13 @@
 //! Uses Tauri 2.0's built-in `tauri::tray` API (requires `tray-icon` feature).
 
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder},
+    image::Image,
+    menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
     tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
     Emitter, Manager,
 };
-use tracing::info;
+use tauri_plugin_autostart::ManagerExt;
+use tracing::{info, warn};
 use std::sync::{Arc, RwLock};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -196,6 +198,17 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .enabled(false)
         .build(app)?;
 
+    // Auto-launch toggle — check current state from plugin
+    let autostart_enabled = app
+        .autolaunch()
+        .is_enabled()
+        .unwrap_or(false);
+
+    let start_at_login = CheckMenuItemBuilder::new("Start at Login")
+        .id("start_at_login")
+        .checked(autostart_enabled)
+        .build(app)?;
+
     let quit = MenuItemBuilder::new("Quit ClawDesk")
         .id("quit")
         .build(app)?;
@@ -207,11 +220,20 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .item(&new_chat)
         .item(&settings)
         .separator()
+        .item(&start_at_login)
+        .separator()
         .item(&quit)
         .build()?;
 
+    // Load the tray icon image (44×44 template, black on transparent)
+    let icon_bytes = include_bytes!("../icons/tray-icon.png");
+    let icon = Image::from_bytes(icon_bytes)
+        .expect("Failed to load tray icon");
+
     // Build the tray icon
     let _tray = TrayIconBuilder::new()
+        .icon(icon)
+        .icon_as_template(true)
         .menu(&menu)
         .tooltip("ClawDesk — Checking status...")
         .on_menu_event(move |app, event| {
@@ -239,6 +261,23 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.show();
                         let _ = window.set_focus();
+                    }
+                }
+                "start_at_login" => {
+                    let autolaunch = app.autolaunch();
+                    let currently = autolaunch.is_enabled().unwrap_or(false);
+                    if currently {
+                        if let Err(e) = autolaunch.disable() {
+                            warn!("Failed to disable autostart: {e}");
+                        } else {
+                            info!("Auto-launch disabled");
+                        }
+                    } else {
+                        if let Err(e) = autolaunch.enable() {
+                            warn!("Failed to enable autostart: {e}");
+                        } else {
+                            info!("Auto-launch enabled");
+                        }
                     }
                 }
                 "quit" => {

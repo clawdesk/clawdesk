@@ -39,8 +39,9 @@ clawdesk-infra = { workspace = true }
 clawdesk-memory = { workspace = true }
 clawdesk-threads = { workspace = true }
 base64 = { workspace = true }
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-shell = "2"
+tauri-plugin-autostart = { path = "../../../plugins-workspace/plugins/autostart" }
 tauri-plugin-single-instance = { path = "../../../plugins-workspace/plugins/single-instance" }
 serde = { workspace = true }
 serde_json = { workspace = true }

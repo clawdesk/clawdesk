@@ -43,6 +43,10 @@ use tracing::{error, info, warn};
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             // A second instance was launched — focus the existing window instead
             if let Some(window) = app.get_webview_window("main") {
@@ -555,27 +559,26 @@ pub fn run() {
                     info!("Exit flush complete — checkpoint + fsync done");
                 }
                 // On macOS, Cmd+Q sends CloseRequested on the window
-                // BEFORE ExitRequested. We flush here too as a safety net —
-                // if the process is killed between CloseRequested and
-                // ExitRequested, at least this flush happened.
+                // BEFORE ExitRequested. When the user closes the window via
+                // the red button, we hide to tray instead of exiting so the
+                // gateway, channels, and background services keep running.
                 tauri::RunEvent::WindowEvent {
-                    event: tauri::WindowEvent::CloseRequested { .. },
+                    event: tauri::WindowEvent::CloseRequested { api, .. },
+                    label,
                     ..
                 } => {
+                    // Prevent the window from actually closing — hide to tray
+                    api.prevent_close();
+                    if let Some(window) = app_handle.get_webview_window(&label) {
+                        let _ = window.hide();
+                    }
+                    info!("Window hidden to tray — background services still running");
+
+                    // Flush state as a safety measure
                     let state: tauri::State<'_, AppState> = app_handle.state();
-                    info!("Window close requested — flushing state (macOS safety)");
                     state.persist();
                     if let Err(e) = state.soch_store.checkpoint() {
-                        error!(error = %e, "SochDB checkpoint failed on window close");
-                    }
-                    if let Err(e) = state.soch_store.sync() {
-                        error!(error = %e, "SochDB sync failed on window close");
-                    }
-                    if let Err(e) = state.thread_store.checkpoint_and_gc() {
-                        error!(error = %e, "ThreadStore checkpoint failed on window close");
-                    }
-                    if let Err(e) = state.thread_store.sync() {
-                        error!(error = %e, "ThreadStore sync failed on window close");
+                        error!(error = %e, "SochDB checkpoint failed on window hide");
                     }
                 }
                 _ => {}
