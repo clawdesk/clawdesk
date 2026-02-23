@@ -396,6 +396,10 @@ pub struct AppState {
     pub provider_registry: RwLock<ProviderRegistry>,
     pub tool_registry: Arc<ToolRegistry>,
     pub channel_registry: Arc<RwLock<ChannelRegistry>>,
+    /// Saved channel configurations (channel_id → config key-value pairs).
+    /// Persisted in-memory; the `update_channel` / `disconnect_channel` commands
+    /// read and write this map so the Settings UI can configure adapters.
+    pub channel_configs: RwLock<HashMap<String, HashMap<String, String>>>,
     pub scanner: Arc<CascadeScanner>,
     pub scanner_pattern_count: usize,
     pub audit_logger: Arc<AuditLogger>,
@@ -1205,6 +1209,7 @@ impl AppState {
             provider_registry: RwLock::new(provider_registry),
             tool_registry,
             channel_registry,
+            channel_configs: RwLock::new(HashMap::new()),
             scanner: Arc::new(scanner),
             scanner_pattern_count: pattern_count,
             audit_logger: Arc::new(audit_logger),

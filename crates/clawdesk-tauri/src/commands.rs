@@ -3958,6 +3958,8 @@ pub struct ChannelInfo {
     pub channel_type: String,
     pub capabilities: Vec<String>,
     pub configured: bool,
+    #[serde(default)]
+    pub config: std::collections::HashMap<String, String>,
 }
 
 /// List available channel adapters.
@@ -3993,9 +3995,13 @@ pub async fn list_channels(
                 channel_type: format!("{:?}", cid),
                 capabilities: caps,
                 configured: true,
+                config: std::collections::HashMap::new(),
             });
         }
     }
+
+    // Read saved channel configs so we can merge them into the catalog entries.
+    let saved_configs = state.channel_configs.read().map_err(|e| e.to_string())?;
 
     // ── Phase 2: Catalog — known adapters not yet registered ──
     let catalog: Vec<(&str, &str, &str, bool)> = vec![
@@ -4014,17 +4020,80 @@ pub async fn list_channels(
         if seen.contains(id) {
             continue; // already emitted from registry
         }
+        let has_saved = saved_configs.contains_key(id);
+        let cfg = saved_configs.get(id).cloned().unwrap_or_default();
         result.push(ChannelInfo {
             id: id.into(),
             name: name.into(),
-            status: if env_ok { "available".into() } else { "available".into() },
+            status: if has_saved { "active".into() } else { "available".into() },
             channel_type: channel_type.into(),
             capabilities: vec![],
-            configured: env_ok,
+            configured: env_ok || has_saved,
+            config: cfg,
         });
     }
 
     Ok(result)
+}
+
+/// Save configuration for a channel adapter.
+///
+/// Stores the key-value config in `AppState::channel_configs` and
+/// sets corresponding environment variables so channel bootstrap
+/// can pick them up on next restart.
+#[tauri::command]
+pub async fn update_channel(
+    state: tauri::State<'_, AppState>,
+    channel_id: String,
+    config: std::collections::HashMap<String, String>,
+) -> Result<bool, String> {
+    // Map well-known config keys → env vars so channel adapters can bootstrap.
+    let env_mappings: &[(&str, &str, &str)] = &[
+        ("telegram", "bot_token", "TELEGRAM_BOT_TOKEN"),
+        ("discord", "bot_token", "DISCORD_TOKEN"),
+        ("discord", "application_id", "DISCORD_APPLICATION_ID"),
+        ("discord", "guild_id", "DISCORD_GUILD_ID"),
+        ("slack", "bot_token", "SLACK_BOT_TOKEN"),
+        ("slack", "app_token", "SLACK_APP_TOKEN"),
+        ("whatsapp", "access_token", "WHATSAPP_TOKEN"),
+        ("whatsapp", "phone_number_id", "WHATSAPP_PHONE_NUMBER_ID"),
+        ("whatsapp", "app_secret", "WHATSAPP_APP_SECRET"),
+        ("email", "imap_host", "IMAP_HOST"),
+        ("email", "smtp_host", "SMTP_HOST"),
+        ("email", "email_user", "EMAIL_USER"),
+        ("email", "email_password", "EMAIL_PASSWORD"),
+        ("irc", "server", "IRC_SERVER"),
+        ("irc", "nickname", "IRC_NICKNAME"),
+    ];
+
+    for &(ch, key, env_var) in env_mappings {
+        if channel_id == ch {
+            if let Some(val) = config.get(key) {
+                if !val.is_empty() {
+                    std::env::set_var(env_var, val);
+                }
+            }
+        }
+    }
+
+    // Persist in AppState
+    let mut configs = state.channel_configs.write().map_err(|e| e.to_string())?;
+    configs.insert(channel_id.clone(), config);
+
+    tracing::info!(channel = %channel_id, "Channel config saved");
+    Ok(true)
+}
+
+/// Disconnect a channel adapter — clears its saved config.
+#[tauri::command]
+pub async fn disconnect_channel(
+    state: tauri::State<'_, AppState>,
+    channel_id: String,
+) -> Result<bool, String> {
+    let mut configs = state.channel_configs.write().map_err(|e| e.to_string())?;
+    configs.remove(&channel_id);
+    tracing::info!(channel = %channel_id, "Channel disconnected");
+    Ok(true)
 }
 
 // ═══════════════════════════════════════════════════════════

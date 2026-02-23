@@ -87,6 +87,8 @@ pub fn run() {
             commands::get_config,
             commands::list_models,
             commands::list_channels,
+            commands::update_channel,
+            commands::disconnect_channel,
             commands::test_llm_connection,
             // ── T15: Session Export ────────────────────────────────
             commands::export_session_markdown,
