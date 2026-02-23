@@ -2473,7 +2473,23 @@ pub async fn clear_all_chats(state: State<'_, AppState>) -> Result<u32, String> 
     if let Err(e) = state.soch_store.delete_prefix("tool_history/") {
         tracing::warn!(error = %e, "clear_all_chats: failed to delete tool_history prefix");
     }
-    tracing::info!(deleted = count, "All chat history cleared");
+    // 4. Delete old-format chat_sessions/ to prevent migration ghost on restart.
+    //    Without this, hydrate code sees empty chats/ and re-imports from chat_sessions/.
+    if let Err(e) = state.soch_store.delete_prefix("chat_sessions/") {
+        tracing::warn!(error = %e, "clear_all_chats: failed to delete old chat_sessions prefix");
+    }
+    // 5. Delete ConversationStore per-message records (sessions/{key}/messages/{ts}).
+    //    These are written by the GAP-5 dual-write and would otherwise be orphaned.
+    if let Err(e) = state.soch_store.delete_prefix("sessions/") {
+        tracing::warn!(error = %e, "clear_all_chats: failed to delete sessions prefix");
+    }
+    // 6. Checkpoint the WAL so tombstones are flushed and the WAL is truncated.
+    //    Without this, a crash/restart could replay old Data records from the WAL
+    //    and resurrect deleted entries.
+    if let Err(e) = state.soch_store.checkpoint() {
+        tracing::warn!(error = %e, "clear_all_chats: checkpoint after clear failed");
+    }
+    tracing::info!(deleted = count, "All chat history cleared (chats/ + tool_history/ + chat_sessions/ + sessions/)");
     Ok(count)
 }
 
