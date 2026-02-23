@@ -848,6 +848,7 @@ export function SettingsPage({
                               <option>Cohere</option>
                               <option>Vertex AI</option>
                               <option>Ollama (Local)</option>
+                              <option>Local (OpenAI Compatible)</option>
                             </select>
                           </label>
                           <label className="field-label" style={{ marginTop: 10 }}>
@@ -872,9 +873,9 @@ export function SettingsPage({
                               <input
                                 type={showKey ? "text" : "password"}
                                 value={draft.apiKey}
-                                placeholder={draft.provider.toLowerCase().includes("ollama") ? "Not required for local Ollama" : "Paste your API key"}
+                                placeholder={draft.provider.toLowerCase().includes("ollama") || draft.provider === "Local (OpenAI Compatible)" ? "Not required for local models" : "Paste your API key"}
                                 onChange={(e) => setEditDraft({ ...draft, apiKey: e.target.value })}
-                                disabled={draft.provider.toLowerCase().includes("ollama")}
+                                disabled={draft.provider.toLowerCase().includes("ollama") || draft.provider === "Local (OpenAI Compatible)"}
                                 className="input"
                                 style={{ flex: 1 }}
                               />
@@ -888,13 +889,13 @@ export function SettingsPage({
                             </div>
                           </label>
 
-                          {(draft.provider === "Azure OpenAI" || draft.provider === "OpenAI" || draft.provider === "Ollama (Local)") && (
+                          {(draft.provider === "Azure OpenAI" || draft.provider === "OpenAI" || draft.provider === "Ollama (Local)" || draft.provider === "Local (OpenAI Compatible)") && (
                             <label className="field-label" style={{ marginTop: 10 }}>
                               Base URL / Endpoint
                               <input
                                 type="url"
                                 value={draft.baseUrl}
-                                placeholder={draft.provider === "Azure OpenAI" ? "https://your-resource.openai.azure.com" : "http://localhost:11434"}
+                                placeholder={draft.provider === "Azure OpenAI" ? "https://your-resource.openai.azure.com" : draft.provider === "Local (OpenAI Compatible)" ? "http://localhost:8080/v1" : "http://localhost:11434"}
                                 onChange={(e) => setEditDraft({ ...draft, baseUrl: e.target.value })}
                                 className="input"
                               />

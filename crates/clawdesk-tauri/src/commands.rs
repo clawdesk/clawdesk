@@ -844,6 +844,15 @@ pub async fn send_message(
             "Google" => Arc::new(GeminiProvider::new(key, Some(model_full_id.clone()))),
             "Cohere" => Arc::new(CohereProvider::new(key, base, Some(model_full_id.clone()))),
             "Ollama (Local)" | "ollama" => Arc::new(OllamaProvider::new(base, Some(model_full_id.clone()))),
+            "Local (OpenAI Compatible)" | "local_compatible" => {
+                // llama.cpp, vLLM, text-generation-webui, LM Studio, etc.
+                // These serve an OpenAI-compatible /v1/chat/completions endpoint.
+                use clawdesk_providers::compatible::{CompatibleConfig, OpenAiCompatibleProvider};
+                let base_url = base.unwrap_or_else(|| "http://localhost:8080/v1".to_string());
+                let config = CompatibleConfig::new("local_compatible", &base_url, key)
+                    .with_default_model(model_full_id.clone());
+                Arc::new(OpenAiCompatibleProvider::new(config))
+            }
             _ => {
                 tracing::warn!(provider = %prov_name, "Unknown provider_override — falling back to negotiator");
                 let negotiator = state.negotiator.read().map_err(|e| e.to_string())?;

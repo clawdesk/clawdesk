@@ -40,6 +40,9 @@ const PROVIDER_MODELS: Record<string, { id: string; label: string }[]> = {
     { id: "codellama", label: "Code Llama" },
     { id: "deepseek-r1", label: "DeepSeek R1" },
   ],
+  "Local (OpenAI Compatible)": [
+    { id: "default", label: "Default Model" },
+  ],
 };
 
 export { PROVIDER_MODELS };
