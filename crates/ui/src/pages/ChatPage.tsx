@@ -1306,10 +1306,11 @@ export function ChatPage({
               /* Hero empty state */
               <div className="chat-hero">
                 <div className="chat-hero-content">
-                  <div className="chat-hero-icon">☁️</div>
+                  <div className="chat-hero-icon">✨</div>
                   <h1 className="chat-hero-title">
-                    Personal Assistant <span className="chat-hero-subtitle">with clawdesk</span>
+                    What can I help you with?
                   </h1>
+                  <p className="chat-hero-tagline">Your private AI assistant — everything runs locally on your device.</p>
                 </div>
 
                 {agents.length === 0 ? (
@@ -1360,7 +1361,7 @@ export function ChatPage({
                               <span className="chat-agent-option-icon">{a.icon}</span>
                               <div>
                                 <div className="chat-agent-option-name">{a.name}</div>
-                                <div className="chat-agent-option-meta">{a.model} · {a.skills.length} skills</div>
+                                <div className="chat-agent-option-meta">{a.model === "default" ? "Ready to use" : a.model}</div>
                               </div>
                               {a.status === "active" && <span className="status-dot status-ok" />}
                             </button>
@@ -1372,16 +1373,25 @@ export function ChatPage({
                     {/* Suggestion cards */}
                     <div className="chat-suggestions-grid">
                       {[
-                        { icon: "🎮", title: "Build a game", desc: "Snake in Python" },
-                        { icon: "📄", title: "Summarize PDF", desc: "Create a one-page summary" },
-                        { icon: "✏️", title: "Plan a feature", desc: "Create a PRD" },
-                        { icon: "🐞", title: "Debug code", desc: "Paste stack trace" }
+                        { icon: "✍️", title: "Write an email", desc: "Draft a professional response" },
+                        { icon: "📋", title: "Summarize this", desc: "Give me the key points" },
+                        { icon: "💡", title: "Brainstorm ideas", desc: "Help me think through options" },
+                        { icon: "📅", title: "Plan my week", desc: "Organize tasks and priorities" },
+                        { icon: "📝", title: "Write a document", desc: "Article, report, or proposal" },
+                        { icon: "🔍", title: "Research a topic", desc: "Find and summarize information" }
                       ].map((s, i) => (
                         <button
                           key={i}
                           className="chat-suggestion-tile"
                           style={{ animationDelay: `${i * 60}ms` } as React.CSSProperties}
-                          onClick={() => setInput(s.title + " " + s.desc)}
+                          onClick={() => {
+                            const prompt = s.title + ": " + s.desc;
+                            if (agent && !isSending) {
+                              sendMessage(prompt);
+                            } else {
+                              setInput(prompt);
+                            }
+                          }}
                         >
                           <div className="suggestion-icon">{s.icon}</div>
                           <div className="suggestion-content">
@@ -1500,7 +1510,7 @@ export function ChatPage({
               <div className="chat-composer">
                 <textarea
                   className="chat-composer-input"
-                  placeholder={agent ? "Ask anything... (⌘K for commands)" : "Create or select an agent first."}
+                  placeholder={agent ? "Type a message..." : "Create an assistant to get started"}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -1546,7 +1556,7 @@ export function ChatPage({
                       onSelect={setPerChatModel}
                       disabled={isSending}
                     />
-                    <div className="badge-safe">
+                    <div className="badge-safe" title="Safe Mode is on — your data stays on your device and is never sent to external servers without your permission.">
                       <Icon name="shield" /> Safe Mode
                     </div>
                   </div>

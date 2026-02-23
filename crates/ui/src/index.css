@@ -2622,17 +2622,25 @@ h3 {
 }
 
 .chat-hero-title {
-  font-size: 42px;
+  font-size: 36px;
   font-weight: 700;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.03em;
   color: var(--text);
-  line-height: 1.1;
+  line-height: 1.2;
 }
 
 .chat-hero-subtitle {
   color: var(--text-soft);
   font-weight: 400;
   margin-left: 8px;
+}
+
+.chat-hero-tagline {
+  color: var(--text-soft);
+  font-size: 15px;
+  margin-top: -8px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
 }
 
 .chat-hero-desc {
@@ -2756,15 +2764,15 @@ h3 {
 .chat-suggestions-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
-  max-width: 600px;
+  gap: 10px;
+  max-width: 680px;
   width: 100%;
   margin: 0 auto;
 }
 
 @media (min-width: 768px) {
   .chat-suggestions-grid {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
@@ -4493,6 +4501,26 @@ h6.md-heading {
   padding: 24px 28px;
   overflow-y: auto;
   height: 100%;
+}
+
+/* Quick create row */
+.quick-create-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.quick-create-input {
+  flex: 1;
+  font-size: 14px !important;
+  padding: 10px 14px !important;
+}
+
+.section-desc {
+  color: var(--text-soft);
+  font-size: 13px;
+  margin-top: 2px;
+  font-weight: 400;
 }
 
 .automation-template-grid {

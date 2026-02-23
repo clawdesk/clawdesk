@@ -846,43 +846,43 @@ export interface AgentTemplate {
 export const AGENT_TEMPLATES: AgentTemplate[] = [
   {
     name: "Research Assistant",
-    icon: "🔬",
+    icon: "�",
     color: "#6366f1",
     persona:
       "You are a thorough research assistant. Search the web, read papers, extract key findings, and cite your sources. Always provide structured summaries.",
     skills: ["web-search", "citations", "markdown"],
     model: "default",
-    description: "Deep research with citations and structured output",
+    description: "Find information and summarize it clearly",
   },
   {
-    name: "Code Builder",
-    icon: "⚡",
+    name: "Writing Helper",
+    icon: "✍️",
     color: "#10b981",
     persona:
-      "You are a senior software engineer. Write clean, tested code. Use best practices, proper error handling, and clear documentation. Run tests.",
-    skills: ["code-exec", "files", "git"],
-    model: "default",
-    description: "Write, test, and ship production code",
-  },
-  {
-    name: "Content Writer",
-    icon: "📝",
-    color: "#f59e0b",
-    persona:
-      "You are a professional writer. Create engaging content \u2014 articles, reports, documentation. Maintain consistent tone and structure.",
+      "You are a professional writer. Create engaging content — articles, reports, emails, documentation. Maintain consistent tone and structure.",
     skills: ["web-search", "markdown", "files"],
     model: "default",
-    description: "Professional writing with research backing",
+    description: "Draft emails, documents, and creative content",
   },
   {
-    name: "Daily Coordinator",
-    icon: "🎯",
-    color: "#ec4899",
+    name: "Daily Planner",
+    icon: "📅",
+    color: "#f59e0b",
     persona:
-      "You coordinate daily tasks. Check emails, summarize updates, schedule reminders. Be concise and actionable.",
+      "You help plan and organize daily tasks. Summarize what's important, set priorities, suggest time blocks, and keep track of to-dos. Be concise and actionable.",
     skills: ["email", "calendar", "cron", "alerts"],
     model: "default",
-    description: "Lightweight coordinator for daily workflows",
+    description: "Organize your day, tasks, and priorities",
+  },
+  {
+    name: "Problem Solver",
+    icon: "💡",
+    color: "#ec4899",
+    persona:
+      "You help think through problems step by step. Break down complex questions, brainstorm options, weigh pros and cons, and suggest solutions. Be clear and practical.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Think through decisions and brainstorm ideas",
   },
 ];
 

@@ -54,7 +54,7 @@ OpenClaw is incredibly capable — but running a Node.js gateway, wiring up chan
 | **Skill Registry** | 15 built-in skills ported from [OpenClaw's skill system](https://github.com/openclaw/openclaw), with hot-loading, activation/deactivation, and per-skill ACLs. |
 | **WireGuard Tunnel** | Peer-to-peer encrypted networking with invite-based device pairing. |
 | **Full Observability** | Real-time tracing, cost tracking, token budgeting, and tamper-evident audit logs. |
-| **Desktop UI** | Tauri 2.0 + React frontend with 5 navigation views (Now, Ask, Routines, Accounts, Library). |
+| **Desktop UI** | Tauri 2.0 + React frontend with intuitive navigation — Chat, Overview, Automations, Skills, Settings, and more. |
 
 ## Powered by SochDB
 

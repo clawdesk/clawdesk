@@ -9,18 +9,15 @@ import { DagCanvas } from "../components/DagCanvas";
 // ── Templates (from sample.js) ────────────────────────────────
 
 const AUTOMATION_TEMPLATES = [
-  { id: "a1", icon: "🐛", title: "Scan recent messages for issues", desc: "Check all channels for unresolved questions (last 24h) and flag for agents." },
-  { id: "a2", icon: "📊", title: "Daily cost & usage report", desc: "Summarize today's token usage, model breakdown, and cache hit rate." },
-  { id: "a3", icon: "🔒", title: "Security audit sweep", desc: "Run CascadeScanner on all agent personas and verify identity contracts." },
-  { id: "a4", icon: "🧠", title: "Memory compaction", desc: "Compact stale memory fragments in SochDB and rebuild HNSW indexes." },
-  { id: "a5", icon: "📡", title: "Channel health check", desc: "Ping all connected channels and report latency, errors, and rate limits." },
-  { id: "a6", icon: "🎯", title: "Agent performance summary", desc: "Summarize agent delegation patterns, A2A task success rates, and costs." },
-  { id: "a7", icon: "🔄", title: "Standup summary", desc: "Summarize yesterday's agent activity across all channels for standup." },
-  { id: "a8", icon: "🎮", title: "Build a classic game", desc: "Create a small browser game from a connected repo." },
-  { id: "a9", icon: "📈", title: "Suggest skill upgrades", desc: "From recent agent traces, suggest new skills to install or promote." },
-  { id: "a10", icon: "🧹", title: "Stale session cleanup", desc: "Archive sessions with no activity for 7+ days." },
-  { id: "a11", icon: "⚠️", title: "Rate limit monitor", desc: "Check rate limiter stats across channels and alert on near-limits." },
-  { id: "a12", icon: "🪙", title: "Cost alert", desc: "Alert if daily spend exceeds threshold across all providers." },
+  { id: "a1", icon: "�", title: "Email me a daily summary", desc: "Get a morning recap of what happened yesterday and what's planned today." },
+  { id: "a2", icon: "📋", title: "Summarize my unread messages", desc: "Check all channels and give me the highlights." },
+  { id: "a3", icon: "💰", title: "Alert me if spending is high", desc: "Send a notification when AI usage costs exceed my budget." },
+  { id: "a4", icon: "📊", title: "Weekly activity report", desc: "Create a report of what I accomplished this week." },
+  { id: "a5", icon: "🔔", title: "Remind me to follow up", desc: "Check for conversations that need a response and remind me." },
+  { id: "a6", icon: "🧹", title: "Clean up old conversations", desc: "Archive conversations that haven't been active in a while." },
+  { id: "a7", icon: "📝", title: "Prepare meeting notes", desc: "Draft an agenda and notes template for my upcoming meetings." },
+  { id: "a8", icon: "🔍", title: "Monitor a topic", desc: "Watch for mentions of a topic I care about and notify me." },
+  { id: "a9", icon: "📈", title: "Track my progress", desc: "Summarize how my tasks and goals are progressing." },
 ];
 
 const SCHED_DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
@@ -157,7 +154,7 @@ export function AutomationsPage({
     <>
     <PageLayout
       title="Automations"
-      subtitle="Automate work by setting up scheduled threads and pipelines."
+      subtitle="Set up routines that run on a schedule or with one click."
       actions={
         <button className="btn subtle" style={{ whiteSpace: "nowrap" }} onClick={() => { setEditingPipeline(null); setDesignerOpen(true); }}>
           + New Automation
@@ -165,6 +162,66 @@ export function AutomationsPage({
       }
       className="page-automations"
     >
+
+      {/* Quick create from natural language */}
+      {agents.length > 0 && (
+        <section className="section-card">
+          <div className="quick-create-row">
+            <input
+              className="input quick-create-input"
+              placeholder="Describe what you want automated, e.g. 'Send me a daily summary of my messages'"
+              value={draftPrompt}
+              onChange={(e) => setDraftPrompt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && draftPrompt.trim()) {
+                  setDraftName(draftPrompt.trim().slice(0, 60));
+                  const prebuilt: PipelineDescriptor = {
+                    id: "",
+                    name: draftPrompt.trim().slice(0, 60),
+                    description: draftPrompt.trim(),
+                    steps: [
+                      { label: "Input", node_type: "input", model: null, agent_id: null, x: 0, y: 0 },
+                      { label: draftPrompt.trim().slice(0, 40), node_type: "agent", model: "sonnet", agent_id: null, x: 200, y: 0 },
+                      { label: "Output", node_type: "output", model: null, agent_id: null, x: 400, y: 0 },
+                    ],
+                    edges: [[0, 1], [1, 2]],
+                    created: "",
+                  };
+                  setEditingPipeline(prebuilt);
+                  setDesignerOpen(true);
+                  setDraftPrompt("");
+                }
+              }}
+            />
+            <button
+              className="btn primary"
+              disabled={!draftPrompt.trim()}
+              onClick={() => {
+                if (draftPrompt.trim()) {
+                  setDraftName(draftPrompt.trim().slice(0, 60));
+                  const prebuilt: PipelineDescriptor = {
+                    id: "",
+                    name: draftPrompt.trim().slice(0, 60),
+                    description: draftPrompt.trim(),
+                    steps: [
+                      { label: "Input", node_type: "input", model: null, agent_id: null, x: 0, y: 0 },
+                      { label: draftPrompt.trim().slice(0, 40), node_type: "agent", model: "sonnet", agent_id: null, x: 200, y: 0 },
+                      { label: "Output", node_type: "output", model: null, agent_id: null, x: 400, y: 0 },
+                    ],
+                    edges: [[0, 1], [1, 2]],
+                    created: "",
+                  };
+                  setEditingPipeline(prebuilt);
+                  setDesignerOpen(true);
+                  setDraftPrompt("");
+                }
+              }}
+            >
+              Create
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* Existing pipelines */}
       {pipelines.length > 0 && (
@@ -180,23 +237,23 @@ export function AutomationsPage({
                   <div>
                     <div className="row-title">{p.name}</div>
                     <div className="row-sub">
-                      {p.steps.length} steps · {p.edges.length} edges · Created: {p.created}
+                      {p.steps.length} steps · Created: {new Date(p.created).toLocaleDateString([], { month: "short", day: "numeric" }) || p.created}
                     </div>
-                    {p.description && <div className="row-sub">{p.description}</div>}
+                    {p.description && <div className="row-sub" style={{ marginTop: 2, color: "var(--text-secondary)" }}>{p.description}</div>}
                   </div>
                   <div className="row-actions">
-                    <button
-                      className="btn subtle"
-                      onClick={() => setDagPreview(dagPreview?.id === p.id ? null : p)}
-                      title="DAG Preview"
-                    >
-                      DAG
-                    </button>
                     <button
                       className="btn subtle"
                       onClick={() => { setEditingPipeline(p); setDesignerOpen(true); }}
                     >
                       Edit
+                    </button>
+                    <button
+                      className="btn subtle"
+                      onClick={() => setDagPreview(dagPreview?.id === p.id ? null : p)}
+                      title="Show details"
+                    >
+                      Details
                     </button>
                     <button
                       className="btn primary"
@@ -241,7 +298,8 @@ export function AutomationsPage({
       ) : (
       <section className="section-card">
         <div className="section-head">
-          <h2>Start from a template</h2>
+          <h2>Popular templates</h2>
+          <p className="section-desc">Click any template to customize and set it up.</p>
         </div>
         <div className="automation-template-grid">
           {AUTOMATION_TEMPLATES.map((a) => (
