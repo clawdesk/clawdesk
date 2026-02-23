@@ -29,8 +29,10 @@ const SCHED_DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
 export interface AutomationsPageProps {
   pipelines: PipelineDescriptor[];
+  agents: { id: string; name: string; icon: string }[];
   onRefreshPipelines: () => void;
   pushToast: (text: string) => void;
+  onNavigate: (nav: string, options?: { threadId?: string }) => void;
 }
 
 // ── Component ─────────────────────────────────────────────────
@@ -39,8 +41,10 @@ import { PageLayout } from "../components/PageLayout";
 
 export function AutomationsPage({
   pipelines,
+  agents,
   onRefreshPipelines,
   pushToast,
+  onNavigate,
 }: AutomationsPageProps) {
   const [showCreate, setShowCreate] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
@@ -118,7 +122,7 @@ export function AutomationsPage({
     }
     try {
       const result = await api.runPipeline(pipelineId);
-      pushToast("Pipeline run completed.");
+      pushToast("Pipeline run completed. Check Logs for details.");
       // Update execution overlay with results
       if (result && result.steps) {
         const evMap = new Map<number, PipelineStepEvent>();
@@ -221,6 +225,20 @@ export function AutomationsPage({
       )}
 
       {/* Template grid */}
+      {agents.length === 0 ? (
+        <section className="section-card">
+          <div className="empty-state-action" style={{ padding: 32, textAlign: "center" }}>
+            <p style={{ fontSize: 16, marginBottom: 8 }}>Create an agent first to power your automations.</p>
+            <p className="settings-desc" style={{ marginBottom: 16 }}>Automations use your agents to run pipeline steps. Set up an agent in Settings, then come back here.</p>
+            <button className="btn primary" onClick={() => {
+              window.localStorage.setItem("clawdesk._settingsTab", "Agents");
+              onNavigate("settings");
+            }}>
+              Go to Settings → Agents
+            </button>
+          </div>
+        </section>
+      ) : (
       <section className="section-card">
         <div className="section-head">
           <h2>Start from a template</h2>
@@ -241,6 +259,7 @@ export function AutomationsPage({
           ))}
         </div>
       </section>
+      )}
 
       {/* Create Modal */}
       {showCreate && (

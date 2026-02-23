@@ -28,6 +28,7 @@ interface OverviewPageProps {
   plugins: PluginSummary[];
   peers: PeerInfo[];
   pushToast: (msg: string) => void;
+  onNavigate: (nav: string, options?: { threadId?: string }) => void;
 }
 
 export function OverviewPage({
@@ -40,6 +41,7 @@ export function OverviewPage({
   plugins,
   peers,
   pushToast,
+  onNavigate,
 }: OverviewPageProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -92,26 +94,91 @@ export function OverviewPage({
   return (
     <PageLayout title="Dashboard" subtitle="System Overview">
       <div className="dashboard-grid">
+
+        {/* ── Quick Actions ─────────────────────────────────────── */}
+        <div className="quick-actions-row">
+          <button className="quick-action-card" onClick={() => onNavigate("chat")}>
+            <Icon name="ask" className="w-5 h-5" />
+            <span>New Chat</span>
+          </button>
+          <button className="quick-action-card" onClick={() => onNavigate("automations")}>
+            <Icon name="routines" className="w-5 h-5" />
+            <span>New Automation</span>
+          </button>
+          <button className="quick-action-card" onClick={() => onNavigate("skills")}>
+            <Icon name="library" className="w-5 h-5" />
+            <span>Browse Skills</span>
+          </button>
+          <button className="quick-action-card" onClick={() => {
+            window.localStorage.setItem("clawdesk._settingsTab", "Providers");
+            onNavigate("settings");
+          }}>
+            <Icon name="zap" className="w-5 h-5" />
+            <span>Add Provider</span>
+          </button>
+        </div>
+
         {/* Stats Row */}
         <div className="stats-row">
-          <StatCard label="Active Agents" value={activeAgents.toString()} icon="bot" color="var(--brand)" />
+          <button className="stat-card stat-card-clickable" onClick={() => {
+            window.localStorage.setItem("clawdesk._settingsTab", "Agents");
+            onNavigate("settings");
+          }}>
+            <div className="stat-header">
+              <span className="stat-label">Active Agents</span>
+              <div className="stat-icon-wrap" style={{ backgroundColor: `color-mix(in srgb, var(--brand) 15%, transparent)`, color: "var(--brand)" }}>
+                <Icon name="bot" />
+              </div>
+            </div>
+            <div className="stat-value">{activeAgents}</div>
+          </button>
           <StatCard label="Platform Cost" value={`$${cost.toFixed(2)}`} icon="brand" color="var(--cyan)" />
-          <StatCard label="Active Plugins" value={activePlugins.toString()} icon="zap" color="var(--purple)" />
+          <button className="stat-card stat-card-clickable" onClick={() => onNavigate("skills")}>
+            <div className="stat-header">
+              <span className="stat-label">Active Plugins</span>
+              <div className="stat-icon-wrap" style={{ backgroundColor: `color-mix(in srgb, var(--purple) 15%, transparent)`, color: "var(--purple)" }}>
+                <Icon name="zap" />
+              </div>
+            </div>
+            <div className="stat-value">{activePlugins}</div>
+          </button>
           <StatCard label="Pending Approvals" value={pendingApprovals.toString()} icon="shield" color="var(--amber)" />
-          <StatCard label="A2A Agents" value={a2aAgents.length.toString()} icon="globe" color="var(--green)" />
-          <StatCard label="Durable Runs" value={durableRuns.filter(r => r.state === "running").length.toString()} icon="cpu" color="var(--cyan)" />
+          <button className="stat-card stat-card-clickable" onClick={() => onNavigate("a2a")}>
+            <div className="stat-header">
+              <span className="stat-label">A2A Agents</span>
+              <div className="stat-icon-wrap" style={{ backgroundColor: `color-mix(in srgb, var(--green) 15%, transparent)`, color: "var(--green)" }}>
+                <Icon name="globe" />
+              </div>
+            </div>
+            <div className="stat-value">{a2aAgents.length}</div>
+          </button>
+          <button className="stat-card stat-card-clickable" onClick={() => onNavigate("runtime")}>
+            <div className="stat-header">
+              <span className="stat-label">Durable Runs</span>
+              <div className="stat-icon-wrap" style={{ backgroundColor: `color-mix(in srgb, var(--cyan) 15%, transparent)`, color: "var(--cyan)" }}>
+                <Icon name="cpu" />
+              </div>
+            </div>
+            <div className="stat-value">{durableRuns.filter(r => r.state === "running").length}</div>
+          </button>
         </div>
 
         {/* Main Content Grid */}
         <div className="dashboard-main-grid">
           {/* Left Column: Agents */}
           <div className="panel-card">
-            <h3 className="panel-title">
-              <Icon name="bot" className="w-4 h-4" /> Active Agents
-            </h3>
+            <div className="panel-title-row">
+              <h3 className="panel-title">
+                <Icon name="bot" className="w-4 h-4" /> Active Agents
+              </h3>
+              <button className="btn-link" onClick={() => {
+                window.localStorage.setItem("clawdesk._settingsTab", "Agents");
+                onNavigate("settings");
+              }}>Manage →</button>
+            </div>
             <div className="agent-list-compact">
               {agents.slice(0, 5).map(agent => (
-                <div key={agent.id} className="agent-row">
+                <button key={agent.id} className="agent-row agent-row-clickable" onClick={() => onNavigate("chat")}>
                   <div className="agent-icon-sm" style={{ backgroundColor: agent.color }}>
                     {agent.icon}
                   </div>
@@ -122,10 +189,16 @@ export function OverviewPage({
                   <div className="agent-status">
                     <span className={`status-dot ${agent.status === "active" ? "status-ok" : ""}`} />
                   </div>
-                </div>
+                </button>
               ))}
               {agents.length === 0 && (
-                <div className="empty-state">No active agents</div>
+                <div className="empty-state-action">
+                  <p>No agents yet</p>
+                  <button className="btn subtle" onClick={() => {
+                    window.localStorage.setItem("clawdesk._settingsTab", "Agents");
+                    onNavigate("settings");
+                  }}>Create your first agent →</button>
+                </div>
               )}
             </div>
           </div>
@@ -147,6 +220,7 @@ export function OverviewPage({
                   label="Skills"
                   status={health && health.skills_loaded > 0 ? "ok" : "warn"}
                   detail={health ? `${health.skills_loaded} loaded` : "Unknown"}
+                  onClick={() => onNavigate("skills")}
                 />
                 <HealthRow
                   label="Tunnel"
@@ -157,6 +231,7 @@ export function OverviewPage({
                   label="A2A Protocol"
                   status={a2aAgents.length > 0 ? "ok" : "off"}
                   detail={a2aAgents.length > 0 ? `${a2aAgents.length} agents` : "No agents"}
+                  onClick={() => onNavigate("a2a")}
                 />
                 <HealthRow
                   label="Runtime"
@@ -164,11 +239,13 @@ export function OverviewPage({
                   detail={runtimeStatus?.durable_runner_available
                     ? `${durableRuns.filter(r => r.state === "running").length} running`
                     : "Unavailable"}
+                  onClick={() => onNavigate("runtime")}
                 />
                 <HealthRow
                   label="Pipeline"
                   status={pipelineList.length > 0 ? "ok" : "off"}
                   detail={`${pipelineList.length} pipelines`}
+                  onClick={() => onNavigate("automations")}
                 />
                 <HealthRow
                   label="Federation"
@@ -180,9 +257,15 @@ export function OverviewPage({
 
             {/* Channels */}
             <div className="panel-card">
-              <h3 className="panel-title">
-                <Icon name="globe" className="w-4 h-4" /> Channels
-              </h3>
+              <div className="panel-title-row">
+                <h3 className="panel-title">
+                  <Icon name="globe" className="w-4 h-4" /> Channels
+                </h3>
+                <button className="btn-link" onClick={() => {
+                  window.localStorage.setItem("clawdesk._settingsTab", "Channels");
+                  onNavigate("settings");
+                }}>Configure →</button>
+              </div>
               <div className="channel-list-compact">
                 {channels.slice(0, 3).map(c => (
                   <div key={c.id} className="channel-row">
@@ -192,7 +275,13 @@ export function OverviewPage({
                   </div>
                 ))}
                 {channels.length === 0 && (
-                  <div className="empty-state">No channels connected</div>
+                  <div className="empty-state-action">
+                    <p>No channels connected</p>
+                    <button className="btn-link" onClick={() => {
+                      window.localStorage.setItem("clawdesk._settingsTab", "Channels");
+                      onNavigate("settings");
+                    }}>Connect a channel →</button>
+                  </div>
                 )}
               </div>
             </div>
@@ -201,21 +290,30 @@ export function OverviewPage({
 
         {/* Recent Activity */}
         <div className="panel-card mt-4">
-          <h3 className="panel-title">
-            <Icon name="clock" className="w-4 h-4" /> Recent Activity
-          </h3>
+          <div className="panel-title-row">
+            <h3 className="panel-title">
+              <Icon name="clock" className="w-4 h-4" /> Recent Activity
+            </h3>
+            <button className="btn-link" onClick={() => onNavigate("chat")}>View all →</button>
+          </div>
           <div className="activity-list">
             {sessions.slice(0, 5).map(s => (
-              <div key={s.chat_id || s.agent_id + s.last_activity} className="activity-row">
+              <button key={s.chat_id || s.agent_id + s.last_activity} className="activity-row activity-row-clickable" onClick={() => {
+                if (s.chat_id) onNavigate("chat", { threadId: s.chat_id });
+                else onNavigate("chat");
+              }}>
                 <div className="status-dot-sm" style={{ background: "var(--brand)" }} />
                 <div className="activity-text">
-                  Session with <strong>{s.title}</strong>
+                  <strong>{s.title}</strong>
                 </div>
                 <div className="activity-id">{new Date(s.last_activity).toLocaleTimeString()}</div>
-              </div>
+              </button>
             ))}
             {sessions.length === 0 && (
-              <div className="empty-state">No recent activity</div>
+              <div className="empty-state-action">
+                <p>No recent activity</p>
+                <button className="btn subtle" onClick={() => onNavigate("chat")}>Start your first chat →</button>
+              </div>
             )}
           </div>
         </div>
@@ -240,13 +338,15 @@ function StatCard({ label, value, icon, color }: { label: string; value: string;
   );
 }
 
-function HealthRow({ label, status, detail }: { label: string; status: "ok" | "warn" | "error" | "off"; detail: string }) {
+function HealthRow({ label, status, detail, onClick }: { label: string; status: "ok" | "warn" | "error" | "off"; detail: string; onClick?: () => void }) {
   const color = status === "ok" ? "var(--green)" : status === "warn" ? "var(--amber)" : status === "error" ? "var(--red)" : "var(--text-tertiary)";
+  const Tag = onClick ? "button" : "div";
   return (
-    <div className="health-row">
+    <Tag className={`health-row${onClick ? " health-row-clickable" : ""}`} onClick={onClick}>
       <span className="status-dot-sm" style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}40` }} />
       <span className="health-label">{label}</span>
       <span className="health-detail">{detail}</span>
-    </div>
+      {onClick && <span className="health-arrow">→</span>}
+    </Tag>
   );
 }

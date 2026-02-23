@@ -779,6 +779,14 @@ export default function App() {
     [navigate]
   );
 
+  // Loosely-typed navigation callback for child pages that don't know NavKey.
+  const navigateLoose = useCallback(
+    (nav: string, options?: { threadId?: string }) => {
+      navigate(nav as NavKey, options);
+    },
+    [navigate]
+  );
+
   const pushToast = useCallback((text: string) => {
     const toast: ToastItem = { id: makeId("toast"), text };
     setToasts((prev) => [...prev, toast]);
@@ -4075,7 +4083,7 @@ export default function App() {
         activeNav={activeNav}
         navGroups={NAV_GROUPS}
         navItems={NAV_ITEMS}
-        onNavigate={navigate}
+        onNavigate={navigateLoose}
         onToggleSidebar={() => setIsSidebarCollapsed((prev) => !prev)}
         onOpenPalette={() => setPaletteOpen(true)}
         onOpenSettings={() => navigate("settings")}
@@ -4109,6 +4117,7 @@ export default function App() {
             plugins={backendPlugins}
             peers={backendPeers}
             pushToast={pushToast}
+            onNavigate={navigateLoose}
           />
         )}
 
@@ -4125,13 +4134,16 @@ export default function App() {
             skills={backendSkills}
             onRefreshSkills={() => api.listSkills().then((s) => setBackendSkills(s)).catch(() => { })}
             pushToast={pushToast}
+            onNavigate={navigateLoose}
           />
         )}
         {activeNav === "automations" && (
           <AutomationsPage
             pipelines={backendPipelines}
+            agents={backendAgents}
             onRefreshPipelines={() => api.listPipelines().then((p) => setBackendPipelines(p)).catch(() => { })}
             pushToast={pushToast}
+            onNavigate={navigateLoose}
           />
         )}
 
@@ -4153,6 +4165,7 @@ export default function App() {
             onRefreshPeers={() => api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => { })}
             onResetOnboarding={resetOnboarding}
             pushToast={pushToast}
+            onNavigate={navigateLoose}
           />
         )}
         {activeNav === "logs" && (

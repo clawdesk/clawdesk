@@ -16,6 +16,7 @@ export interface SkillsPageProps {
   skills: SkillDescriptor[];
   onRefreshSkills: () => void;
   pushToast: (text: string) => void;
+  onNavigate: (nav: string, options?: { threadId?: string }) => void;
 }
 
 // ── Helper ────────────────────────────────────────────────────
@@ -45,9 +46,10 @@ interface SkillCardProps {
   onEdit: (skill: SkillDescriptor) => void;
   onInstall: (skill: SkillDescriptor) => void;
   onHover: (skillId: string) => void;
+  onTryInChat?: () => void;
 }
 
-function SkillCard({ skill, trust, onEdit, onInstall, onHover }: SkillCardProps) {
+function SkillCard({ skill, trust, onEdit, onInstall, onHover, onTryInChat }: SkillCardProps) {
   const isInstalled = skill.state === "active" || skill.state === "loaded";
 
   return (
@@ -59,13 +61,24 @@ function SkillCard({ skill, trust, onEdit, onInstall, onHover }: SkillCardProps)
         <div className="skill-card-icon">{resolveSkillIcon(skill.icon)}</div>
         <div className="skill-card-actions">
           {isInstalled ? (
-            <button
-              className="btn subtle skill-card-edit-btn"
-              onClick={() => onEdit(skill)}
-              title="Edit skill"
-            >
-              ✏️ Edit
-            </button>
+            <>
+              {onTryInChat && (
+                <button
+                  className="btn subtle skill-card-edit-btn"
+                  onClick={onTryInChat}
+                  title="Try this skill in chat"
+                >
+                  💬 Try
+                </button>
+              )}
+              <button
+                className="btn subtle skill-card-edit-btn"
+                onClick={() => onEdit(skill)}
+                title="Edit skill"
+              >
+                ✏️ Edit
+              </button>
+            </>
           ) : (
             <button
               className="btn icon-only subtle"
@@ -104,7 +117,7 @@ function SkillCard({ skill, trust, onEdit, onInstall, onHover }: SkillCardProps)
 
 // ── Page ─────────────────────────────────────────────────────
 
-export function SkillsPage({ skills, onRefreshSkills, pushToast }: SkillsPageProps) {
+export function SkillsPage({ skills, onRefreshSkills, pushToast, onNavigate }: SkillsPageProps) {
   const [search, setSearch] = useState("");
   const [trustCache, setTrustCache] = useState<Record<string, SkillTrustInfo>>({});
   const [designerOpen, setDesignerOpen] = useState(false);
@@ -193,6 +206,7 @@ export function SkillsPage({ skills, onRefreshSkills, pushToast }: SkillsPagePro
       onEdit={handleEdit}
       onInstall={handleInstall}
       onHover={handleHover}
+      onTryInChat={(s.state === "active" || s.state === "loaded") ? () => onNavigate("chat") : undefined}
     />
   );
 

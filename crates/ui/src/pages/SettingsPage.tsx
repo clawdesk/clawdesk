@@ -91,6 +91,7 @@ export interface SettingsPageProps {
   onRefreshPeers: () => void;
   onResetOnboarding: () => void;
   pushToast: (text: string) => void;
+  onNavigate: (nav: string, options?: { threadId?: string }) => void;
 }
 
 // ── Channels sub-panel ────────────────────────────────────────
@@ -334,6 +335,7 @@ export function SettingsPage({
   onRefreshPeers,
   onResetOnboarding,
   pushToast,
+  onNavigate,
 }: SettingsPageProps) {
   const [tab, setTab] = useState<SettingsTab>(() => {
     // Support deep-links from Overview dashboard: clawdesk._settingsTab
@@ -701,6 +703,7 @@ export function SettingsPage({
                       <div className="verify-hash">sha256:{a.persona_hash.slice(0, 8)}...</div>
                     </div>
                     <div className="agent-card-actions">
+                      <button className="btn subtle" onClick={() => onNavigate("chat")}>Chat →</button>
                       <button className="btn subtle">Edit</button>
                       <button className="btn ghost" onClick={() => onDeleteAgent(a.id)}>Delete</button>
                     </div>
@@ -708,8 +711,8 @@ export function SettingsPage({
                 ))}
               </div>
               {agents.length === 0 && (
-                <div className="empty-state">
-                  <p>No agents created yet.</p>
+                <div className="empty-state-action" style={{ padding: 24, textAlign: "center" }}>
+                  <p style={{ marginBottom: 12 }}>No agents created yet. Create one to start chatting.</p>
                   <button className="btn primary" onClick={() => onCreateAgent(AGENT_TEMPLATES[0])}>
                     Create your first agent
                   </button>

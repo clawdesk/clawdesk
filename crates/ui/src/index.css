@@ -4132,6 +4132,160 @@ h6.md-heading {
   font-style: italic;
 }
 
+/* ── Connected UX — Quick Actions & Interactive Elements ─────── */
+
+.quick-actions-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.quick-action-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  background: var(--panel-glass);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  transition: all var(--transition-fast);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-sm);
+}
+
+.quick-action-card:hover {
+  background: var(--surface-hover);
+  border-color: var(--brand);
+  color: var(--brand);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.stat-card-clickable {
+  cursor: pointer;
+  text-align: left;
+}
+
+.stat-card-clickable:hover {
+  border-color: var(--brand);
+}
+
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.btn-link:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+.agent-row-clickable {
+  cursor: pointer;
+  background: none;
+  border: none;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  padding: 8px 4px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+}
+
+.agent-row-clickable:hover {
+  background: var(--surface-hover);
+}
+
+.health-row-clickable {
+  cursor: pointer;
+  background: none;
+  border: none;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  padding: 6px 4px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+}
+
+.health-row-clickable:hover {
+  background: var(--surface-hover);
+}
+
+.health-arrow {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-left: auto;
+  padding-left: 6px;
+}
+
+.activity-row-clickable {
+  cursor: pointer;
+  background: none;
+  border: none;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+}
+
+.activity-row-clickable:hover {
+  background: var(--surface-hover);
+}
+
+.empty-state-action {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.empty-state-action p {
+  margin: 0;
+}
+
+.empty-state-action .btn,
+.empty-state-action .btn-link {
+  margin-top: 4px;
+}
+
+@media (max-width: 768px) {
+  .quick-actions-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .stats-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }
