@@ -400,6 +400,11 @@ impl SochStore {
             .map_err(|e| StorageError::OpenFailed {
                 detail: format!("put_durable commit failed: {e}"),
             })?;
+        // fsync to flush buffered WAL to disk, ensuring durability across restarts
+        self.connection.fsync()
+            .map_err(|e| StorageError::OpenFailed {
+                detail: format!("put_durable fsync failed: {e}"),
+            })?;
         Ok(())
     }
 
@@ -420,6 +425,11 @@ impl SochStore {
         self.connection.commit()
             .map_err(|e| StorageError::OpenFailed {
                 detail: format!("put_batch commit failed: {e}"),
+            })?;
+        // fsync to flush buffered WAL to disk
+        self.connection.fsync()
+            .map_err(|e| StorageError::OpenFailed {
+                detail: format!("put_batch fsync failed: {e}"),
             })?;
         Ok(())
     }
@@ -482,6 +492,11 @@ impl SochStore {
             .map_err(|e| StorageError::OpenFailed {
                 detail: format!("delete_durable: commit failed: {e}"),
             })?;
+        // fsync to flush buffered WAL to disk, ensuring deletion survives restart
+        self.connection.fsync()
+            .map_err(|e| StorageError::OpenFailed {
+                detail: format!("delete_durable: fsync failed: {e}"),
+            })?;
         Ok(())
     }
 
@@ -505,6 +520,11 @@ impl SochStore {
             self.connection.commit()
                 .map_err(|e| StorageError::OpenFailed {
                     detail: format!("delete_prefix: commit failed: {e}"),
+                })?;
+            // fsync to flush buffered WAL to disk, ensuring bulk deletion survives restart
+            self.connection.fsync()
+                .map_err(|e| StorageError::OpenFailed {
+                    detail: format!("delete_prefix: fsync failed: {e}"),
                 })?;
         }
         Ok(count)
