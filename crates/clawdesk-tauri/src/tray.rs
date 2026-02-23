@@ -124,6 +124,11 @@ impl GatewayHealth {
 /// Shared tray state accessible from both the health poll loop and event handlers.
 pub struct TrayState {
     health: RwLock<GatewayHealth>,
+    /// Handle to the "Status: …" menu item for in-place text updates.
+    /// Stored after setup so the health poll can call `set_text()` directly
+    /// instead of rebuilding the entire menu (which fails in Tauri 2 due to
+    /// globally-unique menu item ID constraints).
+    status_item: RwLock<Option<tauri::menu::MenuItem<tauri::Wry>>>,
 }
 
 impl TrayState {
@@ -134,6 +139,7 @@ impl TrayState {
                 providers: vec![],
                 checked_at: chrono::Utc::now(),
             }),
+            status_item: RwLock::new(None),
         }
     }
 
@@ -168,10 +174,11 @@ impl Default for TrayState {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Build the tray context menu with the given status text.
+/// Returns both the menu and the status MenuItem handle for later in-place updates.
 fn build_tray_menu(
     app: &tauri::AppHandle,
     status_text: &str,
-) -> Result<tauri::menu::Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+) -> Result<(tauri::menu::Menu<tauri::Wry>, tauri::menu::MenuItem<tauri::Wry>), Box<dyn std::error::Error>> {
     let status_item = MenuItemBuilder::new(status_text)
         .id("status")
         .enabled(false)
@@ -215,7 +222,7 @@ fn build_tray_menu(
         .item(&quit)
         .build()?;
 
-    Ok(menu)
+    Ok((menu, status_item))
 }
 
 /// Initialize the system tray with health indicator.
@@ -231,7 +238,12 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let tray_state = Arc::new(TrayState::new());
     app.manage(tray_state.clone());
 
-    let menu = build_tray_menu(app.handle(), "Status: Checking...")?;
+    let (menu, status_item) = build_tray_menu(app.handle(), "Status: Checking...")?;
+
+    // Store the status item handle so the health poll can update it in-place
+    if let Ok(mut guard) = tray_state.status_item.write() {
+        *guard = Some(status_item);
+    }
 
     // Load the tray icon image (44×44 template, black on transparent)
     let icon_bytes = include_bytes!("../icons/tray-icon.png");
@@ -347,15 +359,21 @@ fn start_health_poll(
                 let _ = app_handle.emit("tray-health-changed", &health);
             }
 
-            // Update tray tooltip, title, and rebuild menu with current status
+            // Update tray tooltip, title, and status menu item text
             if let Some(tray) = app_handle.tray_by_id("main") {
                 let status_text = format!("Status: {}", health.overall.indicator());
                 let _ = tray.set_tooltip(Some(health.overall.tooltip()));
                 let _ = tray.set_title(Some(&status_text));
 
-                // Rebuild menu so the status item text is current
-                if let Ok(menu) = build_tray_menu(&app_handle, &status_text) {
-                    let _ = tray.set_menu(Some(menu));
+                // Update the existing status menu item text in-place
+                // (avoids rebuilding the entire menu which fails due to
+                // Tauri 2's globally-unique menu item ID requirement)
+                if let Ok(guard) = tray_state.status_item.read() {
+                    if let Some(ref item) = *guard {
+                        if let Err(e) = item.set_text(&status_text) {
+                            warn!("Failed to update tray status item text: {e}");
+                        }
+                    }
                 }
             }
 

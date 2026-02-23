@@ -19,6 +19,7 @@
 use crate::canvas::Canvas;
 use crate::commands_infra::NotificationInfo;
 use clawdesk_agents::ToolRegistry;
+use tauri::Manager;
 use clawdesk_agents::runner::{AgentConfig, AgentRunner};
 use clawdesk_acp::AgentDirectory;
 use clawdesk_channel::registry::ChannelRegistry;
@@ -641,10 +642,14 @@ impl clawdesk_cron::executor::AgentExecutor for NoopAgentExecutor {
 /// calls `sink.on_message(normalized)`, which lands here. We resolve the
 /// agent + provider, run the LLM, and send the response back via
 /// `Channel::send()`.
+///
+/// Uses `AppHandle` to read agents live from `AppState` instead of a
+/// stale startup snapshot — agents added/modified via the UI are visible
+/// immediately.
 pub(crate) struct ChannelMessageSink {
     pub negotiator: Arc<RwLock<ProviderNegotiator>>,
     pub tool_registry: Arc<ToolRegistry>,
-    pub agents: Arc<RwLock<HashMap<String, DesktopAgent>>>,
+    pub app_handle: tauri::AppHandle,
     pub channel_registry: Arc<RwLock<ChannelRegistry>>,
     pub cancel: tokio_util::sync::CancellationToken,
 }
@@ -661,16 +666,25 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             channel = %channel_id,
             sender = %sender_name,
             body_len = msg.body.len(),
+            body_preview = %msg.body.chars().take(80).collect::<String>(),
             "Inbound channel message received — routing to agent"
         );
 
-        // 1. Find the default agent (first registered agent)
-        let agent = match self.agents.read() {
-            Ok(agents) => agents.values().next().cloned(),
-            Err(e) => {
-                error!("Failed to read agents: {e}");
-                return;
-            }
+        // 1. Find the default agent (first registered agent) — read LIVE from AppState
+        let agent = {
+            let state = self.app_handle.state::<AppState>();
+            let result = match state.agents.read() {
+                Ok(agents) => {
+                    let count = agents.len();
+                    info!(agent_count = count, "Available agents for channel message");
+                    agents.values().next().cloned()
+                }
+                Err(e) => {
+                    error!("Failed to read agents: {e}");
+                    return;
+                }
+            };
+            result
         };
         let Some(agent) = agent else {
             warn!("No agent configured — dropping inbound message from {sender_name}");

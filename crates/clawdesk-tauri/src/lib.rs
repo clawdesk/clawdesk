@@ -428,15 +428,7 @@ pub fn run() {
                 let sink = std::sync::Arc::new(state::ChannelMessageSink {
                     negotiator: std::sync::Arc::clone(&state.negotiator),
                     tool_registry: std::sync::Arc::clone(&state.tool_registry),
-                    agents: {
-                        // We need an Arc<RwLock<HashMap>> that matches agents field.
-                        // AppState.agents is RwLock<HashMap>, we need to wrap it.
-                        // Instead, clone the current agents snapshot into a new Arc<RwLock>.
-                        let agents_snapshot = state.agents.read()
-                            .map(|a| a.clone())
-                            .unwrap_or_default();
-                        std::sync::Arc::new(std::sync::RwLock::new(agents_snapshot))
-                    },
+                    app_handle: app.handle().clone(),
                     channel_registry: std::sync::Arc::clone(&state.channel_registry),
                     cancel: state.cancel.clone(),
                 });

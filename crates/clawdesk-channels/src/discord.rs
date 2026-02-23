@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 
@@ -130,18 +130,22 @@ impl DiscordChannel {
     ) -> Option<NormalizedMessage> {
         // Skip bot messages (unless listen_to_bots is enabled)
         if !self.listen_to_bots && event.author.bot.unwrap_or(false) {
+            debug!(author = %event.author.username, "Discord: skipping bot message");
             return None;
         }
 
         // Skip messages from the bot itself
         if event.author.id == bot_user_id {
+            debug!("Discord: skipping own message");
             return None;
         }
 
         // User allowlist check
         if !self.is_user_allowed(&event.author.id) {
             warn!(
-                user_id = event.author.id,
+                user_id = %event.author.id,
+                username = %event.author.username,
+                allowed_users = ?self.allowed_users,
                 "Discord: ignoring message from unauthorized user"
             );
             return None;
@@ -389,8 +393,31 @@ impl DiscordChannel {
                         _ => {}
                     }
 
-                    // Only handle MESSAGE_CREATE dispatch events (opcode 0)
+                    // Dispatch events (opcode 0 with "t" field)
                     let event_type = event.get("t").and_then(|t| t.as_str()).unwrap_or("");
+
+                    // Log READY event — confirms connection is fully established
+                    if event_type == "READY" {
+                        let username = event.get("d")
+                            .and_then(|d| d.get("user"))
+                            .and_then(|u| u.get("username"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown");
+                        let guilds = event.get("d")
+                            .and_then(|d| d.get("guilds"))
+                            .and_then(|g| g.as_array())
+                            .map(|g| g.len())
+                            .unwrap_or(0);
+                        info!(
+                            username = %username,
+                            guilds = guilds,
+                            bot_user_id = %bot_user_id,
+                            "Discord: READY — bot is online and receiving events"
+                        );
+                        continue;
+                    }
+
+                    // Only handle MESSAGE_CREATE for message processing
                     if event_type != "MESSAGE_CREATE" {
                         continue;
                     }
@@ -403,13 +430,43 @@ impl DiscordChannel {
                     let msg_event: DiscordMessageCreate = match serde_json::from_value(d.clone()) {
                         Ok(m) => m,
                         Err(e) => {
-                            debug!(error = %e, "Discord: failed to parse MESSAGE_CREATE");
+                            warn!(error = %e, "Discord: failed to parse MESSAGE_CREATE — raw payload logged at debug level");
+                            debug!(payload = %d, "Discord: unparseable MESSAGE_CREATE payload");
                             continue;
                         }
                     };
 
+                    // Diagnostic: log every inbound message for debugging
+                    info!(
+                        author = %msg_event.author.username,
+                        author_id = %msg_event.author.id,
+                        is_bot = msg_event.author.bot.unwrap_or(false),
+                        content_len = msg_event.content.len(),
+                        content_empty = msg_event.content.is_empty(),
+                        channel_id = %msg_event.channel_id,
+                        "Discord: MESSAGE_CREATE received"
+                    );
+
+                    // If content is empty, the bot likely lacks the MESSAGE_CONTENT
+                    // privileged intent. Log a clear diagnostic.
+                    if msg_event.content.is_empty() {
+                        warn!(
+                            author = %msg_event.author.username,
+                            "Discord: message content is EMPTY — the MESSAGE_CONTENT \
+                             privileged intent may not be enabled in the Discord Developer \
+                             Portal (Bot → Privileged Gateway Intents → Message Content Intent)"
+                        );
+                    }
+
                     // Normalize (filters bots, allowlist, mention-only, etc.)
                     let Some(normalized) = self.normalize_event(&msg_event, &bot_user_id) else {
+                        info!(
+                            author = %msg_event.author.username,
+                            bot_user_id = %bot_user_id,
+                            mention_only = self.mention_only,
+                            content_preview = %msg_event.content.chars().take(50).collect::<String>(),
+                            "Discord: message filtered out by normalize_event"
+                        );
                         continue;
                     };
 
