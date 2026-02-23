@@ -40,12 +40,13 @@ const TELEGRAM_JOURNEY: ChannelJourney = {
   steps: [
     {
       id: "prereqs",
-      title: "Prerequisites",
+      title: "Create a Bot",
       description:
         "To connect Telegram, you need a **Bot Token** from @BotFather.\n\n" +
         "1. Open Telegram and search for **@BotFather**\n" +
         "2. Send `/newbot` and follow the prompts\n" +
-        "3. Copy the API token you receive",
+        "3. Copy the API token you receive\n\n" +
+        "Optionally, send `/setdescription` and `/setabouttext` to customize your bot's profile.",
       note: "The token looks like: 123456789:ABCdefGhIJKlmNOpQRsTUVwxyZ",
     },
     {
@@ -61,11 +62,36 @@ const TELEGRAM_JOURNEY: ChannelJourney = {
       },
     },
     {
+      id: "access",
+      title: "Access Control",
+      description:
+        "Control who can interact with your bot.\n\n" +
+        "Enter **Telegram numeric user IDs** (comma-separated) to restrict access, or `*` to allow everyone.\n\n" +
+        "**To find your user ID:** Send a message to [@userinfobot](https://t.me/userinfobot) on Telegram.\n\n" +
+        "**Security note:** Leaving this empty will **deny all users** by default.",
+      fields: ["allowed_users", "mention_only"],
+      validate: (draft) => {
+        const users = draft.allowed_users?.trim();
+        if (!users) return null;
+        if (users === "*") return null;
+        const items = users.split(",").map((s) => s.trim()).filter(Boolean);
+        for (const item of items) {
+          if (!/^\d+$/.test(item)) return `Invalid user ID: "${item}". Must be a numeric Telegram user ID`;
+        }
+        return null;
+      },
+      note: "Empty = deny all (safe default). Use * to allow everyone.",
+    },
+    {
       id: "verify",
       title: "Ready",
       description:
-        "Your Telegram bot is ready to connect. After finishing setup, send a message to your bot to test it.\n\n" +
-        "**Tip:** Use `/setdescription` and `/setabouttext` with @BotFather to customize your bot's profile.",
+        "Your Telegram bot is ready to connect!\n\n" +
+        "After finishing setup:\n" +
+        "1. Open Telegram and find your bot by its username\n" +
+        "2. Send it a message\n" +
+        "3. ClawDesk will receive and respond automatically\n\n" +
+        "**For groups:** Add the bot to a group and mention it with `@botname`.",
     },
   ],
 };
@@ -79,28 +105,78 @@ const DISCORD_JOURNEY: ChannelJourney = {
       description:
         "1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)\n" +
         "2. Click **New Application** and give it a name\n" +
-        "3. Go to the **Bot** section and click **Add Bot**\n" +
-        "4. Enable **Message Content Intent** under Privileged Gateway Intents\n" +
-        "5. Copy the bot token",
-      note: "You'll also need to invite the bot to your server using an OAuth2 URL with the `bot` scope.",
+        "3. Go to **General Information** — copy the **Application ID**\n" +
+        "4. Go to the **Bot** section and click **Reset Token** to get a bot token\n" +
+        "5. Under **Privileged Gateway Intents**, enable:\n" +
+        "   - **Message Content Intent** *(required)*\n" +
+        "   - **Server Members Intent** *(recommended)*",
+      note: "Message Content Intent is required — without it, the bot cannot read message text.",
     },
     {
       id: "configure",
       title: "Configure",
-      description: "Enter your Discord bot token.",
-      fields: ["bot_token"],
+      description: "Enter your Discord bot token and application ID.",
+      fields: ["bot_token", "application_id"],
       validate: (draft) => {
         const token = draft.bot_token?.trim();
         if (!token) return "Bot token is required";
-        if (token.length < 50) return "Token seems too short";
+        if (token.length < 50) return "Token seems too short. Discord tokens are typically 70+ characters";
+        const appId = draft.application_id?.trim();
+        if (!appId) return "Application ID is required";
+        if (!/^\d{17,20}$/.test(appId)) return "Application ID must be a 17-20 digit number (from Developer Portal → General Information)";
         return null;
       },
+    },
+    {
+      id: "invite",
+      title: "Invite Bot",
+      description:
+        "Invite your bot to a Discord server:\n\n" +
+        "1. Go to **OAuth2 → URL Generator** in the Developer Portal\n" +
+        "2. Select scopes: `bot`\n" +
+        "3. Select permissions: `Send Messages`, `Read Message History`, `View Channels`\n" +
+        "4. Copy the generated URL and open it in your browser\n" +
+        "5. Choose the server and authorize\n\n" +
+        "Optionally restrict the bot to a specific server by entering its Guild ID.",
+      fields: ["guild_id"],
+      validate: (draft) => {
+        const guildId = draft.guild_id?.trim();
+        if (!guildId) return null;
+        if (!/^\d{17,20}$/.test(guildId)) return "Guild ID must be a 17-20 digit number. Right-click the server → Copy Server ID (enable Developer Mode in Settings → Advanced)";
+        return null;
+      },
+      note: "Right-click a server → Copy Server ID (requires Developer Mode: Settings → Advanced → Developer Mode)",
+    },
+    {
+      id: "access",
+      title: "Access Control",
+      description:
+        "Control who can interact with the bot.\n\n" +
+        "Enter **Discord user IDs** (comma-separated) to restrict access, or `*` to allow everyone.\n\n" +
+        "**To find a user ID:** Enable Developer Mode (Settings → Advanced), then right-click a user → Copy User ID.\n\n" +
+        "**Security note:** Leaving this empty will **deny all users** by default.",
+      fields: ["allowed_users", "mention_only"],
+      validate: (draft) => {
+        const users = draft.allowed_users?.trim();
+        if (!users) return null;
+        if (users === "*") return null;
+        const items = users.split(",").map((s) => s.trim()).filter(Boolean);
+        for (const item of items) {
+          if (!/^\d{17,20}$/.test(item)) return `Invalid user ID: "${item}". Must be a 17-20 digit Discord user ID`;
+        }
+        return null;
+      },
+      note: "Empty = deny all (safe default). Use * to allow everyone.",
     },
     {
       id: "verify",
       title: "Ready",
       description:
-        "Discord bot is configured. After setup, invite the bot to your server and mention it or DM it to test.\n\n" +
+        "Discord bot is configured!\n\n" +
+        "After finishing setup:\n" +
+        "1. Check the bot appears online in your server\n" +
+        "2. Mention the bot with `@BotName` in a channel or send it a DM\n" +
+        "3. ClawDesk will receive and respond automatically\n\n" +
         "**Required intents:** Message Content, Guild Messages, Direct Messages.",
     },
   ],
@@ -115,20 +191,61 @@ const SLACK_JOURNEY: ChannelJourney = {
       description:
         "1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App**\n" +
         "2. Choose **From scratch**, pick a name and workspace\n" +
-        "3. Under **OAuth & Permissions**, add bot token scopes:\n" +
-        "   - `chat:write`, `channels:read`, `groups:read`, `im:read`, `im:write`\n" +
-        "4. Install the app to your workspace\n" +
-        "5. Copy the **Bot User OAuth Token** (starts with `xoxb-`)",
+        "3. Go to **Settings → Socket Mode** and **enable** it\n" +
+        "4. Generate an **App-Level Token** with `connections:write` scope — copy it (starts with `xapp-`)",
+      note: "Socket Mode is recommended — it avoids public URL requirements.",
+    },
+    {
+      id: "scopes",
+      title: "Bot Scopes & Install",
+      description:
+        "Add required bot token scopes under **OAuth & Permissions → Bot Token Scopes**:\n\n" +
+        "- `chat:write` — Send messages\n" +
+        "- `channels:read`, `channels:history` — Read public channels\n" +
+        "- `groups:history` — Read private channels\n" +
+        "- `im:history`, `im:read`, `im:write` — Direct messages\n" +
+        "- `app_mentions:read` — Respond to @mentions\n" +
+        "- `users:read` — Resolve user info\n\n" +
+        "Then click **Install to Workspace** and copy the **Bot User OAuth Token** (`xoxb-...`).",
+    },
+    {
+      id: "events",
+      title: "Event Subscriptions",
+      description:
+        "Go to **Event Subscriptions** and subscribe to these bot events:\n\n" +
+        "- `app_mention` — Bot is @mentioned\n" +
+        "- `message.channels` — Messages in public channels\n" +
+        "- `message.groups` — Messages in private channels\n" +
+        "- `message.im` — Direct messages\n\n" +
+        "Also enable the **Messages Tab** under **App Home** to allow DMs.",
     },
     {
       id: "configure",
       title: "Configure",
-      description: "Enter your Slack bot token and optional signing secret.",
-      fields: ["bot_token", "signing_secret"],
+      description: "Enter your Slack tokens.",
+      fields: ["bot_token", "app_token"],
       validate: (draft) => {
         const token = draft.bot_token?.trim();
         if (!token) return "Bot token is required";
-        if (!token.startsWith("xoxb-")) return "Slack bot tokens start with xoxb-";
+        if (!token.startsWith("xoxb-")) return "Bot token must start with xoxb-";
+        const appToken = draft.app_token?.trim();
+        if (!appToken) return "App token is required for Socket Mode";
+        if (!appToken.startsWith("xapp-")) return "App token must start with xapp-";
+        return null;
+      },
+    },
+    {
+      id: "access",
+      title: "Access Control",
+      description:
+        "Optionally restrict which users or channels the bot responds to.\n\n" +
+        "**Channel ID:** Restrict to a single channel (right-click channel header → View channel details → copy ID from bottom).\n\n" +
+        "**Allowed Users:** Enter Slack user IDs (comma-separated) or `*` for everyone.\n\n" +
+        "**Security note:** Leaving allowed users empty will **deny all** by default.",
+      fields: ["channel_id", "allowed_users"],
+      validate: (draft) => {
+        const chId = draft.channel_id?.trim();
+        if (chId && !/^[A-Z0-9]{9,}$/.test(chId)) return "Channel ID should be an uppercase alphanumeric string like C01ABCDEFGH";
         return null;
       },
     },
@@ -136,7 +253,12 @@ const SLACK_JOURNEY: ChannelJourney = {
       id: "verify",
       title: "Ready",
       description:
-        "Slack bot is configured. After setup, invite the bot to a channel with `/invite @yourbot` and mention it to test.",
+        "Slack bot is configured!\n\n" +
+        "After finishing setup:\n" +
+        "1. Invite the bot to a channel: `/invite @yourbot`\n" +
+        "2. Mention the bot: `@yourbot hello`\n" +
+        "3. Or send a direct message to the bot\n\n" +
+        "**Tip:** Check the **App Home → Messages Tab** is enabled for DMs to work.",
     },
   ],
 };
@@ -148,28 +270,69 @@ const WHATSAPP_JOURNEY: ChannelJourney = {
       id: "prereqs",
       title: "Prerequisites",
       description:
-        "WhatsApp integration uses the WhatsApp Business API.\n\n" +
+        "WhatsApp integration uses the **WhatsApp Business Cloud API**.\n\n" +
         "**You need:**\n" +
-        "- A Meta Business account\n" +
-        "- A WhatsApp Business API phone number\n" +
-        "- Access token from the Meta developer portal\n\n" +
-        "Visit [developers.facebook.com](https://developers.facebook.com/) to get started.",
+        "1. A [Meta Business account](https://business.facebook.com/)\n" +
+        "2. A [Meta Developer account](https://developers.facebook.com/)\n" +
+        "3. Create a new App → choose **Business** type\n" +
+        "4. Add **WhatsApp** product to the app\n" +
+        "5. Go to **WhatsApp → API Setup**\n\n" +
+        "You'll get a temporary access token and test phone number to start.",
+      note: "Meta provides a free test number and 1,000 free conversations/month.",
     },
     {
       id: "configure",
-      title: "Configure",
-      description: "Enter your WhatsApp Business API credentials.",
+      title: "API Credentials",
+      description: "Enter your WhatsApp Business API credentials from the Meta Developer Dashboard.",
       fields: ["phone_number_id", "access_token", "verify_token"],
       validate: (draft) => {
+        if (!draft.phone_number_id?.trim()) return "Phone Number ID is required (found in WhatsApp → API Setup)";
+        if (!/^\d+$/.test(draft.phone_number_id.trim())) return "Phone Number ID must be numeric";
         if (!draft.access_token?.trim()) return "Access token is required";
-        if (!draft.phone_number_id?.trim()) return "Phone number ID is required";
         return null;
       },
     },
     {
+      id: "security",
+      title: "Security & Access",
+      description:
+        "Configure webhook security and who can message the bot.\n\n" +
+        "**App Secret:** Found in App Settings → Basic → App Secret. Used to verify webhook signatures.\n\n" +
+        "**Allowed Numbers:** Enter phone numbers in E.164 format (e.g., `+1234567890`), or `*` for everyone.\n\n" +
+        "**Security note:** Leaving allowed numbers empty will **deny all** by default.",
+      fields: ["app_secret", "allowed_numbers"],
+      validate: (draft) => {
+        const nums = draft.allowed_numbers?.trim();
+        if (!nums) return null;
+        if (nums === "*") return null;
+        const items = nums.split(",").map((s) => s.trim()).filter(Boolean);
+        for (const item of items) {
+          if (!/^\+\d{7,15}$/.test(item)) return `Invalid number: "${item}". Use E.164 format: +1234567890`;
+        }
+        return null;
+      },
+      note: "Empty = deny all. Phone numbers must include country code (e.g., +1 for US).",
+    },
+    {
+      id: "webhook",
+      title: "Webhook Setup",
+      description:
+        "To receive messages, configure a webhook in the Meta Developer Dashboard:\n\n" +
+        "1. Go to **WhatsApp → Configuration → Webhook**\n" +
+        "2. Set **Callback URL** to your ClawDesk instance URL + `/webhook/whatsapp`\n" +
+        "3. Set **Verify Token** to the same value entered above\n" +
+        "4. Subscribe to the `messages` webhook field\n\n" +
+        "**For local development:** Use a tunnel like ngrok or Cloudflare Tunnel to expose your local instance.",
+    },
+    {
       id: "verify",
       title: "Ready",
-      description: "WhatsApp channel is configured. You'll need to set up a webhook URL pointing to your ClawDesk instance.",
+      description:
+        "WhatsApp channel is configured!\n\n" +
+        "After finishing setup:\n" +
+        "1. Send a message to the WhatsApp number from an allowed contact\n" +
+        "2. ClawDesk will receive it via webhook and respond\n\n" +
+        "**Note:** For production, generate a permanent access token (System User token) instead of the temporary one.",
     },
   ],
 };
@@ -182,29 +345,85 @@ const EMAIL_JOURNEY: ChannelJourney = {
       title: "Prerequisites",
       description:
         "To connect email, you need IMAP/SMTP credentials.\n\n" +
-        "**For Gmail:** Enable \"Less secure apps\" or create an [App Password](https://myaccount.google.com/apppasswords).\n\n" +
-        "**For Outlook:** Use your Microsoft account credentials or create an app password if 2FA is enabled.",
-      note: "App passwords are recommended over your regular password.",
+        "**Gmail:**\n" +
+        "1. Enable 2-Step Verification on your Google account\n" +
+        "2. Create an [App Password](https://myaccount.google.com/apppasswords)\n" +
+        "3. Use `imap.gmail.com` / `smtp.gmail.com`\n\n" +
+        "**Outlook/Microsoft 365:**\n" +
+        "1. Use `outlook.office365.com` for both IMAP and SMTP\n" +
+        "2. Create an app password if 2FA is enabled\n\n" +
+        "**Other providers:** Check your email provider's IMAP/SMTP settings.",
+      note: "Always use app passwords — never use your main password.",
     },
     {
-      id: "configure",
+      id: "servers",
+      title: "Server Settings",
+      description: "Enter your IMAP (incoming) and SMTP (outgoing) server details.",
+      fields: ["imap_host", "imap_port", "smtp_host", "smtp_port"],
+      validate: (draft) => {
+        if (!draft.imap_host?.trim()) return "IMAP host is required";
+        if (!draft.smtp_host?.trim()) return "SMTP host is required";
+        const imapPort = draft.imap_port?.trim();
+        if (imapPort) {
+          const n = parseInt(imapPort, 10);
+          if (isNaN(n) || n < 1 || n > 65535) return "IMAP port must be 1-65535";
+        }
+        const smtpPort = draft.smtp_port?.trim();
+        if (smtpPort) {
+          const n = parseInt(smtpPort, 10);
+          if (isNaN(n) || n < 1 || n > 65535) return "SMTP port must be 1-65535";
+        }
+        return null;
+      },
+      note: "Default ports: IMAP 993 (TLS), SMTP 465 (TLS). All connections use TLS.",
+    },
+    {
+      id: "credentials",
       title: "Credentials",
-      description: "Enter your email account credentials.",
-      fields: ["imap_host", "smtp_host", "email", "password"],
+      description: "Enter your email account credentials and the folder to monitor.",
+      fields: ["email", "password", "imap_folder"],
       validate: (draft) => {
         const email = draft.email?.trim();
         if (!email) return "Email address is required";
-        if (!email.includes("@")) return "Enter a valid email address";
-        if (!draft.password?.trim()) return "Password is required";
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return "Enter a valid email address";
+        if (!draft.password?.trim()) return "Password is required (use an app password)";
         return null;
       },
+      note: "The email address is used for both login and as the From address when sending replies.",
+    },
+    {
+      id: "access",
+      title: "Sender Allowlist",
+      description:
+        "Control which senders the agent responds to.\n\n" +
+        "Enter email addresses or domain wildcards (comma-separated), or `*` for everyone.\n\n" +
+        "Examples: `user@example.com`, `*@company.com`, `*`\n\n" +
+        "**Security note:** Leaving this empty will **deny all senders** by default.",
+      fields: ["allowed_senders"],
+      validate: (draft) => {
+        const senders = draft.allowed_senders?.trim();
+        if (!senders) return null;
+        if (senders === "*") return null;
+        const items = senders.split(",").map((s) => s.trim()).filter(Boolean);
+        for (const item of items) {
+          if (item.startsWith("*@")) continue;
+          if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item)) continue;
+          return `Invalid sender: "${item}". Use email (user@example.com) or domain wildcard (*@company.com)`;
+        }
+        return null;
+      },
+      note: "Empty = deny all. Use * to allow everyone. Domain wildcard: *@company.com",
     },
     {
       id: "verify",
       title: "Ready",
       description:
-        "Email channel is configured. ClawDesk will poll for new emails and respond automatically.\n\n" +
-        "**Tip:** Consider using a dedicated email address for your AI agent.",
+        "Email channel is configured!\n\n" +
+        "ClawDesk uses **IMAP IDLE** for near-instant push notifications — no polling delay.\n\n" +
+        "After finishing setup:\n" +
+        "1. Send an email to the configured address from an allowed sender\n" +
+        "2. ClawDesk will detect it instantly and reply\n\n" +
+        "**Tip:** Use a dedicated email address for your AI agent to keep things organized.",
     },
   ],
 };

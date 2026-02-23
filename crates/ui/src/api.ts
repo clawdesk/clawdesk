@@ -130,23 +130,28 @@ const _channelTypeSpecs: ChannelTypeSpec[] = [
     id: "Telegram", label: "Telegram", icon: "✈️", blurb: "Telegram Bot API for direct and group chats", docs_url: "https://core.telegram.org/bots",
     configFields: [
       { key: "bot_token", label: "Bot Token", type: "password", placeholder: "123456:ABC-DEF...", help: "Token from @BotFather", required: true },
+      { key: "allowed_users", label: "Allowed Users", type: "text", placeholder: "123456789, 987654321 or *", help: "Comma-separated Telegram user IDs, or * for everyone. Empty = deny all" },
+      { key: "mention_only", label: "Mention Only", type: "select", options: ["false", "true"], help: "Only respond to @mentions in groups" },
       { key: "webhook_url", label: "Webhook URL", type: "url", placeholder: "https://your-domain.com/webhook/telegram", help: "Public URL for incoming updates (leave blank for polling)" },
-      { key: "mode", label: "Mode", type: "select", options: ["polling", "webhook"], help: "How to receive updates" },
     ], capabilities: ["direct", "group", "media", "threads", "reactions"]
   },
   {
     id: "Discord", label: "Discord", icon: "🎮", blurb: "Discord bot for server and DM messaging", docs_url: "https://discord.com/developers/docs",
     configFields: [
       { key: "bot_token", label: "Bot Token", type: "password", placeholder: "MTk....", help: "Discord bot token from Developer Portal", required: true },
-      { key: "application_id", label: "Application ID", type: "text", placeholder: "123456789012345678", help: "Discord application ID" },
+      { key: "application_id", label: "Application ID", type: "text", placeholder: "123456789012345678", help: "Discord application ID (from Developer Portal → General Information)", required: true },
+      { key: "guild_id", label: "Server (Guild) ID", type: "text", placeholder: "123456789012345678", help: "Restrict to a single server. Leave blank for all servers" },
+      { key: "allowed_users", label: "Allowed Users", type: "text", placeholder: "123456789012345678 or *", help: "Comma-separated Discord user IDs, or * for everyone. Empty = deny all" },
+      { key: "mention_only", label: "Mention Only", type: "select", options: ["false", "true"], help: "Only respond to @mentions in channels" },
     ], capabilities: ["direct", "group", "media", "threads", "reactions"]
   },
   {
     id: "Slack", label: "Slack", icon: "💼", blurb: "Slack workspace integration via Bot + App tokens", docs_url: "https://api.slack.com/",
     configFields: [
-      { key: "bot_token", label: "Bot Token", type: "password", placeholder: "xoxb-...", help: "Slack bot user OAuth token", required: true },
-      { key: "app_token", label: "App Token", type: "password", placeholder: "xapp-...", help: "Slack app-level token for Socket Mode", required: true },
-      { key: "signing_secret", label: "Signing Secret", type: "password", placeholder: "", help: "Slack request signing secret" },
+      { key: "bot_token", label: "Bot Token", type: "password", placeholder: "xoxb-...", help: "Bot User OAuth Token from Install App page", required: true },
+      { key: "app_token", label: "App Token", type: "password", placeholder: "xapp-...", help: "App-level token for Socket Mode (Settings → Basic Information → App-Level Tokens)", required: true },
+      { key: "channel_id", label: "Channel ID", type: "text", placeholder: "C01ABCDEFGH", help: "Restrict to a single channel. Leave blank for all" },
+      { key: "allowed_users", label: "Allowed Users", type: "text", placeholder: "U01ABCDEFGH or *", help: "Comma-separated Slack user IDs, or * for everyone. Empty = deny all" },
     ], capabilities: ["direct", "group", "media", "threads", "reactions"]
   },
   {
@@ -155,15 +160,21 @@ const _channelTypeSpecs: ChannelTypeSpec[] = [
       { key: "phone_number_id", label: "Phone Number ID", type: "text", placeholder: "", help: "WhatsApp Business phone number ID", required: true },
       { key: "access_token", label: "Access Token", type: "password", placeholder: "EAAG...", help: "Meta Graph API access token", required: true },
       { key: "verify_token", label: "Verify Token", type: "text", placeholder: "", help: "Webhook verification token" },
+      { key: "app_secret", label: "App Secret", type: "password", placeholder: "", help: "Meta app secret for webhook signature verification" },
+      { key: "allowed_numbers", label: "Allowed Numbers", type: "text", placeholder: "+1234567890 or *", help: "Comma-separated E.164 phone numbers, or * for everyone. Empty = deny all" },
     ], capabilities: ["direct", "group", "media"]
   },
   {
-    id: "Email", label: "Email", icon: "📧", blurb: "IMAP/SMTP email integration", docs_url: "",
+    id: "Email", label: "Email", icon: "📧", blurb: "IMAP/SMTP email integration with IDLE push", docs_url: "",
     configFields: [
       { key: "imap_host", label: "IMAP Host", type: "text", placeholder: "imap.gmail.com", help: "IMAP server hostname", required: true },
+      { key: "imap_port", label: "IMAP Port", type: "text", placeholder: "993", help: "IMAP TLS port (default: 993)" },
       { key: "smtp_host", label: "SMTP Host", type: "text", placeholder: "smtp.gmail.com", help: "SMTP server hostname", required: true },
-      { key: "email", label: "Email Address", type: "text", placeholder: "bot@example.com", required: true },
+      { key: "smtp_port", label: "SMTP Port", type: "text", placeholder: "465", help: "SMTP TLS port (default: 465)" },
+      { key: "email", label: "Email Address", type: "text", placeholder: "bot@example.com", help: "Login and from address", required: true },
       { key: "password", label: "Password", type: "password", placeholder: "", help: "Email account password or app password", required: true },
+      { key: "imap_folder", label: "IMAP Folder", type: "text", placeholder: "INBOX", help: "Folder to monitor (default: INBOX)" },
+      { key: "allowed_senders", label: "Allowed Senders", type: "text", placeholder: "user@example.com, *@company.com or *", help: "Comma-separated emails/domains, or * for everyone. Empty = deny all" },
     ], capabilities: ["direct", "media"]
   },
   {
