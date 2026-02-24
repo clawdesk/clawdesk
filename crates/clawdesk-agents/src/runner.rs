@@ -291,6 +291,8 @@ pub enum AgentEvent {
     ToolEnd { name: String, success: bool, duration_ms: u64 },
     Compaction { level: CompactionLevel, tokens_before: usize, tokens_after: usize },
     StreamChunk { text: String, done: bool },
+    /// Emitted for reasoning/thinking tokens (separate from visible content).
+    ThinkingChunk { text: String },
     Done { total_rounds: usize },
     Error { error: String },
 
@@ -778,6 +780,19 @@ impl AgentRunner {
             system_prompt
         };
 
+        // Output discipline: instruct the model to respond with ONLY the final
+        // answer. Models with reasoning_content (e.g. GLM-4) tend to narrate
+        // their entire thought process in the content field as well. This
+        // instruction suppresses that duplication.
+        let system_prompt = format!(
+            "{}\n\n## Output Rules\n\
+             - Respond with ONLY the final answer the user needs.\n\
+             - Do NOT repeat or narrate your reasoning, planning, or tool usage in your response.\n\
+             - Do NOT echo raw JSON, coordinates, API responses, or intermediate data unless the user explicitly asked for it.\n\
+             - Keep responses concise and directly useful.",
+            system_prompt
+        );
+
         // Stage 2: Initialize context guard.
         // T7: If an upstream guard was injected via with_context_guard(),
         // use it directly — this preserves the token count and circuit
@@ -1153,6 +1168,12 @@ impl AgentRunner {
             let mut stream_tool_calls: Vec<ToolCall> = Vec::new();
 
             while let Some(chunk) = chunk_rx.recv().await {
+                // Emit reasoning/thinking tokens separately
+                if !chunk.reasoning_delta.is_empty() {
+                    self.emit(AgentEvent::ThinkingChunk {
+                        text: chunk.reasoning_delta,
+                    });
+                }
                 if !chunk.delta.is_empty() {
                     streamed_content.push_str(&chunk.delta);
                     self.emit(AgentEvent::StreamChunk {

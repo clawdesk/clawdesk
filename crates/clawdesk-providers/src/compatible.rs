@@ -129,6 +129,17 @@ impl CompatibleConfig {
         self.merge_system_into_user = true;
         self
     }
+
+    /// Disable native function/tool calling.
+    ///
+    /// Use this for local models (vLLM, llama.cpp, etc.) that don't reliably
+    /// support the OpenAI tool-calling wire format. When disabled, tool
+    /// definitions are omitted from the request body so the model responds
+    /// with plain text instead of attempting function calls.
+    pub fn without_native_tools(mut self) -> Self {
+        self.supports_native_tools = false;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -789,6 +800,7 @@ impl Provider for OpenAiCompatibleProvider {
                         let _ = chunk_tx
                             .send(StreamChunk {
                                 delta: String::new(),
+                                reasoning_delta: String::new(),
                                 done: true,
                                 finish_reason: Some(finish),
                                 usage: last_usage.take(),
@@ -831,17 +843,15 @@ impl Provider for OpenAiCompatibleProvider {
                                 }
                             }
 
-                            // Emit text delta
-                            let text = choice
-                                .delta
-                                .content
-                                .or(choice.delta.reasoning_content)
-                                .unwrap_or_default();
+                            // Emit text delta (content only — reasoning_content streamed separately)
+                            let text = choice.delta.content.unwrap_or_default();
+                            let reasoning = choice.delta.reasoning_content.unwrap_or_default();
 
-                            if !text.is_empty() {
+                            if !text.is_empty() || !reasoning.is_empty() {
                                 let _ = chunk_tx
                                     .send(StreamChunk {
                                         delta: text,
+                                        reasoning_delta: reasoning,
                                         done: false,
                                         finish_reason: None,
                                         usage: None,
@@ -869,6 +879,7 @@ impl Provider for OpenAiCompatibleProvider {
         let _ = chunk_tx
             .send(StreamChunk {
                 delta: String::new(),
+                reasoning_delta: String::new(),
                 done: true,
                 finish_reason: Some(if tool_calls.is_empty() {
                     FinishReason::Stop

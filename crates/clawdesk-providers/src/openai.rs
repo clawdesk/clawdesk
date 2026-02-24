@@ -466,6 +466,7 @@ impl Provider for OpenAiProvider {
                             let _ = chunk_tx
                                 .send(StreamChunk {
                                     delta: content.to_string(),
+                                    reasoning_delta: String::new(),
                                     done,
                                     finish_reason: finish,
                                     usage: if done { usage.clone() } else { None },
@@ -478,6 +479,7 @@ impl Provider for OpenAiProvider {
                         let _ = chunk_tx
                             .send(StreamChunk {
                                 delta: String::new(),
+                                reasoning_delta: String::new(),
                                 done: true,
                                 finish_reason: Some(FinishReason::Stop),
                                 usage,

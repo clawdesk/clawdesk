@@ -184,6 +184,10 @@ pub enum FinishReason {
 pub struct StreamChunk {
     /// Incremental text fragment (may be empty on the final chunk).
     pub delta: String,
+    /// Incremental reasoning/thinking text (separate from visible content).
+    /// Models like GLM-4 send this in `reasoning_content` deltas.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning_delta: String,
     /// True on the last chunk — callers should finalize after receiving this.
     pub done: bool,
     /// Populated only on the final chunk.
@@ -226,6 +230,7 @@ pub trait Provider: Send + Sync + 'static {
         let _ = chunk_tx
             .send(StreamChunk {
                 delta: resp.content,
+                reasoning_delta: String::new(),
                 done: true,
                 finish_reason: Some(resp.finish_reason),
                 usage: Some(resp.usage),

@@ -603,6 +603,7 @@ impl Provider for VertexProvider {
                             let _ = chunk_tx
                                 .send(StreamChunk {
                                     delta: text_parts,
+                                    reasoning_delta: String::new(),
                                     done: is_done,
                                     finish_reason,
                                     usage,

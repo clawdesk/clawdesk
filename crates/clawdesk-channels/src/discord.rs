@@ -348,14 +348,55 @@ impl DiscordChannel {
                     let d = if sequence >= 0 { json!(sequence) } else { json!(null) };
                     let hb = json!({"op": 1, "d": d});
                     if write.send(WsMessage::Text(hb.to_string().into())).await.is_err() {
+                        warn!("Discord: heartbeat send failed — breaking loop");
                         break;
                     }
                 }
                 msg = read.next() => {
                     let msg = match msg {
                         Some(Ok(WsMessage::Text(t))) => t,
-                        Some(Ok(WsMessage::Close(_))) | None => break,
-                        _ => continue,
+                        Some(Ok(WsMessage::Close(frame))) => {
+                            let code = frame.as_ref().map(|f| f.code);
+                            let reason = frame.as_ref()
+                                .map(|f| f.reason.to_string())
+                                .unwrap_or_default();
+                            warn!(
+                                ?code,
+                                reason = %reason,
+                                "Discord: received WebSocket Close frame"
+                            );
+                            // Fatal close codes — no point retrying
+                            use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+                            let is_fatal = matches!(
+                                code,
+                                Some(CloseCode::Library(4004))  // Authentication failed
+                                | Some(CloseCode::Library(4010))  // Invalid shard
+                                | Some(CloseCode::Library(4011))  // Sharding required
+                                | Some(CloseCode::Library(4012))  // Invalid API version
+                                | Some(CloseCode::Library(4013))  // Invalid intent(s)
+                                | Some(CloseCode::Library(4014))  // Disallowed intent(s)
+                            );
+                            if is_fatal {
+                                return Err(format!(
+                                    "Discord: fatal close code {:?}: {reason}. \
+                                     Check Bot settings at https://discord.com/developers/applications",
+                                    code
+                                ));
+                            }
+                            break;
+                        }
+                        None => {
+                            warn!("Discord: WebSocket stream ended (None)");
+                            break;
+                        }
+                        Some(Err(e)) => {
+                            warn!(error = %e, "Discord: WebSocket read error");
+                            continue;
+                        }
+                        Some(Ok(other)) => {
+                            debug!(msg_type = ?other, "Discord: non-text WebSocket frame");
+                            continue;
+                        }
                     };
 
                     let event: serde_json::Value = match serde_json::from_str(msg.as_ref()) {
@@ -608,6 +649,16 @@ impl Channel for DiscordChannel {
                     Err(e) => {
                         if !gw_channel.running.load(Ordering::Relaxed) {
                             info!("Discord: gateway error during shutdown — exiting");
+                            break;
+                        }
+                        // Fatal errors (auth failure, disallowed intents) — stop retrying
+                        let err_str = e.to_string();
+                        if err_str.contains("fatal close code") {
+                            error!(
+                                error = %e,
+                                "Discord: FATAL — stopping reconnect. Fix the issue and restart."
+                            );
+                            gw_channel.running.store(false, Ordering::Relaxed);
                             break;
                         }
                         let delay = BACKOFF_STEPS

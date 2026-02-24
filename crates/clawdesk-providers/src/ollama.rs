@@ -643,6 +643,7 @@ impl Provider for OllamaProvider {
                 let _ = chunk_tx
                     .send(StreamChunk {
                         delta: chunk_data.message.content,
+                        reasoning_delta: String::new(),
                         done: is_done,
                         finish_reason: finish,
                         usage,

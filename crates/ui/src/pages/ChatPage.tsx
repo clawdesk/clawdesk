@@ -34,6 +34,7 @@ interface ThreadMessage {
   id: string;
   role: "user" | "assistant" | "system";
   text: string;
+  thinkingText?: string;
   time: string;
   agent?: string;
   skills?: string[];
@@ -714,6 +715,19 @@ export function ChatPage({
           setMessages((prev) =>
             prev.map((m) =>
               m.id === msgId ? { ...m, text: m.text + chunkText } : m
+            )
+          );
+        }
+        return;
+      }
+
+      // ── ThinkingChunk: Accumulate reasoning/thinking text (shown in collapsible block) ──
+      if (event.type === "ThinkingChunk") {
+        const chunkText = typeof event.text === "string" ? event.text : "";
+        if (chunkText.length > 0) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msgId ? { ...m, thinkingText: (m.thinkingText || "") + chunkText } : m
             )
           );
         }
@@ -1457,6 +1471,9 @@ export function ChatPage({
                     )}
 
                     <div className="chat-msg-content">
+                      {m.role === "assistant" && m.thinkingText && (
+                        <ThinkingBlock text={m.thinkingText} />
+                      )}
                       <MarkdownContent content={m.text} isStreaming={m.isStreaming} />
                     </div>
 

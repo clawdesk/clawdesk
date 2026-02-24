@@ -33,6 +33,7 @@ import { classifyError } from "./lib/error-recovery";
 import { subscribeAppEvents } from "./stores/event-bus";
 import { translateRisk } from "./lib/risk-translator";
 import { AppShell, type ShellNavGroup } from "./shell/AppShell";
+import { getActiveProvider } from "./providerConfig";
 import { ChatPage } from "./pages/ChatPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { SkillsPage } from "./pages/SkillsPage";
@@ -379,7 +380,7 @@ function createThreadForAgent(agentId: string, agent: DesktopAgent | null, patch
 
 function mapChannelStatusToAccountStatus(status: string): AccountStatus {
   const lowered = status.toLowerCase();
-  if (lowered.includes("connected") || lowered === "healthy" || lowered === "active") {
+  if (lowered.includes("connected") || lowered === "healthy" || lowered === "active" || lowered === "configured") {
     return "connected";
   }
   if (lowered.includes("permission")) return "permissions_changed";
@@ -974,6 +975,11 @@ export default function App() {
   // ── Load backend data on mount ────────────────────────────
   useEffect(() => {
     async function loadBackendData() {
+      // Sync the active provider to the backend so channel adapters (Discord,
+      // Telegram, etc.) that started before the UI loaded have the right
+      // provider immediately — even before the user opens ChatPage.
+      getActiveProvider();
+
       try {
         // Phase 1: Core data
         const [health, agents, skills, security, metrics, sessions, channels, pipelines] = await Promise.allSettled([

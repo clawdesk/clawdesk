@@ -581,6 +581,7 @@ impl Provider for OpenRouterProvider {
                         let _ = chunk_tx
                             .send(StreamChunk {
                                 delta: String::new(),
+                                reasoning_delta: String::new(),
                                 done: true,
                                 finish_reason: Some(if tool_calls.is_empty() {
                                     FinishReason::Stop
@@ -625,14 +626,14 @@ impl Provider for OpenRouterProvider {
                                 }
                             }
 
-                            let text = choice.delta.content
-                                .or(choice.delta.reasoning_content)
-                                .unwrap_or_default();
+                            let text = choice.delta.content.unwrap_or_default();
+                            let reasoning = choice.delta.reasoning_content.unwrap_or_default();
 
-                            if !text.is_empty() {
+                            if !text.is_empty() || !reasoning.is_empty() {
                                 let _ = chunk_tx
                                     .send(StreamChunk {
                                         delta: text,
+                                        reasoning_delta: reasoning,
                                         done: false,
                                         finish_reason: None,
                                         usage: None,
@@ -659,6 +660,7 @@ impl Provider for OpenRouterProvider {
         let _ = chunk_tx
             .send(StreamChunk {
                 delta: String::new(),
+                reasoning_delta: String::new(),
                 done: true,
                 finish_reason: Some(if tool_calls.is_empty() {
                     FinishReason::Stop

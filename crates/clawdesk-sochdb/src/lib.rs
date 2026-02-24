@@ -54,7 +54,7 @@ use parking_lot::Mutex;
 use sochdb::EmbeddedConnection;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::{info, warn, error};
+use tracing::{debug, info, warn, error};
 
 /// The unified SochDB storage backend.
 ///
@@ -337,12 +337,29 @@ impl SochStore {
     ///
     /// Uses the system temp directory with a PID-scoped name so multiple
     /// instances don't collide. Data will NOT survive across restarts.
+    ///
+    /// **Emits a `WARN` log** — use [`open_ephemeral_quiet`] for subsystems
+    /// (like the gateway server) that intentionally use ephemeral storage.
     pub fn open_in_memory() -> Result<Self, StorageError> {
+        let store = Self::open_ephemeral_quiet()?;
+        warn!(
+            path = ?store.store_path,
+            "Opening EPHEMERAL SochDB store — data will NOT survive restart"
+        );
+        Ok(store)
+    }
+
+    /// Open an ephemeral database without emitting a warning.
+    ///
+    /// Identical to [`open_in_memory`] but logs at `DEBUG` level.
+    /// Use this for subsystems (embedded gateway, tests) that are *expected*
+    /// to run on throwaway storage.
+    pub fn open_ephemeral_quiet() -> Result<Self, StorageError> {
         let tmp_dir = std::env::temp_dir().join(format!("clawdesk-ephemeral-{}", std::process::id()));
         let store_path = tmp_dir.clone();
-        warn!(
+        debug!(
             path = ?store_path,
-            "Opening EPHEMERAL SochDB store — data will NOT survive restart"
+            "Opening ephemeral SochDB store (quiet)"
         );
         let connection = EmbeddedConnection::open(&tmp_dir)
             .map_err(|e| StorageError::OpenFailed {

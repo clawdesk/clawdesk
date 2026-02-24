@@ -996,6 +996,7 @@ export interface PipelineStepResult {
 
 export type AgentEventPayload =
   | { type: "StreamChunk"; text: string; done: boolean }
+  | { type: "ThinkingChunk"; text: string }
   | { type: "ToolStart"; name: string; args: string }
   | { type: "ToolEnd"; name: string; success: boolean; duration_ms: number }
   | { type: "RoundStart"; round: number }

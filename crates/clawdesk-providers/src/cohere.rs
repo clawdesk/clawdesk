@@ -438,6 +438,7 @@ impl Provider for CohereProvider {
                             let _ = chunk_tx
                                 .send(StreamChunk {
                                     delta: out_text,
+                                    reasoning_delta: String::new(),
                                     done,
                                     finish_reason: out_finish_reason,
                                     usage: out_usage,

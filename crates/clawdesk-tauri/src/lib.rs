@@ -25,6 +25,7 @@ pub mod commands_terminal;
 pub mod commands_threads;
 pub mod commands_voice;
 pub mod deep_link;
+pub mod engine;
 pub mod error;
 pub mod i18n;
 pub mod persistence;
@@ -336,7 +337,7 @@ pub fn run() {
 
                 // Open an in-memory SochStore for the gateway (the desktop app
                 // owns the on-disk store — the gateway is just the HTTP layer).
-                let gw_store = match clawdesk_sochdb::SochStore::open_in_memory() {
+                let gw_store = match clawdesk_sochdb::SochStore::open_ephemeral_quiet() {
                     Ok(s) => s,
                     Err(e) => {
                         warn!("Gateway SochStore failed, skipping embedded gateway: {}", e);

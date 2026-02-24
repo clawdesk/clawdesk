@@ -105,31 +105,38 @@ export function syncLegacyKeys(config: ProviderConfig): void {
  * Push the active provider config to the Rust backend.
  * Channel adapters (Discord, Telegram) run server-side and cannot read
  * browser localStorage — this IPC call bridges that gap.
+ *
+ * Debounced to avoid spamming the backend during rapid renders.
  */
+let _syncTimer: ReturnType<typeof setTimeout> | null = null;
+let _lastSyncJson = "";
+
 function syncChannelProviderToBackend(config: ProviderConfig): void {
-  invoke("sync_channel_provider", {
-    request: {
-      provider: config.provider,
-      model: config.model,
-      api_key: config.apiKey,
-      base_url: config.baseUrl,
-    },
-  }).catch((err) => {
-    console.warn("[providerConfig] Failed to sync channel provider:", err);
-  });
+  const payload = {
+    provider: config.provider,
+    model: config.model,
+    api_key: config.apiKey,
+    base_url: config.baseUrl,
+  };
+  const json = JSON.stringify(payload);
+  // Skip if the payload hasn't changed since last sync
+  if (json === _lastSyncJson) return;
+  _lastSyncJson = json;
+
+  if (_syncTimer) clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(() => {
+    invoke("sync_channel_provider", { request: payload }).catch((err) => {
+      console.warn("[providerConfig] Failed to sync channel provider:", err);
+    });
+  }, 300);
 }
 
-/** Get the active provider config (or first one, or null).
- *  Also syncs the active provider to the Rust backend on first call
- *  so channel adapters (Discord, Telegram) know which provider to use. */
+/** Get the active provider config (or first one, or null). */
 export function getActiveProvider(): ProviderConfig | null {
   const configs = loadProviders();
   if (configs.length === 0) return null;
   const activeId = getActiveProviderId();
-  const active = configs.find((c) => c.id === activeId) || configs[0];
-  // Ensure the backend knows about the active provider at startup
-  if (active) syncChannelProviderToBackend(active);
-  return active;
+  return configs.find((c) => c.id === activeId) || configs[0];
 }
 
 /** Create a new blank provider config */

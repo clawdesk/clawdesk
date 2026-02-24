@@ -121,7 +121,7 @@ serde_yaml = "0.9"
 # --- HTTP / WebSocket ---
 axum = { version = "0.7", features = ["ws"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart", "stream"], default-features = false }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
 # --- Error handling ---
 thiserror = "2"

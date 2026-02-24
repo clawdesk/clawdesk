@@ -176,6 +176,7 @@ pub enum TauriAgentEvent {
     ToolEnd { name: String, success: bool, duration_ms: u64 },
     Compaction { level: String, tokens_before: usize, tokens_after: usize },
     StreamChunk { text: String, done: bool },
+    ThinkingChunk { text: String },
     Done { total_rounds: usize },
     Error { error: String },
     PromptAssembled {
@@ -690,6 +691,34 @@ pub(crate) struct ChannelMessageSink {
     pub conversation_histories: ConversationHistoryMap,
 }
 
+impl ChannelMessageSink {
+    /// Send an error reply back through the originating channel so the user
+    /// (or operator) sees a useful message instead of silence.
+    async fn reply_error(
+        &self,
+        channel_id: clawdesk_types::channel::ChannelId,
+        origin: &clawdesk_types::message::MessageOrigin,
+        text: &str,
+    ) {
+        let ch = {
+            let Ok(reg) = self.channel_registry.read() else { return; };
+            reg.get(&channel_id).cloned()
+        };
+        if let Some(ch) = ch {
+            let outbound = clawdesk_types::message::OutboundMessage {
+                origin: origin.clone(),
+                body: text.to_string(),
+                media: vec![],
+                reply_to: None,
+                thread_id: None,
+            };
+            if let Err(e) = ch.send(outbound).await {
+                warn!(channel = %channel_id, error = %e, "Failed to send error reply");
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl clawdesk_channel::MessageSink for ChannelMessageSink {
     async fn on_message(&self, msg: clawdesk_types::message::NormalizedMessage) {
@@ -723,44 +752,60 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             result
         };
         let Some(agent) = agent else {
-            warn!("No agent configured — dropping inbound message from {sender_name}");
+            warn!("No agent configured — replying with setup instructions to {sender_name}");
+            self.reply_error(
+                channel_id,
+                &msg.origin,
+                "⚠️ ClawDesk: No agent configured. Open the app and go to **Settings → Agents** to create an agent before I can reply.",
+            ).await;
             return;
         };
 
-        // 2. Resolve provider — try channel_provider override first, then negotiator
-        let model_id = AppState::resolve_model_id(&agent.model);
+        // 2. Resolve provider — try channel_provider override first, then negotiator.
+        //
+        // All RwLockGuard usage is confined to synchronous scopes (no .await inside).
+        // The resolved provider (or None) is returned from the block, and any error
+        // reply is sent afterwards so no guard is held across an await point.
+        //
+        // `effective_model` tracks which model the provider will actually use.
+        // When a channel_provider override is active, we prefer its model over
+        // the agent's configured model so the request matches what the server has.
+        let agent_model_id = AppState::resolve_model_id(&agent.model);
         let required = ProviderCaps::TEXT_COMPLETION.union(ProviderCaps::SYSTEM_PROMPT);
 
-        // Try the UI-synced channel provider override first.
-        // This creates a one-shot provider from the user's saved settings
-        // (e.g. "Local (OpenAI Compatible)" with a custom base URL).
-        let provider: Arc<dyn Provider> = {
+        let provider_result: Result<(Arc<dyn Provider>, String), String> = {
             let channel_prov = {
                 let state = self.app_handle.state::<AppState>();
                 state.channel_provider.read().ok().and_then(|g| g.clone())
             };
 
             if let Some(ref cp) = channel_prov {
+                // Use the channel_provider's model if set, otherwise fall back to the agent's model.
+                let effective_model = if cp.model.is_empty() {
+                    agent_model_id.clone()
+                } else {
+                    cp.model.clone()
+                };
                 info!(
                     provider = %cp.provider,
-                    model = %cp.model,
+                    model = %effective_model,
                     base_url = %cp.base_url,
                     "Using channel_provider override for inbound message"
                 );
                 match cp.provider.as_str() {
                     "Anthropic" => {
                         use clawdesk_providers::anthropic::AnthropicProvider;
-                        Arc::new(AnthropicProvider::new(cp.api_key.clone(), Some(model_id.clone())))
+                        Ok((Arc::new(AnthropicProvider::new(cp.api_key.clone(), Some(effective_model.clone()))) as Arc<dyn Provider>, effective_model))
                     }
                     "OpenAI" => {
                         use clawdesk_providers::openai::OpenAiProvider;
                         let base = if cp.base_url.is_empty() { None } else { Some(cp.base_url.clone()) };
-                        Arc::new(OpenAiProvider::new(cp.api_key.clone(), base, Some(model_id.clone())))
+                        Ok((Arc::new(OpenAiProvider::new(cp.api_key.clone(), base, Some(effective_model.clone()))), effective_model))
                     }
                     "Ollama (Local)" | "ollama" => {
                         use clawdesk_providers::ollama::OllamaProvider;
                         let base = if cp.base_url.is_empty() { None } else { Some(cp.base_url.clone()) };
-                        Arc::new(OllamaProvider::new(base, Some(model_id.clone())))
+                        Ok((Arc::new(OllamaProvider::new(base, Some(effective_model.clone()))), effective_model))
                     }
                     "Local (OpenAI Compatible)" | "local_compatible" => {
                         use clawdesk_providers::compatible::{CompatibleConfig, OpenAiCompatibleProvider};
@@ -770,59 +815,101 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
                             cp.base_url.clone()
                         };
                         let config = CompatibleConfig::new("local_compatible", &base_url, &cp.api_key)
-                            .with_default_model(model_id.clone());
-                        Arc::new(OpenAiCompatibleProvider::new(config))
+                            .with_default_model(effective_model.clone());
+                        Ok((Arc::new(OpenAiCompatibleProvider::new(config)), effective_model))
                     }
                     "Google" => {
                         use clawdesk_providers::gemini::GeminiProvider;
-                        Arc::new(GeminiProvider::new(cp.api_key.clone(), Some(model_id.clone())))
+                        Ok((Arc::new(GeminiProvider::new(cp.api_key.clone(), Some(effective_model.clone()))) as Arc<dyn Provider>, effective_model))
                     }
                     _ => {
-                        // Unknown override provider — fall through to negotiator
+                        // Unknown override — fall through to negotiator (guard dropped in scoped block)
                         warn!(provider = %cp.provider, "Unknown channel_provider — trying negotiator");
-                        let neg = match self.negotiator.read() {
-                            Ok(n) => n,
-                            Err(e) => { error!("Negotiator lock poisoned: {e}"); return; }
+                        let from_neg = {
+                            let neg = match self.negotiator.read() {
+                                Ok(n) => n,
+                                Err(e) => { error!("Negotiator lock poisoned: {e}"); return; }
+                            };
+                            neg.resolve_model(&agent_model_id, required).map(|(p, _)| Arc::clone(p))
+                            // neg dropped here
                         };
-                        match neg.resolve_model(&model_id, required) {
-                            Some((p, _)) => Arc::clone(p),
-                            None => {
+                        from_neg.map_or_else(
+                            || {
                                 let state = self.app_handle.state::<AppState>();
-                                match state.resolve_provider(&agent.model) {
-                                    Ok(p) => p,
-                                    Err(e) => { warn!(error = %e, "No provider available — dropping message"); return; }
-                                }
-                            }
-                        }
+                                state.resolve_provider(&agent.model).map(|p| (p, agent_model_id.clone()))
+                            },
+                            |p| Ok((p, agent_model_id.clone())),
+                        )
                     }
                 }
             } else {
-                // No channel_provider override — use negotiator → resolve_provider fallback
-                let neg = match self.negotiator.read() {
-                    Ok(n) => n,
-                    Err(e) => { error!("Negotiator lock poisoned: {e}"); return; }
+                // No channel_provider override — use negotiator → resolve_provider fallback.
+                // Guard is scoped so it's dropped before any possible .await.
+                let from_neg = {
+                    let neg = match self.negotiator.read() {
+                        Ok(n) => n,
+                        Err(e) => { error!("Negotiator lock poisoned: {e}"); return; }
+                    };
+                    neg.resolve_model(&agent_model_id, required).map(|(p, _)| Arc::clone(p))
+                    // neg dropped here
                 };
-                match neg.resolve_model(&model_id, required) {
-                    Some((p, _)) => Arc::clone(p),
-                    None => {
-                        drop(neg);
+                from_neg.map_or_else(
+                    || {
                         let state = self.app_handle.state::<AppState>();
-                        match state.resolve_provider(&agent.model) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                warn!(model = %agent.model, error = %e, "No provider for model — dropping message");
-                                return;
-                            }
-                        }
-                    }
-                }
+                        state.resolve_provider(&agent.model).map(|p| (p, agent_model_id.clone()))
+                    },
+                    |p| Ok((p, agent_model_id.clone())),
+                )
             }
         };
 
-        // 3. Build a minimal AgentConfig + runner
+        let (provider, effective_model): (Arc<dyn Provider>, String) = match provider_result {
+            Ok((p, m)) => (p, m),
+            Err(e) => {
+                warn!(model = %agent.model, error = %e, "No provider for model — sending setup hint");
+                self.reply_error(channel_id, &msg.origin,
+                    "⚠️ ClawDesk: No LLM provider configured. Open the app → **Settings → Providers** and add an API key."
+                ).await;
+                return;
+            }
+        };
+
+        // 3. Build prompt via unified engine pipeline (same as desktop).
+        //    This gives the Discord path: memory recall, skill scoring,
+        //    PromptBuilder with knapsack budget, and memory injection.
+        let app_state = self.app_handle.state::<AppState>();
+        let active_skills = crate::engine::load_active_skills(&app_state.skill_registry);
+
+        let agent_skill_set: std::collections::HashSet<String> = agent
+            .skills
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+
+        let pipeline_result = crate::engine::build_prompt_pipeline(
+            crate::engine::PromptPipelineInput {
+                user_content: &msg.body,
+                persona: &agent.persona,
+                model_name: &effective_model,
+                agent_skill_ids: &agent_skill_set,
+                channel_id: Some("discord"),
+                channel_description: "Discord channel",
+                budget: clawdesk_domain::prompt_builder::PromptBudget::default(),
+            },
+            &app_state.memory,
+            &active_skills,
+        ).await;
+
+        // Store the prompt manifest for debugging if needed
+        if let Some(ref manifest) = pipeline_result.prompt_manifest {
+            if let Ok(mut manifests) = app_state.prompt_manifests.write() {
+                manifests.insert(agent.id.clone(), manifest.clone());
+            }
+        }
+
         let config = AgentConfig {
-            model: agent.model.clone(),
-            system_prompt: agent.persona.clone(),
+            model: effective_model,
+            system_prompt: pipeline_result.system_prompt,
             ..Default::default()
         };
 
@@ -835,7 +922,7 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
         );
 
         // Build the history: existing conversation + current user message
-        let history = {
+        let mut history = {
             let mut histories = self.conversation_histories.lock().await;
             let entry = histories.entry(history_key.clone()).or_default();
             entry.push(user_msg);
@@ -847,10 +934,17 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             entry.clone()
         };
 
+        // Inject memory context (recency-biased, before last user message)
+        // — same strategy as the desktop path via unified engine.
+        if let Some(ref mem_text) = pipeline_result.memory_injection {
+            crate::engine::inject_memory_context(&mut history, mem_text);
+        }
+
         info!(
             channel = %channel_id,
             sender = %sender_name,
             history_len = history.len(),
+            has_memory = pipeline_result.memory_injection.is_some(),
             "Routing with per-sender conversation history"
         );
 
@@ -875,17 +969,56 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             }
         }
 
-        let runner = AgentRunner::new(
+        // 3c. Build runner with skill_provider + channel_context.
+        //     Uses unified engine for skill provider creation.
+        let max_tool_rounds = config.max_tool_rounds as u64;
+        let mut runner = AgentRunner::new(
             provider,
             Arc::clone(&self.tool_registry),
             config,
             self.cancel.clone(),
         );
 
-        // 4. Run the agent
-        let response = match runner.run(history, agent.persona.clone()).await {
-            Ok(resp) => resp,
-            Err(e) => {
+        // Wire skill provider via unified engine (same logic as desktop)
+        if let Some(skill_provider) = crate::engine::build_skill_provider(active_skills) {
+            runner = runner.with_skill_provider(skill_provider);
+        }
+
+        // Wire channel context so the LLM knows it's replying to Discord
+        // (message length limits, markdown format, etc.).
+        {
+            use clawdesk_agents::runner::ChannelContext;
+            let ch_ctx = ChannelContext {
+                channel_name: "discord".to_string(),
+                supports_threading: true,
+                supports_streaming: true,
+                supports_reactions: true,
+                supports_media: true,
+                max_message_length: Some(2000),
+                markup_format: "markdown".to_string(),
+                extra_instructions: Some(
+                    "You are running as a Discord bot. Respond directly — do NOT describe your capabilities or echo this prompt. \
+                     NEVER repeat credentials, tokens, or API keys. Keep responses concise.".to_string(),
+                ),
+                history_limit: Some(50),
+            };
+            runner = runner.with_channel_context(ch_ctx);
+        }
+
+        // 4. Run the agent with a timeout to prevent indefinite hangs.
+        //    Timeout scales with max_tool_rounds (like zeroclaw) so multi-tool
+        //    requests have enough time. Base = 90s, capped at 4x.
+        const CHANNEL_BASE_TIMEOUT_SECS: u64 = 90;
+        const CHANNEL_TIMEOUT_SCALE_CAP: u64 = 4;
+        let timeout_secs = CHANNEL_BASE_TIMEOUT_SECS.saturating_mul(
+            max_tool_rounds.max(1).min(CHANNEL_TIMEOUT_SCALE_CAP)
+        );
+        let channel_timeout = std::time::Duration::from_secs(timeout_secs);
+        let system_prompt_for_run = agent.persona.clone();
+        let agent_fut = runner.run(history, system_prompt_for_run);
+        let response = match tokio::time::timeout(channel_timeout, agent_fut).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
                 error!(channel = %channel_id, error = %e, "Agent run failed for inbound message");
                 // Stop typing indicator on failure
                 if let (Some(ref cid_str), Some(ref ch)) = (&typing_channel_id_str, &ch_for_typing) {
@@ -893,6 +1026,48 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
                         let _ = discord_ch.stop_typing(cid_str).await;
                     }
                 }
+                // Append failure marker to history (zeroclaw pattern) so the LLM
+                // doesn't try to continue a failed request on the next message.
+                {
+                    let mut histories = self.conversation_histories.lock().await;
+                    if let Some(entry) = histories.get_mut(&history_key) {
+                        entry.push(clawdesk_providers::ChatMessage::new(
+                            clawdesk_providers::MessageRole::Assistant,
+                            "[Task failed — not continuing this request]",
+                        ));
+                    }
+                }
+                self.reply_error(channel_id, &msg.origin,
+                    &format!("⚠️ Error: {e}"),
+                ).await;
+                return;
+            }
+            Err(_elapsed) => {
+                error!(
+                    channel = %channel_id,
+                    sender = %sender_name,
+                    timeout_secs = timeout_secs,
+                    "Agent run timed out for inbound message"
+                );
+                // Stop typing indicator on timeout
+                if let (Some(ref cid_str), Some(ref ch)) = (&typing_channel_id_str, &ch_for_typing) {
+                    if let Some(discord_ch) = ch.as_any().downcast_ref::<clawdesk_channels::discord::DiscordChannel>() {
+                        let _ = discord_ch.stop_typing(cid_str).await;
+                    }
+                }
+                // Append timeout marker to history (zeroclaw pattern)
+                {
+                    let mut histories = self.conversation_histories.lock().await;
+                    if let Some(entry) = histories.get_mut(&history_key) {
+                        entry.push(clawdesk_providers::ChatMessage::new(
+                            clawdesk_providers::MessageRole::Assistant,
+                            "[Task timed out — not continuing this request]",
+                        ));
+                    }
+                }
+                self.reply_error(channel_id, &msg.origin,
+                    "⚠️ Request timed out while waiting for the model. Please try again."
+                ).await;
                 return;
             }
         };
@@ -926,6 +1101,30 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             response_len = response.content.len(),
             "Agent response ready — sending back to channel"
         );
+
+        // Store conversation turn in memory (unified engine) — fire-and-forget.
+        // This makes Discord conversations retrievable by future memory recall,
+        // just like the desktop path.
+        {
+            let mem = Arc::clone(&app_state.memory);
+            let tg = Arc::clone(&app_state.temporal_graph);
+            let user_text = msg.body.clone();
+            let asst_text = response.content.clone();
+            let agent_id_mem = agent.id.clone();
+            let agent_name_mem = agent.name.clone();
+
+            tokio::spawn(async move {
+                crate::engine::store_conversation_memory(
+                    &mem,
+                    &user_text,
+                    &asst_text,
+                    &agent_id_mem,
+                    &agent_name_mem,
+                    Some(&tg),
+                )
+                .await;
+            });
+        }
 
         // 5. Send response back through the originating channel
         let outbound = clawdesk_types::message::OutboundMessage {
@@ -1651,8 +1850,8 @@ impl AppState {
             // ── Notifications (hydrated from SochDB) ──
             notification_history: RwLock::new(notification_history),
 
-            // ── Channel provider override (not yet synced from UI) ──
-            channel_provider: RwLock::new(None),
+            // ── Channel provider override (hydrated from disk if available) ──
+            channel_provider: RwLock::new(Self::load_channel_provider()),
 
             // ── Clipboard (hydrated from SochDB) ──
             clipboard_history: RwLock::new(clipboard_history),
@@ -2175,6 +2374,66 @@ impl AppState {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════
+    // Channel provider override persistence — ~/.clawdesk/channel_provider.json
+    // ═══════════════════════════════════════════════════════════
+
+    fn channel_provider_path() -> std::path::PathBuf {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(home)
+            .join(".clawdesk")
+            .join("channel_provider.json")
+    }
+
+    /// Load saved channel provider override from `~/.clawdesk/channel_provider.json`.
+    /// Returns `None` if the file doesn't exist or can't be parsed.
+    pub fn load_channel_provider() -> Option<ChannelProviderOverride> {
+        let path = Self::channel_provider_path();
+        match std::fs::read_to_string(&path) {
+            Ok(data) => {
+                match serde_json::from_str(&data) {
+                    Ok(cfg) => {
+                        info!(path = %path.display(), "Loaded saved channel provider override");
+                        Some(cfg)
+                    }
+                    Err(e) => {
+                        warn!(path = %path.display(), error = %e, "Failed to parse channel_provider.json");
+                        None
+                    }
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Persist channel provider override to `~/.clawdesk/channel_provider.json` atomically.
+    pub fn save_channel_provider(cfg: &ChannelProviderOverride) {
+        let path = Self::channel_provider_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Use a unique tmp filename (PID + thread) to avoid races when
+        // multiple concurrent calls hit this function.
+        let tmp = path.with_extension(format!(
+            "tmp.{}.{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        match serde_json::to_string_pretty(cfg) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, &path)) {
+                    let _ = std::fs::remove_file(&tmp); // clean up on failure
+                    error!(error = %e, "Failed to persist channel provider override");
+                } else {
+                    info!(path = %path.display(), "Channel provider override persisted to disk");
+                }
+            }
+            Err(e) => error!(error = %e, "Failed to serialize channel provider override"),
+        }
+    }
+
     /// Hot-start a channel adapter: create it from config, register it, and
     /// spawn a background thread running `Channel::start()`.
     ///
@@ -2212,19 +2471,79 @@ impl AppState {
                 .map_err(|e| format!("Channel registry lock: {e}"))?;
             if let Some(old_ch) = reg.unregister(&channel_id_enum) {
                 info!(channel = %channel_id, "Stopping existing channel before hot-start replacement");
-                // Fire-and-forget stop — we can't await in a sync context, but
-                // the channel's internal running flag will be set to false.
-                let rt = tokio::runtime::Handle::try_current();
-                if let Ok(handle) = rt {
-                    let _ = handle.block_on(old_ch.stop());
+                // Fire-and-forget stop — spawn a task so we never call block_on
+                // inside an async context (Tokio panics if you do). The channel is
+                // already removed from the registry, so new messages won't route to
+                // it regardless of when stop() completes.
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        let _ = old_ch.stop().await;
+                    });
                 }
             }
         }
 
-        // Build a ChannelConfig from the user's key-value map
+        // Build a ChannelConfig from the user's key-value map.
+        //
+        // The UI sends all values as strings, but the channel factory expects
+        // proper JSON types for some fields (arrays, booleans). We coerce
+        // known-typed fields here so that UI settings like `allowed_users`,
+        // `mention_only`, `guild_id` etc. are actually applied.
         let mut map = Map::new();
         for (k, v) in config {
-            map.insert(k.clone(), serde_json::Value::String(v.clone()));
+            let coerced = match k.as_str() {
+                // Boolean fields — "true"/"1" → true, anything else → false
+                "mention_only" | "listen_to_bots" | "enable_groups" | "verify_tls" => {
+                    serde_json::Value::Bool(v == "true" || v == "1")
+                }
+                // String-array fields — comma-separated string → JSON array of trimmed strings
+                "allowed_users" | "allowed_contacts" | "channels" => {
+                    let items: Vec<serde_json::Value> = v
+                        .split(',')
+                        .map(|s| serde_json::Value::String(s.trim().to_string()))
+                        .filter(|s| !s.as_str().map(|x| x.is_empty()).unwrap_or(true))
+                        .collect();
+                    if items.is_empty() {
+                        // Keep as string so factory can decide the default
+                        serde_json::Value::String(v.clone())
+                    } else {
+                        serde_json::Value::Array(items)
+                    }
+                }
+                // u64-array fields — single guild/chat ID string → [id]
+                "guild_id" | "allowed_guild_ids" => {
+                    if v.is_empty() {
+                        serde_json::Value::Array(vec![])
+                    } else {
+                        let items: Vec<serde_json::Value> = v
+                            .split(',')
+                            .filter_map(|s| s.trim().parse::<u64>().ok())
+                            .map(serde_json::Value::from)
+                            .collect();
+                        serde_json::Value::Array(items)
+                    }
+                }
+                // i64-array fields — comma-separated → [id, ...]
+                "allowed_chat_ids" => {
+                    let items: Vec<serde_json::Value> = v
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<i64>().ok())
+                        .map(serde_json::Value::from)
+                        .collect();
+                    serde_json::Value::Array(items)
+                }
+                // Port / interval fields — string → integer
+                "port" | "imap_port" | "smtp_port" | "poll_interval_secs" => {
+                    if let Ok(n) = v.parse::<u64>() {
+                        serde_json::Value::Number(n.into())
+                    } else {
+                        serde_json::Value::String(v.clone())
+                    }
+                }
+                // Everything else stays as a string
+                _ => serde_json::Value::String(v.clone()),
+            };
+            map.insert(k.clone(), coerced);
         }
         let cfg = ChannelConfig::new(channel_id, map);
 

@@ -133,8 +133,9 @@ function ChannelsPanel({
     }
   }, [onRefreshChannels, pushToast]);
 
-  const connected = channels.filter((c) => c.status === "active");
-  const available = channels.filter((c) => c.status !== "active");
+  // "active" = running in registry; "configured" = saved but may need restart; "available" = not set up
+  const connected = channels.filter((c) => c.status === "active" || c.status === "configured");
+  const available = channels.filter((c) => c.status === "available");
   const spec = configuring ? specFor(configuring) : null;
 
   return (
@@ -150,13 +151,19 @@ function ChannelsPanel({
           <div className="channel-grid">
             {connected.map((ch) => {
               const ts = specFor(ch);
+              const isRunning = ch.status === "active";
               return (
-                <div key={ch.id} className="channel-card channel-card--active">
+                <div key={ch.id} className={`channel-card ${isRunning ? "channel-card--active" : ""}`}>
                   <div className="channel-card-info">
                     <h3>
                       {ts?.icon ?? "📡"} {ch.name}
                     </h3>
-                    <p>{ch.channel_type} · <span className="status-text-ok">active</span></p>
+                    <p>
+                      {ch.channel_type} · {isRunning
+                        ? <span className="status-text-ok">active</span>
+                        : <span className="status-text-warn" title="Config saved — will connect on next start or after reconnect">configured</span>
+                      }
+                    </p>
                     {(ch.capabilities ?? []).length > 0 && (
                       <div className="channel-card-caps">
                         {(ch.capabilities ?? []).map((c) => (
@@ -165,7 +172,7 @@ function ChannelsPanel({
                       </div>
                     )}
                   </div>
-                  <span className="status-dot status-ok" />
+                  <span className={`status-dot ${isRunning ? "status-ok" : "status-warn"}`} />
                   <div className="channel-card-btns">
                     <button className="btn subtle" onClick={() => openConfig(ch)}>Configure</button>
                     {ch.channel_type !== "WebChat" && ch.channel_type !== "Internal" && (

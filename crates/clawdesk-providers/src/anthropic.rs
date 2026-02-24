@@ -430,6 +430,7 @@ impl Provider for AnthropicProvider {
                                         let _ = chunk_tx
                                             .send(StreamChunk {
                                                 delta: text.to_string(),
+                                                reasoning_delta: String::new(),
                                                 done: false,
                                                 finish_reason: None,
                                                 usage: None,
@@ -505,6 +506,7 @@ impl Provider for AnthropicProvider {
                         let _ = chunk_tx
                             .send(StreamChunk {
                                 delta: String::new(),
+                                reasoning_delta: String::new(),
                                 done: true,
                                 finish_reason: Some(finish),
                                 usage: Some(TokenUsage {

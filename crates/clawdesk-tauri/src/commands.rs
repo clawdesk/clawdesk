@@ -1202,170 +1202,52 @@ pub async fn send_message(
         })
     };
 
-    // Use PromptBuilder for system prompt assembly
-    // Collect ALL active skills — every installed skill is available to every
-    // agent. The agent's `skills` field acts as a relevance boost (not a hard
-    // filter) so the knapsack packer prioritises assigned skills while still
-    // letting the agent discover and use any installed skill.
+    // ── Unified prompt pipeline (shared with Discord/channel path) ──
+    // Uses the engine module for memory recall, skill scoring, PromptBuilder
+    // assembly, and memory injection. Single codepath = no drift.
     let agent_skill_set: std::collections::HashSet<String> = agent
         .skills
         .iter()
         .map(|s| s.to_lowercase())
         .collect();
-    let active_skills: Vec<clawdesk_skills::definition::Skill> = {
-        let reg = state.skill_registry.read().map_err(|e| e.to_string())?;
-        reg.active_skills().iter().map(|s| (**s).clone()).collect()
-    };
+    let active_skills = crate::engine::load_active_skills(&state.skill_registry);
 
-    let (system_prompt, _prompt_manifest, memory_injection) = {
-        use clawdesk_domain::prompt_builder::{PromptBuilder, PromptBudget, RuntimeContext, ScoredSkill, MemoryFragment};
-        use clawdesk_types::tokenizer::estimate_tokens;
+    let pipeline_result = crate::engine::build_prompt_pipeline(
+        crate::engine::PromptPipelineInput {
+            user_content: &request.content,
+            persona: &agent.persona,
+            model_name: &agent.model,
+            agent_skill_ids: &agent_skill_set,
+            channel_id: Some("tauri"),
+            channel_description: "Tauri desktop",
+            budget: clawdesk_domain::prompt_builder::PromptBudget {
+                total: agent.token_budget,
+                response_reserve: 8_192,
+                identity_cap: 2_000,
+                skills_cap: 4_096,
+                memory_cap: 4_096,
+                history_floor: 2_000,
+                runtime_cap: 512,
+                safety_cap: 1_024,
+            },
+        },
+        &state.memory,
+        &active_skills,
+    ).await;
 
-        let budget = PromptBudget {
-            total: agent.token_budget,
-            response_reserve: 8_192,
-            identity_cap: 2_000,
-            skills_cap: 4_096,
-            memory_cap: 4_096,
-            history_floor: 2_000,
-            runtime_cap: 512,
-            safety_cap: 1_024,
-        };
+    let system_prompt = pipeline_result.system_prompt;
+    let memory_injection = pipeline_result.memory_injection;
 
-        let runtime_ctx = RuntimeContext {
-            datetime: Utc::now().to_rfc3339(),
-            channel_description: Some("Tauri desktop".into()),
-            model_name: Some(agent.model.clone()),
-            metadata: vec![],
-        };
-
-        // ── Memory recall: inject relevant memories into prompt ──
-        // Done BEFORE skill selection so memory signals can boost skill triggers.
-        let memory_fragments: Vec<MemoryFragment> = match state
-            .memory
-            .recall(&request.content, Some(10))
-            .await
-        {
-            Ok(results) => results
-                .into_iter()
-                .filter_map(|r| {
-                    let text = r.content?;
-                    if text.is_empty() { return None; }
-                    Some(MemoryFragment {
-                        token_cost: estimate_tokens(&text),
-                        relevance: r.score as f64,
-                        source: r.metadata.get("source").and_then(|v| v.as_str()).map(String::from),
-                        content: text,
-                    })
-                })
-                .collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "Memory recall failed, continuing without memories");
-                vec![]
-            }
-        };
-
-        // Extract memory signal keywords for memory→skill feedback.
-        // Take up to 20 keywords from the top memory fragments.
-        let memory_signals: Vec<String> = {
-            use clawdesk_skills::trigger::TurnContext as TC;
-            memory_fragments
-                .iter()
-                .take(5) // Top 5 most relevant memories
-                .flat_map(|f| TC::extract_keywords(&f.content))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .take(20)
-                .collect()
-        };
-
-        // Score active skills using trigger evaluation for relevance-aware packing.
-        // TriggerEvaluator scores each skill based on keyword/pattern matches,
-        // giving higher relevance to skills that match the user's message.
-        // Memory signals from recall results boost skill triggers via memory→skill feedback.
-        let trigger_ctx = {
-            use clawdesk_skills::trigger::TurnContext;
-            TurnContext {
-                channel_id: Some("tauri".to_string()),
-                message_keywords: TurnContext::extract_keywords(&request.content),
-                message_text: request.content.clone(),
-                current_time: Utc::now(),
-                requested_skill_ids: vec![],
-                triggered_this_turn: std::collections::HashSet::new(),
-                memory_signals,
-            }
-        };
-        let scored_skills: Vec<ScoredSkill> = active_skills.iter()
-            .map(|s| {
-                use clawdesk_skills::trigger::TriggerEvaluator;
-                let trigger_result = TriggerEvaluator::evaluate(s, &trigger_ctx);
-
-                // Boost priority for skills explicitly assigned to this agent.
-                let dn = s.manifest.display_name.to_lowercase();
-                let id = s.manifest.id.as_str().to_lowercase();
-                let short_id = id.rsplit('/').next().unwrap_or(&id).to_string();
-                let is_agent_skill = agent_skill_set.contains(&dn)
-                    || agent_skill_set.contains(&id)
-                    || agent_skill_set.contains(&short_id);
-
-                let base_weight = if trigger_result.matched { 2.0 } else { 1.0 };
-                let priority_weight = if is_agent_skill { base_weight * 1.5 } else { base_weight };
-
-                ScoredSkill {
-                    skill_id: s.manifest.id.as_str().to_string(),
-                    display_name: s.manifest.display_name.clone(),
-                    prompt_fragment: s.prompt_fragment.clone(),
-                    token_cost: estimate_tokens(&s.prompt_fragment),
-                    priority_weight,
-                    relevance: trigger_result.relevance,
-                }
-            })
-            .collect();
-
-        match PromptBuilder::new(budget) {
-            Ok(builder) => {
-                let (assembled, manifest) = builder
-                    .identity(agent.persona.clone())
-                    .runtime(runtime_ctx)
-                    .skills(scored_skills)
-                    .memory(memory_fragments)
-                    .build();
-
-                // Store manifest for inspector command
-                if let Ok(mut manifests) = state.prompt_manifests.write() {
-                    manifests.insert(agent.id.clone(), manifest.clone());
-                }
-
-                (assembled.text, Some(manifest), assembled.memory_text)
-            }
-            Err(_) => {
-                // Fallback to raw persona if PromptBuilder fails validation
-                (agent.persona.clone(), None, None)
-            }
+    // Store manifest for inspector command
+    if let Some(ref manifest) = pipeline_result.prompt_manifest {
+        if let Ok(mut manifests) = state.prompt_manifests.write() {
+            manifests.insert(agent.id.clone(), manifest.clone());
         }
-    };
+    }
 
-    // ── Pre-user-message memory injection ──
-    // Insert memory context as a System message just before the user's latest
-    // turn. This exploits the LLM's recency bias — tokens near the end of the
-    // context window receive much higher attention weights than those buried in
-    // a long system prompt.
+    // ── Pre-user-message memory injection (unified engine) ──
     if let Some(ref mem_text) = memory_injection {
-        // Find the position of the last user message.
-        let insert_pos = history
-            .iter()
-            .rposition(|m| matches!(m.role, MessageRole::User))
-            .unwrap_or(history.len());
-        let mem_msg = clawdesk_providers::ChatMessage::new(
-            MessageRole::System,
-            mem_text.as_str(),
-        );
-        history.insert(insert_pos, mem_msg);
-        tracing::debug!(
-            insert_pos,
-            mem_len = mem_text.len(),
-            "Injected memory context pre-user-message"
-        );
+        crate::engine::inject_memory_context(&mut history, mem_text);
     }
 
     // ── SochDB SemanticCache: check for cached response before LLM call ──
@@ -1522,8 +1404,12 @@ pub async fn send_message(
     let run_cancel = state.cancel.child_token();
 
     // Build per-request ToolRegistry with skill-provided tools
+    let deref_skills: Vec<clawdesk_skills::definition::Skill> = active_skills
+        .iter()
+        .map(|s| (**s).clone())
+        .collect();
     let mut request_tool_registry = build_skill_tool_registry(
-        &active_skills,
+        &deref_skills,
         &state.tool_registry,
     );
 
@@ -1664,19 +1550,8 @@ pub async fn send_message(
     }
 
     // GAP-2 FIX: Wire the runner-level SkillProvider for per-turn dynamic
-    // skill selection during multi-round tool-use conversations. The gateway's
-    // static PromptBuilder path handles initial skill scoring; this runner-level
-    // path re-evaluates skills on each tool round, adapting to conversation flow.
-    {
-        use clawdesk_skills::orchestrator::SkillOrchestrator;
-        use clawdesk_skills::env_injection::EnvResolver;
-        use clawdesk_skills::skill_provider::OrchestratorSkillProvider;
-
-        let arc_skills: Vec<Arc<clawdesk_skills::Skill>> =
-            active_skills.iter().map(|s| Arc::new(s.clone())).collect();
-        let orchestrator = SkillOrchestrator::new(arc_skills, 8_000);
-        let env_resolver = EnvResolver::default();
-        let skill_provider = Arc::new(OrchestratorSkillProvider::new(orchestrator, env_resolver));
+    // skill selection during multi-round tool-use conversations (unified engine).
+    if let Some(skill_provider) = crate::engine::build_skill_provider(active_skills) {
         runner = runner.with_skill_provider(skill_provider);
     }
 
@@ -2188,82 +2063,27 @@ pub async fn send_message(
         )
         .await;
 
-    // ── Memory Write Path — store conversation turn for future recall ──
+    // ── Memory Write Path (unified engine) ──
     // Durable write with UTF-8 safe truncation, content-hash dedup, and
-    // batch embedding. Failures logged at warn level (visible in release builds).
+    // batch embedding. Same logic for desktop and Discord paths.
     {
         let mem = Arc::clone(&state.memory);
-        let temporal_graph = Arc::clone(&state.temporal_graph); // Task 5
+        let temporal_graph = Arc::clone(&state.temporal_graph);
         let user_content = request.content.clone();
         let asst_content = assistant_msg.content.clone();
         let agent_id_for_mem = agent.id.clone();
         let agent_name = agent.name.clone();
 
         tokio::spawn(async move {
-            // UTF-8 safe truncation — never panics on multi-byte characters
-            let user_summary = clawdesk_memory::safe_truncate_with_ellipsis(&user_content, 500);
-            let asst_summary = clawdesk_memory::safe_truncate_with_ellipsis(&asst_content, 500);
-
-            // Content-hash dedup: check if near-identical memory already exists
-            let user_hash = clawdesk_memory::sha256_hex(&user_summary);
-            let asst_hash = clawdesk_memory::sha256_hex(&asst_summary);
-
-            // Batch write: store both user and assistant messages together
-            let batch = vec![
-                (
-                    user_summary,
-                    clawdesk_memory::MemorySource::Conversation,
-                    serde_json::json!({
-                        "role": "user",
-                        "agent_id": &agent_id_for_mem,
-                        "agent_name": &agent_name,
-                        "content_hash": &user_hash,
-                    }),
-                ),
-                (
-                    asst_summary,
-                    clawdesk_memory::MemorySource::Conversation,
-                    serde_json::json!({
-                        "role": "assistant",
-                        "agent_id": &agent_id_for_mem,
-                        "agent_name": &agent_name,
-                        "content_hash": &asst_hash,
-                    }),
-                ),
-            ];
-
-            match mem.remember_batch(batch).await {
-                Ok(ids) => {
-                    tracing::info!(
-                        count = ids.len(),
-                        agent = %agent_id_for_mem,
-                        "Memory stored (user + assistant)"
-                    );
-
-                    // ── Task 5: Create temporal edges for this conversation turn ──
-                    // Temporal edges record that this agent was discussing these
-                    // memories at this point in time. This enables temporal queries
-                    // like "what was the agent working on 5 minutes ago?"
-                    let agent_node = format!("agent:{}", agent_id_for_mem);
-                    for memory_id in &ids {
-                        let _ = temporal_graph.add_edge(
-                            &agent_node,
-                            "discussed",
-                            memory_id,
-                            Some(std::collections::HashMap::from([
-                                ("turn_timestamp".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339())),
-                            ])),
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        agent = %agent_id_for_mem,
-                        "Memory store failed — memories from this turn will be lost"
-                    );
-                }
-            }
+            crate::engine::store_conversation_memory(
+                &mem,
+                &user_content,
+                &asst_content,
+                &agent_id_for_mem,
+                &agent_name,
+                Some(&temporal_graph),
+            )
+            .await;
         });
     }
 
@@ -4031,10 +3851,14 @@ pub async fn list_channels(
         }
         let has_saved = saved_configs.contains_key(id);
         let cfg = saved_configs.get(id).cloned().unwrap_or_default();
+        // "active" = running in registry; "configured" = saved config but not
+        // yet registered (e.g. failed hot-start, will try on next restart);
+        // "available" = no config saved.
+        let status = if has_saved { "configured" } else { "available" };
         result.push(ChannelInfo {
             id: id.into(),
             name: name.into(),
-            status: if has_saved { "active".into() } else { "available".into() },
+            status: status.into(),
             channel_type: channel_type.into(),
             capabilities: vec![],
             configured: env_ok || has_saved,
@@ -4167,6 +3991,9 @@ fn emit_agent_event(app: &AppHandle, agent_id: &str, event: &AgentEvent) -> Resu
         AgentEvent::StreamChunk { text, done } => TauriAgentEvent::StreamChunk {
             text: text.clone(),
             done: *done,
+        },
+        AgentEvent::ThinkingChunk { text } => TauriAgentEvent::ThinkingChunk {
+            text: text.clone(),
         },
         AgentEvent::Done { total_rounds } => TauriAgentEvent::Done {
             total_rounds: *total_rounds,
@@ -4338,6 +4165,14 @@ pub async fn test_llm_connection(
         }
         "Ollama (Local)" => {
             Arc::new(OllamaProvider::new(base_url.clone(), Some(model.clone())))
+        }
+        "Local (OpenAI Compatible)" => {
+            use clawdesk_providers::compatible::{CompatibleConfig, OpenAiCompatibleProvider};
+            let url = base_url.clone().unwrap_or_else(|| "http://localhost:8080/v1".into());
+            let key = api_key.unwrap_or_default();
+            let config = CompatibleConfig::new("local_compatible", &url, &key)
+                .with_default_model(model.clone());
+            Arc::new(OpenAiCompatibleProvider::new(config))
         }
         _ => return Err(format!("Unknown testing provider: {}", provider)),
     };
@@ -4618,6 +4453,8 @@ pub async fn sync_channel_provider(
         base_url = %request.base_url,
         "Channel provider override synced from UI"
     );
+    // Persist to disk so the override survives app restarts
+    AppState::save_channel_provider(&override_cfg);
     *state.channel_provider.write().map_err(|e| format!("Lock poisoned: {e}"))? = Some(override_cfg);
     Ok("ok".into())
 }
