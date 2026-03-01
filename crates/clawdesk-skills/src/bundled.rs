@@ -28,23 +28,23 @@ pub fn load_bundled_skills() -> SkillRegistry {
         let _ = registry.activate(&id);
     }
 
-    // T10: Register design skills as core skills
+    // Register design skills as core skills
     for skill in crate::bundled_design::design_skills_as_core() {
         let id = skill.manifest.id.clone();
         registry.register(skill, SkillSource::Builtin);
         let _ = registry.activate(&id);
     }
 
-    // Load 52 embedded OpenClaw skills from binary (.rodata)
+    // Load 52 embedded legacy skills from binary (.rodata)
     let embed_result = crate::embedded_openclaw::load_embedded_openclaw_skills(&mut registry);
     if !embed_result.errors.is_empty() {
         tracing::warn!(
             errors = ?embed_result.errors,
-            "some embedded OpenClaw skills failed to load"
+            "some embedded legacy skills failed to load"
         );
     }
 
-    // Activate all embedded OpenClaw skills that were just registered.
+    // Activate all embedded legacy skills that were just registered.
     // `load_embedded_openclaw_skills` calls `registry.register()` which
     // sets state to Loaded — we need Active for the agent runtime.
     let openclaw_ids: Vec<SkillId> = registry
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn bundled_registry_load() {
         let registry = load_bundled_skills();
-        // 15 core + 6 design + 52 embedded OpenClaw skills
+        // 15 core + 6 design + 52 embedded legacy skills
         // Use >= to be resilient to future additions
         assert!(
             registry.len() >= 70,

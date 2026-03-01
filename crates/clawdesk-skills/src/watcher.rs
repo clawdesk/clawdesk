@@ -3,7 +3,7 @@
 //! ## File Watcher (P2)
 //!
 //! Watches `*/SKILL.md` in configured skill directories and triggers reload
-//! when files change. Replicates OpenClaw's 250ms debounce behavior and
+//! when files change. Replicates the 250ms debounce behavior and
 //! `DEFAULT_SKILLS_WATCH_IGNORED` patterns.
 //!
 //! ## Architecture
@@ -34,10 +34,10 @@ use tracing::{debug, info, warn};
 /// Default poll interval.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Default debounce window (matches OpenClaw's 250ms).
+/// Default debounce window (matches the 250ms).
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// Patterns to ignore when watching (replicates OpenClaw's DEFAULT_SKILLS_WATCH_IGNORED).
+/// Patterns to ignore when watching (replicates the DEFAULT_SKILLS_WATCH_IGNORED).
 pub const IGNORED_PATTERNS: &[&str] = &[
     ".git",
     "node_modules",

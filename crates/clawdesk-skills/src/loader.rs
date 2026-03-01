@@ -2,7 +2,7 @@
 //!
 //! Scans `~/.clawdesk/skills/` for skill directories containing either:
 //! - `skill.toml` + `prompt.md` (native ClawDesk format), or
-//! - `SKILL.md` (OpenClaw format — auto-adapted via `openclaw_adapter`)
+//! - `SKILL.md` (legacy format — auto-adapted via `openclaw_adapter`)
 //!
 //! Directory structure:
 //! ```text
@@ -11,7 +11,7 @@
 //! │   ├── skill.toml        # Manifest
 //! │   └── prompt.md         # Prompt fragment (Markdown)
 //! ├── openclaw-weather/
-//! │   └── SKILL.md          # OpenClaw format (auto-adapted)
+//! │   └── SKILL.md          # legacy format (auto-adapted)
 //! ```
 
 use crate::definition::{
@@ -163,18 +163,18 @@ impl SkillLoader {
     ///
     /// Supports two formats:
     /// 1. Native ClawDesk: `skill.toml` + `prompt.md`
-    /// 2. OpenClaw compat: `SKILL.md` (YAML frontmatter + Markdown body)
+    /// 2. compat: `SKILL.md` (YAML frontmatter + Markdown body)
     async fn load_skill(&self, dir: &Path) -> Result<Skill, String> {
         let manifest_path = dir.join("skill.toml");
         let openclaw_path = dir.join("SKILL.md");
 
-        // ── OpenClaw format fallback ──────────────────────────
+        // ── legacy format fallback ──────────────────────────
         // If no skill.toml but SKILL.md exists, use the adapter.
         if !manifest_path.exists() && openclaw_path.exists() {
             let adapter_config = AdapterConfig::default();
             let adapted = openclaw_adapter::load_openclaw_skill(dir, &adapter_config)
                 .await
-                .map_err(|e| format!("OpenClaw adapter: {}", e))?;
+                .map_err(|e| format!("legacy adapter: {}", e))?;
             info!(
                 skill = %adapted.skill.manifest.id,
                 tier = %adapted.tier,

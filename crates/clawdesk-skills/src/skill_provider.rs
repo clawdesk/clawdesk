@@ -1,4 +1,4 @@
-//! GAP-8: Concrete `SkillProvider` implementation — bridges `SkillOrchestrator`
+//! Concrete `SkillProvider` implementation — bridges `SkillOrchestrator`
 //! + `EnvResolver` to the runner's `SkillProvider` trait.
 //!
 //! This module provides `OrchestratorSkillProvider`, the production implementation
@@ -81,7 +81,7 @@ impl SkillProvider for OrchestratorSkillProvider {
                 continue;
             }
 
-            // GAP-8: Apply env injection for skills that need API keys.
+            // Apply env injection for skills that need API keys.
             // The EnvGuard applies env vars when created and restores them
             // on drop. For prompt injection (non-executing skills), we only
             // need to verify env availability, not actually inject.

@@ -270,7 +270,7 @@ impl SochStore {
         self.compact_session_with_limit(key, summarizer, HOT_TIER_SIZE).await
     }
 
-    /// GAP-3: Compact with a per-channel history limit.
+    /// Compact with a per-channel history limit.
     ///
     /// Like `compact_session`, but allows the caller to override the hot-tier
     /// size. This is used by channels that need smaller context windows

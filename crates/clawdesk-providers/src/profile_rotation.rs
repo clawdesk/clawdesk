@@ -29,9 +29,10 @@
 //! ```
 //! With N=3, λ_fail=0.01/s, avg d=30s: P ≈ 0.012 → 98.8% availability.
 
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -193,7 +194,7 @@ pub struct ProfileRotator {
     /// Provider name.
     provider: String,
     /// Profiles indexed by ID.
-    profiles: RwLock<HashMap<String, RotatableProfile>>,
+    profiles: DashMap<String, RotatableProfile>,
     /// Configuration.
     config: RotationConfig,
 }
@@ -203,7 +204,7 @@ impl ProfileRotator {
     pub fn new(provider: impl Into<String>, config: RotationConfig) -> Self {
         Self {
             provider: provider.into(),
-            profiles: RwLock::new(HashMap::new()),
+            profiles: DashMap::new(),
             config,
         }
     }
@@ -211,14 +212,12 @@ impl ProfileRotator {
     /// Add or update a profile.
     pub fn upsert(&self, profile: RotatableProfile) {
         let id = profile.id.clone();
-        let mut profiles = self.profiles.write().expect("profiles write lock");
-        profiles.insert(id, profile);
+        self.profiles.insert(id, profile);
     }
 
     /// Remove a profile by ID.
     pub fn remove(&self, id: &str) -> Option<RotatableProfile> {
-        let mut profiles = self.profiles.write().expect("profiles write lock");
-        profiles.remove(id)
+        self.profiles.remove(id).map(|(_, v)| v)
     }
 
     /// Select the best available profile.
@@ -229,23 +228,21 @@ impl ProfileRotator {
     /// Returns `None` if all profiles are on cooldown or expired.
     pub fn select(&self) -> Option<RotatableProfile> {
         let max_idle = Duration::from_secs(self.config.max_idle_secs);
-        let profiles = self.profiles.read().expect("profiles read lock");
 
-        profiles
-            .values()
-            .filter(|p| p.is_available())
+        self.profiles
+            .iter()
+            .filter(|e| e.value().is_available())
             .max_by(|a, b| {
-                let wa = a.effective_weight(max_idle);
-                let wb = b.effective_weight(max_idle);
+                let wa = a.value().effective_weight(max_idle);
+                let wb = b.value().effective_weight(max_idle);
                 wa.partial_cmp(&wb).unwrap_or(std::cmp::Ordering::Equal)
             })
-            .cloned()
+            .map(|e| e.value().clone())
     }
 
     /// Record a successful request on a profile.
     pub fn record_success(&self, profile_id: &str) {
-        let mut profiles = self.profiles.write().expect("profiles write lock");
-        if let Some(p) = profiles.get_mut(profile_id) {
+        if let Some(mut p) = self.profiles.get_mut(profile_id) {
             p.failure_count = 0;
             p.total_requests += 1;
             p.in_cooldown = false;
@@ -265,8 +262,7 @@ impl ProfileRotator {
         reason: FailureReason,
         server_retry_after: Option<Duration>,
     ) {
-        let mut profiles = self.profiles.write().expect("profiles write lock");
-        if let Some(p) = profiles.get_mut(profile_id) {
+        if let Some(mut p) = self.profiles.get_mut(profile_id) {
             p.failure_count += 1;
             p.total_requests += 1;
             p.total_failures += 1;
@@ -306,17 +302,41 @@ impl ProfileRotator {
 
     /// Compute truncated exponential backoff with jitter.
     ///
-    /// delay = min(base × 2^(f-1) + jitter, max_delay)
-    /// jitter ~ Uniform(0, base × 2^(f-1) × jitter_factor)
+    /// `delay = min(base × 2^(f-1) + jitter, max_delay)`
+    /// `jitter ~ Uniform(0, base × 2^(f-1) × jitter_factor)`
+    ///
+    /// Uses `std::hash::RandomState` (OS-entropy-seeded per
+    /// process) to produce per-instance decorrelated jitter — no `rand`
+    /// crate needed. Each call hashes a monotonic counter through the
+    /// process-unique hasher, so two processes that started at the same
+    /// wall-clock instant still get independent jitter sequences.
     fn compute_backoff_delay(&self, failure_count: u32) -> Duration {
+        use std::hash::{BuildHasher, Hasher};
+
+        // Process-wide, OS-entropy-seeded hasher factory.
+        // Initialized once — the seed is random per process, which is
+        // exactly the decorrelation axis we need against thundering herd.
+        static RANDOM_STATE: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+            std::sync::OnceLock::new();
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        let state = RANDOM_STATE.get_or_init(std::collections::hash_map::RandomState::new);
+
         let base = self.config.base_delay_secs as f64;
         let max = self.config.max_delay_secs as f64;
         let exponent = (failure_count.saturating_sub(1)).min(20) as f64;
         let base_delay = base * 2.0_f64.powf(exponent);
 
-        // Deterministic jitter based on failure_count (for reproducibility in tests)
         let jitter_range = base_delay * self.config.jitter_factor;
-        let jitter = jitter_range * 0.5; // midpoint for determinism
+
+        // Hash a monotonic counter → different value every call, decorrelated
+        // across processes because RandomState's seed differs per process.
+        let tick = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut hasher = state.build_hasher();
+        hasher.write_u64(tick);
+        let hash = hasher.finish();
+        let frac = (hash >> 33) as f64 / (1u64 << 31) as f64; // [0, 1)
+        let jitter = jitter_range * frac;
 
         let delay = (base_delay + jitter).min(max);
         Duration::from_secs_f64(delay)
@@ -324,16 +344,14 @@ impl ProfileRotator {
 
     /// Number of profiles.
     pub fn profile_count(&self) -> usize {
-        self.profiles.read().expect("profiles read lock").len()
+        self.profiles.len()
     }
 
     /// Number of available (non-cooldown, non-expired) profiles.
     pub fn available_count(&self) -> usize {
         self.profiles
-            .read()
-            .expect("profiles read lock")
-            .values()
-            .filter(|p| p.is_available())
+            .iter()
+            .filter(|e| e.value().is_available())
             .count()
     }
 
@@ -351,17 +369,18 @@ impl ProfileRotator {
     pub fn snapshot(&self) -> Vec<ProfileSnapshot> {
         let max_idle = Duration::from_secs(self.config.max_idle_secs);
         self.profiles
-            .read()
-            .expect("profiles read lock")
-            .values()
-            .map(|p| ProfileSnapshot {
-                id: p.id.clone(),
-                effective_weight: p.effective_weight(max_idle),
-                failure_count: p.failure_count,
-                total_requests: p.total_requests,
-                is_available: p.is_available(),
-                is_expired: p.is_expired,
-                in_cooldown: p.in_cooldown,
+            .iter()
+            .map(|e| {
+                let p = e.value();
+                ProfileSnapshot {
+                    id: p.id.clone(),
+                    effective_weight: p.effective_weight(max_idle),
+                    failure_count: p.failure_count,
+                    total_requests: p.total_requests,
+                    is_available: p.is_available(),
+                    is_expired: p.is_expired,
+                    in_cooldown: p.in_cooldown,
+                }
             })
             .collect()
     }

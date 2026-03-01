@@ -101,7 +101,7 @@ pub struct ContextGuardConfig {
     /// Total context window size in tokens.
     pub context_limit: usize,
     /// Trigger compaction at this fraction of the limit.
-    /// Set to 0.0 to use adaptive thresholds (T12).
+    /// Set to 0.0 to use adaptive thresholds.
     pub trigger_threshold: f64, // α = 0.80
     /// Reserve tokens for the model's response.
     pub response_reserve: usize,
@@ -109,11 +109,11 @@ pub struct ContextGuardConfig {
     pub circuit_breaker_threshold: u32,
     /// Circuit breaker cooldown.
     pub circuit_breaker_cooldown: Duration,
-    /// Enable adaptive thresholds based on message distribution (T12).
+    /// Enable adaptive thresholds based on message distribution.
     /// When true, the trigger threshold shifts earlier if tool/assistant
     /// messages dominate the context (more compressible content).
     pub adaptive_thresholds: bool,
-    /// Share of context budget to retain during force-truncation (T12).
+    /// Share of context budget to retain during force-truncation.
     /// E.g. 0.5 means keep messages up to 50% of the effective limit.
     /// Replaces the old fixed `keep_last_n: 10`.
     pub force_truncate_retain_share: f64,
@@ -141,7 +141,7 @@ pub struct ContextGuard {
     estimated_tokens: usize,
     /// Circuit breaker state.
     breaker: CircuitBreaker,
-    /// T12: Per-role token distribution for adaptive thresholds.
+    /// Per-role token distribution for adaptive thresholds.
     role_tokens: RoleTokenDistribution,
 }
 
@@ -223,7 +223,7 @@ pub enum CompactionLevel {
     Truncate = 3,
 }
 
-/// T12: Per-role token distribution for adaptive threshold calculation.
+/// Per-role token distribution for adaptive threshold calculation.
 ///
 /// Tracks how many tokens belong to each message role so the guard can
 /// adjust compaction thresholds dynamically. Conversations with heavy
@@ -289,10 +289,10 @@ pub enum GuardAction {
     Ok,
     /// Compaction needed at specified level.
     Compact(CompactionLevel),
-    /// T12: Context is critically over budget, retain messages up to this
+    /// Context is critically over budget, retain messages up to this
     /// token budget (replaces fixed `keep_last_n`).
     ForceTruncate { retain_tokens: usize },
-    /// T12: Circuit breaker is open. Retain messages up to this token budget
+    /// Circuit breaker is open. Retain messages up to this token budget
     /// as a safe fallback (replaces hardcoded 10-message truncation).
     CircuitBroken { retain_tokens: usize },
 }
@@ -340,7 +340,7 @@ impl ContextGuard {
         self.estimated_tokens += estimate_tokens(text);
     }
 
-    /// Record tokens with role annotation (T12 adaptive distribution).
+    /// Record tokens with role annotation.
     pub fn record_tokens_for_role(&mut self, text: &str, role: &str) {
         let tokens = estimate_tokens(text);
         self.estimated_tokens += tokens;
@@ -370,7 +370,7 @@ impl ContextGuard {
 
     /// Check what action should be taken given current token usage.
     ///
-    /// T12: When `adaptive_thresholds` is enabled, the trigger threshold
+    /// When `adaptive_thresholds` is enabled, the trigger threshold
     /// shifts down by up to 10 percentage points when tool-result content
     /// dominates (>40% of tokens). This is safe because tool output is
     /// highly compressible — DropMetadata alone saves ~15%.
@@ -384,7 +384,7 @@ impl ContextGuard {
             return GuardAction::Ok;
         }
 
-        // T12: Adaptive threshold — shift trigger earlier when tool output
+        // Adaptive threshold — shift trigger earlier when tool output
         // dominates, since it's highly compressible.
         let base_threshold = self.config.trigger_threshold;
         let adaptive_alpha = if self.config.adaptive_thresholds {
@@ -403,7 +403,7 @@ impl ContextGuard {
             return GuardAction::Ok;
         }
 
-        // T12: Budget-based retention for circuit breaker recovery.
+        // Budget-based retention for circuit breaker recovery.
         // Retain up to force_truncate_retain_share of the effective limit.
         let retain_budget = (effective_limit as f64 * self.config.force_truncate_retain_share) as usize;
 
@@ -437,7 +437,7 @@ impl ContextGuard {
         self.breaker.record_failure();
     }
 
-    /// Get the current role token distribution (T12).
+    /// Get the current role token distribution.
     pub fn role_distribution(&self) -> &RoleTokenDistribution {
         &self.role_tokens
     }
@@ -510,7 +510,7 @@ mod tests {
         });
         guard.set_token_count(860); // 860 / 900 = 95.5% > 95%
         let action = guard.check();
-        // T12: ForceTruncate now returns retain_tokens instead of keep_last_n
+        // ForceTruncate now returns retain_tokens instead of keep_last_n
         match action {
             GuardAction::ForceTruncate { retain_tokens } => {
                 // retain = 900 * 0.50 = 450

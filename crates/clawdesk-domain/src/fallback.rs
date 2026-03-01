@@ -30,7 +30,7 @@
 //! to detect recovery. Expected unnecessary fallback time drops from
 //! `E[T_cooldown/2]` to `min(T_probe, max(0, T_cooldown - T_margin))`.
 
-use clawdesk_types::error::ProviderError;
+use clawdesk_types::error::{ProviderError, ProviderErrorKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -123,48 +123,39 @@ impl FallbackError {
 
 impl From<&ProviderError> for FallbackError {
     fn from(e: &ProviderError) -> Self {
-        match e {
-            ProviderError::RateLimit {
+        let provider = e.provider.clone();
+        match &e.kind {
+            ProviderErrorKind::RateLimit { retry_after } => FallbackError::RateLimit {
                 provider,
-                retry_after,
-            } => FallbackError::RateLimit {
-                provider: provider.clone(),
                 retry_after: *retry_after,
             },
-            ProviderError::AuthFailure {
+            ProviderErrorKind::AuthFailure { profile_id } => FallbackError::AuthFailure {
                 provider,
-                profile_id,
-            } => FallbackError::AuthFailure {
-                provider: provider.clone(),
                 profile_id: profile_id.clone(),
             },
-            ProviderError::Timeout {
-                provider, after, ..
-            } => FallbackError::Timeout {
-                provider: provider.clone(),
+            ProviderErrorKind::Timeout { after, .. } => FallbackError::Timeout {
+                provider,
                 after: *after,
             },
-            ProviderError::Billing { provider } => FallbackError::Billing {
-                provider: provider.clone(),
-            },
-            ProviderError::FormatError { provider, detail } => FallbackError::FormatError {
-                provider: provider.clone(),
+            ProviderErrorKind::Billing => FallbackError::Billing { provider },
+            ProviderErrorKind::FormatError { detail } => FallbackError::FormatError {
+                provider,
                 detail: detail.clone(),
             },
-            ProviderError::NetworkError { provider, detail } => FallbackError::NetworkError {
-                provider: provider.clone(),
+            ProviderErrorKind::NetworkError { detail } => FallbackError::NetworkError {
+                provider,
                 detail: detail.clone(),
             },
-            ProviderError::ServerError { provider, status } => FallbackError::ServerError {
-                provider: provider.clone(),
+            ProviderErrorKind::ServerError { status } => FallbackError::ServerError {
+                provider,
                 status: *status,
             },
-            ProviderError::ModelNotFound { provider, .. } => FallbackError::FormatError {
-                provider: provider.clone(),
+            ProviderErrorKind::ModelNotFound { .. } => FallbackError::FormatError {
+                provider,
                 detail: "model not found".to_string(),
             },
-            ProviderError::ContextLengthExceeded { model, detail } => FallbackError::FormatError {
-                provider: model.clone(),
+            ProviderErrorKind::ContextLengthExceeded { detail, .. } => FallbackError::FormatError {
+                provider, // Now correctly uses the provider field instead of model
                 detail: detail.clone(),
             },
         }
@@ -628,22 +619,22 @@ impl From<&FallbackError> for ErrorClass {
 
 impl From<&ProviderError> for ErrorClass {
     fn from(e: &ProviderError) -> Self {
-        match e {
-            ProviderError::ContextLengthExceeded { .. } => ErrorClass::ContextOverflow,
-            ProviderError::RateLimit { .. } => ErrorClass::RateLimit,
-            ProviderError::AuthFailure { .. } => ErrorClass::AuthFailure,
-            ProviderError::Timeout { .. } => ErrorClass::Timeout,
-            ProviderError::Billing { .. } => ErrorClass::Billing,
-            ProviderError::FormatError { .. } => ErrorClass::FormatError,
-            ProviderError::NetworkError { .. } => ErrorClass::Network,
-            ProviderError::ServerError { status, .. } => {
+        match &e.kind {
+            ProviderErrorKind::ContextLengthExceeded { .. } => ErrorClass::ContextOverflow,
+            ProviderErrorKind::RateLimit { .. } => ErrorClass::RateLimit,
+            ProviderErrorKind::AuthFailure { .. } => ErrorClass::AuthFailure,
+            ProviderErrorKind::Timeout { .. } => ErrorClass::Timeout,
+            ProviderErrorKind::Billing => ErrorClass::Billing,
+            ProviderErrorKind::FormatError { .. } => ErrorClass::FormatError,
+            ProviderErrorKind::NetworkError { .. } => ErrorClass::Network,
+            ProviderErrorKind::ServerError { status } => {
                 if *status >= 500 {
                     ErrorClass::ServerError
                 } else {
                     ErrorClass::FormatError
                 }
             }
-            ProviderError::ModelNotFound { .. } => ErrorClass::FormatError,
+            ProviderErrorKind::ModelNotFound { .. } => ErrorClass::FormatError,
         }
     }
 }

@@ -2,14 +2,14 @@
 //!
 //! ## Multi-Layer Loading (P1)
 //!
-//! Implements OpenClaw's 6-layer skill loading precedence:
+//! Implements the 6-layer skill loading precedence:
 //! ```text
 //! Embedded < ExtraDirs < Bundled < Managed < PersonalAgents < ProjectAgents < Workspace
 //! ```
 //! Later layers override earlier ones by skill name — enabling user customization
 //! of bundled skills without modifying the installation.
 //!
-//! ## Directory conventions (matching OpenClaw)
+//! ## Directory conventions 
 //!
 //! | Layer            | Path                                |
 //! |------------------|-------------------------------------|
@@ -20,7 +20,7 @@
 //! | ProjectAgents    | `<workspace>/.agents/skills/`       |
 //! | Workspace        | `<workspace>/skills/`               |
 //!
-//! ## Limits (matching OpenClaw)
+//! ## Limits 
 //! - `MAX_CANDIDATES_PER_ROOT = 300`
 //! - `MAX_SKILLS_LOADED_PER_SOURCE = 200`
 //! - `MAX_SKILL_FILE_BYTES = 256_000`
@@ -45,7 +45,7 @@ const MAX_SKILL_FILE_BYTES: u64 = 256_000;
 /// Skill loading layer — determines override precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SkillLayer {
-    /// Compiled into the binary from OpenClaw SKILL.md files.
+    /// Compiled into the binary SKILL.md files.
     Embedded = 0,
     /// Extra directories specified via config or CLI.
     ExtraDirs = 1,
@@ -101,7 +101,7 @@ pub struct LayeredLoaderConfig {
     pub include_bundled: bool,
     /// Whether to auto-activate all loaded skills.
     pub auto_activate: bool,
-    /// OpenClaw adapter configuration.
+    /// legacy adapter configuration.
     pub adapter_config: AdapterConfig,
 }
 
@@ -141,7 +141,7 @@ impl LayeredLoader {
             errors: vec![],
         };
 
-        // Layer 0: Embedded OpenClaw skills
+        // Layer 0: Embedded legacy skills
         if self.config.include_embedded {
             let count = self.load_embedded_layer(&mut skill_map, &mut result);
             result.layer_counts.insert(SkillLayer::Embedded, count);
@@ -239,7 +239,7 @@ impl LayeredLoader {
         (registry, result)
     }
 
-    /// Load embedded OpenClaw skills (Layer 0).
+    /// Load embedded legacy skills (Layer 0).
     fn load_embedded_layer(
         &self,
         skill_map: &mut HashMap<String, (SkillLayer, Skill, SkillSource)>,
@@ -343,7 +343,7 @@ impl LayeredLoader {
             } else if skill_toml.exists() {
                 self.load_native_skill(&path).await
             } else {
-                // Check for nested skills root (OpenClaw's resolveNestedSkillsRoot)
+                // Check for nested skills root (the resolveNestedSkillsRoot)
                 let nested = path.join("skills");
                 if nested.is_dir() {
                     // Recurse into nested skills directory
@@ -380,7 +380,7 @@ impl LayeredLoader {
         count
     }
 
-    /// Load a single OpenClaw SKILL.md file.
+    /// Load a single SKILL.md file.
     async fn load_openclaw_skill(&self, path: &Path) -> Result<Skill, String> {
         // Size check
         let metadata = std::fs::metadata(path)

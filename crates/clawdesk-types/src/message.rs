@@ -199,6 +199,10 @@ pub struct NormalizedMessage {
     pub body_for_agent: Option<String>,
     pub sender: SenderIdentity,
     pub media: Vec<MediaAttachment>,
+    /// Content-addressed artifact references (GAP-E: cross-channel artifact pipeline).
+    /// Populated after media ingestion into the ArtifactPipeline.
+    #[serde(default)]
+    pub artifact_refs: Vec<crate::artifact::ArtifactId>,
     pub reply_context: Option<ReplyContext>,
     pub origin: MessageOrigin,
     pub timestamp: DateTime<Utc>,
@@ -225,6 +229,11 @@ pub enum MessageOrigin {
     IMessage { rowid: i64, sender: String },
     Irc { target: String, sender_nick: String, is_channel: bool },
     Internal { source: String },
+    Teams { conversation_id: String },
+    Matrix { room_id: String },
+    Signal { phone_number: String },
+    Webhook { source: String },
+    Mastodon { instance: String, visibility: String },
 }
 
 impl MessageOrigin {
@@ -240,6 +249,11 @@ impl MessageOrigin {
             Self::IMessage { .. } => ChannelId::IMessage,
             Self::Irc { .. } => ChannelId::Irc,
             Self::Internal { .. } => ChannelId::Internal,
+            Self::Teams { .. } => ChannelId::Teams,
+            Self::Matrix { .. } => ChannelId::Matrix,
+            Self::Signal { .. } => ChannelId::Signal,
+            Self::Webhook { .. } => ChannelId::Webhook,
+            Self::Mastodon { .. } => ChannelId::Mastodon,
         }
     }
 
@@ -255,6 +269,11 @@ impl MessageOrigin {
             Self::IMessage { rowid, .. } => rowid.to_string(),
             Self::Irc { sender_nick, .. } => sender_nick.clone(),
             Self::Internal { source, .. } => source.clone(),
+            Self::Teams { conversation_id, .. } => conversation_id.clone(),
+            Self::Matrix { room_id, .. } => room_id.clone(),
+            Self::Signal { phone_number, .. } => phone_number.clone(),
+            Self::Webhook { source, .. } => source.clone(),
+            Self::Mastodon { instance, .. } => instance.clone(),
         }
     }
 }
@@ -319,6 +338,7 @@ impl InboundMessage {
                     channel: ChannelId::Telegram,
                 },
                 media: msg.media.clone(),
+                artifact_refs: vec![],
                 reply_context: msg.reply_to.map(|id| ReplyContext {
                     original_message_id: id.to_string(),
                     original_text: None,
@@ -342,6 +362,7 @@ impl InboundMessage {
                     channel: ChannelId::Discord,
                 },
                 media: msg.attachments.clone(),
+                artifact_refs: vec![],
                 reply_context: msg.reply_to.map(|id| ReplyContext {
                     original_message_id: id.to_string(),
                     original_text: None,
@@ -367,6 +388,7 @@ impl InboundMessage {
                     channel: ChannelId::Slack,
                 },
                 media: msg.attachments.clone(),
+                artifact_refs: vec![],
                 reply_context: None,
                 origin: MessageOrigin::Slack {
                     team_id: msg.team_id.clone(),
@@ -388,6 +410,7 @@ impl InboundMessage {
                     channel: ChannelId::WhatsApp,
                 },
                 media: msg.media.clone(),
+                artifact_refs: vec![],
                 reply_context: None,
                 origin: MessageOrigin::WhatsApp {
                     phone_number: msg.phone_number.clone(),
@@ -406,6 +429,7 @@ impl InboundMessage {
                     channel: ChannelId::WebChat,
                 },
                 media: msg.media.clone(),
+                artifact_refs: vec![],
                 reply_context: None,
                 origin: MessageOrigin::WebChat {
                     session_id: msg.session_id.clone(),
@@ -423,6 +447,7 @@ impl InboundMessage {
                     channel: ChannelId::Email,
                 },
                 media: msg.media.clone(),
+                artifact_refs: vec![],
                 reply_context: msg.in_reply_to.as_ref().map(|id| ReplyContext {
                     original_message_id: id.clone(),
                     original_text: None,
@@ -446,6 +471,7 @@ impl InboundMessage {
                     channel: ChannelId::IMessage,
                 },
                 media: vec![],
+                artifact_refs: vec![],
                 reply_context: None,
                 origin: MessageOrigin::IMessage {
                     rowid: msg.rowid,
@@ -464,6 +490,7 @@ impl InboundMessage {
                     channel: ChannelId::Irc,
                 },
                 media: vec![],
+                artifact_refs: vec![],
                 reply_context: None,
                 origin: MessageOrigin::Irc {
                     target: msg.target.clone(),
@@ -486,6 +513,7 @@ impl InboundMessage {
                     channel: ChannelId::Internal,
                 },
                 media: vec![],
+                artifact_refs: vec![],
                 reply_context: None,
                 origin: MessageOrigin::Internal {
                     source: msg.source.clone(),
@@ -525,6 +553,7 @@ impl InboundMessage {
                         channel: ChannelId::Telegram,
                     },
                     media: msg.media,
+                    artifact_refs: vec![],
                     reply_context,
                     origin,
                     timestamp: Utc::now(),
@@ -557,6 +586,7 @@ impl InboundMessage {
                         channel: ChannelId::Discord,
                     },
                     media: msg.attachments,
+                    artifact_refs: vec![],
                     reply_context,
                     origin,
                     timestamp: Utc::now(),
@@ -577,6 +607,7 @@ impl InboundMessage {
                         channel: ChannelId::Slack,
                     },
                     media: msg.attachments,
+                    artifact_refs: vec![],
                     reply_context: None,
                     origin: MessageOrigin::Slack {
                         team_id: msg.team_id,
@@ -602,6 +633,7 @@ impl InboundMessage {
                         channel: ChannelId::WhatsApp,
                     },
                     media: msg.media,
+                    artifact_refs: vec![],
                     reply_context: None,
                     origin: MessageOrigin::WhatsApp {
                         phone_number: msg.phone_number,
@@ -624,6 +656,7 @@ impl InboundMessage {
                         channel: ChannelId::WebChat,
                     },
                     media: msg.media,
+                    artifact_refs: vec![],
                     reply_context: None,
                     origin: MessageOrigin::WebChat {
                         session_id: msg.session_id,
@@ -649,6 +682,7 @@ impl InboundMessage {
                         channel: ChannelId::Email,
                     },
                     media: msg.media,
+                    artifact_refs: vec![],
                     reply_context,
                     origin: MessageOrigin::Email {
                         message_id: msg.message_id,
@@ -672,6 +706,7 @@ impl InboundMessage {
                         channel: ChannelId::IMessage,
                     },
                     media: vec![],
+                    artifact_refs: vec![],
                     reply_context: None,
                     origin: MessageOrigin::IMessage {
                         rowid: msg.rowid,
@@ -694,6 +729,7 @@ impl InboundMessage {
                         channel: ChannelId::Irc,
                     },
                     media: vec![],
+                    artifact_refs: vec![],
                     reply_context: None,
                     origin: MessageOrigin::Irc {
                         target: msg.target,
@@ -719,6 +755,7 @@ impl InboundMessage {
                         channel: ChannelId::Internal,
                     },
                     media: vec![],
+                    artifact_refs: vec![],
                     reply_context: None,
                     origin: MessageOrigin::Internal {
                         source: msg.source,

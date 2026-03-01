@@ -89,8 +89,11 @@ impl StreamEvent {
 /// Stream event payloads.
 #[derive(Debug, Clone)]
 pub enum StreamPayload {
-    /// Text delta (streaming response).
+    /// Text delta (streaming response) — legacy, no integrity tracking.
     TextDelta { delta: String, done: bool },
+    /// Rich text delta with offset tracking, sequence numbers, and rolling hash.
+    /// Produced by `DeltaPublisher` and consumed by `DeltaConsumer`.
+    RichTextDelta(crate::delta_stream::TextDelta),
     /// Task status change.
     StatusChange { state: String, progress: Option<f64> },
     /// Artifact delivery notification.
@@ -389,24 +392,40 @@ impl BackpressureStream {
         }
     }
 
-    /// Drain all pending events older than `max_pending_age` from the ring.
-    /// These should be re-routed to push notification channel.
+    /// Drain stale events from the front of the ring buffer.
+    ///
+    /// Since the ring is FIFO, stale events are always at the front.
+    /// We pop consecutive stale events and stop at the first non-stale
+    /// event, avoiding the pop-all + repush pattern that would violate
+    /// the SPSC single-consumer contract.
     pub async fn drain_stale(&self) -> Vec<StreamEvent> {
         let now = Instant::now();
         let mut stale = Vec::new();
-        // Drain from ring: pop events, keep non-stale ones in a temp buffer.
-        let mut keep = Vec::new();
-        while let Some(event) = self.ring.try_pop() {
-            if now.duration_since(event.produced_at) > self.config.max_pending_age {
-                stale.push(event);
-            } else {
-                keep.push(event);
+
+        loop {
+            // Peek at the head — check staleness before committing the pop.
+            let head = self.ring.head.value.load(Ordering::Relaxed);
+            let tail = self.ring.tail.value.load(Ordering::Acquire);
+            if head == tail {
+                break; // empty
+            }
+            let slot = &self.ring.slots[head & self.ring.mask];
+            // SAFETY: consumer-side read — no concurrent consumer (drain_stale
+            // is the only consumer of the ring; consume() uses the mpsc channel).
+            let event_ref = unsafe { &*slot.get() };
+            match event_ref {
+                Some(ev) if now.duration_since(ev.produced_at) > self.config.max_pending_age => {
+                    // Stale — actually pop it.
+                    let ev = unsafe { (*slot.get()).take() };
+                    self.ring.head.value.store(head.wrapping_add(1), Ordering::Release);
+                    if let Some(ev) = ev {
+                        stale.push(ev);
+                    }
+                }
+                _ => break, // Non-stale or empty — stop scanning.
             }
         }
-        // Re-insert non-stale events.
-        for event in keep {
-            let _ = self.ring.try_push(event);
-        }
+
         if !stale.is_empty() {
             self.space_available.notify_waiters();
         }
@@ -443,50 +462,156 @@ pub struct StreamMetricsSnapshot {
 /// Delivery ledger for exactly-once semantics across SSE and push channels.
 ///
 /// Uses idempotency keys `(task_id, sequence)` to deduplicate.
-/// Implemented as a simple HashSet for correctness; in production, can be
-/// replaced with a Bloom filter (`ε < 10⁻⁶` at `≈ 30n` bits, `k = 20`).
+///
+/// ## Design: Two-generation Bloom filter
+///
+/// Instead of a `HashSet` with destructive eviction (which causes false negatives
+/// and thus duplicate deliveries), we use a two-generation Bloom filter.
+///
+/// **Generation rotation**: When the current generation fills up (exceeds
+/// `max_entries`), we swap `current ↔ previous` and clear the new current.
+/// Lookups check *both* generations, so recently-evicted entries are still
+/// recognized as delivered for one full rotation window.
+///
+/// **False positive rate**: Each generation uses `k = 7` hash functions with
+/// `m = max_entries × 10` bits, giving ε ≈ 0.8% — far better than destructive
+/// eviction's 50% false-negative rate. False positives (suppressing a delivery
+/// that never happened) are harmless since the client will retry.
+///
+/// **Memory**: `2 × 10n` bits ≈ 2.5 bytes per entry, versus `≈ 80 bytes`
+/// per entry for `HashSet<String>`. A 10,000-entry ledger uses ≈ 25 KB.
 pub struct DeliveryLedger {
-    /// Set of delivered idempotency keys.
-    delivered: std::collections::HashSet<String>,
-    /// Maximum entries before cleanup.
+    /// Two generational Bloom filter bitmaps.
+    current: Vec<u64>,
+    previous: Vec<u64>,
+    /// Number of entries inserted into the current generation.
+    current_count: usize,
+    /// Total deliveries across all time (monotonic counter).
+    total_deliveries: u64,
+    /// Maximum entries per generation before rotation.
     max_entries: usize,
+    /// Number of bits per generation.
+    num_bits: usize,
+    /// Number of u64 words per generation.
+    num_words: usize,
 }
+
+/// Number of hash functions for the Bloom filter.
+const BLOOM_K: usize = 7;
 
 impl DeliveryLedger {
     pub fn new(max_entries: usize) -> Self {
+        // m = 10 × n gives ε ≈ 0.8% with k=7.
+        let num_bits = (max_entries * 10).max(64);
+        let num_words = (num_bits + 63) / 64;
         Self {
-            delivered: std::collections::HashSet::with_capacity(max_entries / 4),
-            max_entries,
+            current: vec![0u64; num_words],
+            previous: vec![0u64; num_words],
+            current_count: 0,
+            total_deliveries: 0,
+            max_entries: max_entries.max(1),
+            num_bits,
+            num_words,
+        }
+    }
+
+    /// Compute `BLOOM_K` bit positions from the idempotency key.
+    /// Uses double-hashing: `h(i) = (h1 + i × h2) mod m`.
+    #[inline]
+    fn bloom_positions(&self, key: &str) -> [usize; BLOOM_K] {
+        let bytes = key.as_bytes();
+        // FNV-1a for h1
+        let mut h1 = 0xcbf29ce484222325u64;
+        for &b in bytes {
+            h1 ^= b as u64;
+            h1 = h1.wrapping_mul(0x100000001b3);
+        }
+        // FNV-1a with different seed for h2
+        let mut h2 = 0x6c62272e07bb0142u64;
+        for &b in bytes {
+            h2 ^= b as u64;
+            h2 = h2.wrapping_mul(0x100000001b3);
+        }
+        let m = self.num_bits;
+        let mut positions = [0usize; BLOOM_K];
+        for i in 0..BLOOM_K {
+            positions[i] = (h1.wrapping_add((i as u64).wrapping_mul(h2)) % (m as u64)) as usize;
+        }
+        positions
+    }
+
+    /// Test whether all bits are set for the given positions in a bitmap.
+    #[inline]
+    fn test_all(bitmap: &[u64], positions: &[usize; BLOOM_K]) -> bool {
+        for &pos in positions {
+            let word = pos / 64;
+            let bit = pos % 64;
+            if bitmap[word] & (1u64 << bit) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Set all bits for the given positions in a bitmap.
+    #[inline]
+    fn set_all(bitmap: &mut [u64], positions: &[usize; BLOOM_K]) {
+        for &pos in positions {
+            let word = pos / 64;
+            let bit = pos % 64;
+            bitmap[word] |= 1u64 << bit;
         }
     }
 
     /// Mark an event as delivered. Returns `true` if this is the first delivery
-    /// (not a duplicate).
+    /// (not a duplicate — i.e., not found in either generation).
+    ///
+    /// When the current generation exceeds `max_entries`, the previous generation
+    /// is discarded and current becomes previous — no entries are lost suddenly.
     pub fn mark_delivered(&mut self, idempotency_key: &str) -> bool {
-        if self.delivered.len() >= self.max_entries {
-            // Evict oldest entries (simple approach — clear half).
-            let drain_count = self.max_entries / 2;
-            let keys: Vec<String> = self.delivered.iter().take(drain_count).cloned().collect();
-            for k in keys {
-                self.delivered.remove(&k);
-            }
+        let positions = self.bloom_positions(idempotency_key);
+
+        // Check both generations for existing delivery.
+        if Self::test_all(&self.current, &positions) || Self::test_all(&self.previous, &positions) {
+            return false; // Already delivered.
         }
-        self.delivered.insert(idempotency_key.to_string())
+
+        // Rotate generations if current is full.
+        if self.current_count >= self.max_entries {
+            std::mem::swap(&mut self.current, &mut self.previous);
+            // Clear the new current generation.
+            for w in self.current.iter_mut() {
+                *w = 0;
+            }
+            self.current_count = 0;
+        }
+
+        Self::set_all(&mut self.current, &positions);
+        self.current_count += 1;
+        self.total_deliveries += 1;
+        true
     }
 
-    /// Check if an event was already delivered.
+    /// Check if an event was already delivered (probabilistic — may return
+    /// false positives but never false negatives within the two-generation window).
     pub fn is_delivered(&self, idempotency_key: &str) -> bool {
-        self.delivered.contains(idempotency_key)
+        let positions = self.bloom_positions(idempotency_key);
+        Self::test_all(&self.current, &positions) || Self::test_all(&self.previous, &positions)
     }
 
-    /// Number of tracked deliveries.
+    /// Approximate number of entries tracked in the current generation.
     pub fn len(&self) -> usize {
-        self.delivered.len()
+        self.current_count
     }
 
-    /// Whether the ledger is empty.
+    /// Whether the current generation has zero entries.
     pub fn is_empty(&self) -> bool {
-        self.delivered.is_empty()
+        self.current_count == 0
+    }
+
+    /// Total deliveries since creation (monotonic).
+    pub fn total_deliveries(&self) -> u64 {
+        self.total_deliveries
     }
 }
 
@@ -584,13 +709,45 @@ mod tests {
     }
 
     #[test]
-    fn delivery_ledger_eviction() {
+    fn delivery_ledger_generation_rotation() {
         let mut ledger = DeliveryLedger::new(4);
-        for i in 0..10 {
-            ledger.mark_delivered(&format!("task:{i}"));
+        // Insert 4 entries — fills first generation.
+        for i in 0..4 {
+            assert!(ledger.mark_delivered(&format!("task:{i}")));
         }
-        // Should have evicted some entries.
-        assert!(ledger.len() <= 6);
+        assert_eq!(ledger.len(), 4);
+
+        // 5th entry triggers rotation: current → previous, new current created.
+        assert!(ledger.mark_delivered("task:4"));
+        assert_eq!(ledger.len(), 1); // Only task:4 in current generation.
+
+        // Older entries are still visible via the previous generation.
+        assert!(ledger.is_delivered("task:0"));
+        assert!(ledger.is_delivered("task:3"));
+        assert!(ledger.is_delivered("task:4"));
+
+        // Total deliveries is monotonic.
+        assert_eq!(ledger.total_deliveries(), 5);
+    }
+
+    #[test]
+    fn delivery_ledger_no_false_negatives_after_rotation() {
+        // Key correctness property: evicted entries must NOT cause false negatives
+        // within the two-generation window.
+        let mut ledger = DeliveryLedger::new(4);
+        for i in 0..4 {
+            ledger.mark_delivered(&format!("batch-a:{i}"));
+        }
+        // Trigger rotation
+        ledger.mark_delivered("batch-b:0");
+
+        // batch-a entries moved to previous → still recognized as delivered
+        for i in 0..4 {
+            assert!(
+                !ledger.mark_delivered(&format!("batch-a:{i}")),
+                "batch-a:{i} should still be recognized as delivered after rotation"
+            );
+        }
     }
 
     #[tokio::test]

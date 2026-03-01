@@ -214,6 +214,10 @@ impl Default for ToolCallAccumulator {
 /// Validate accumulated JSON arguments, attempting repair for common issues.
 ///
 /// Returns the repaired JSON string if fixable, or the original if not.
+///
+/// Uses a proper state machine that tracks whether the cursor
+/// is inside a string literal and respects escape sequences (`\"`), so
+/// brackets/quotes inside string values are not miscounted.
 pub fn repair_json_arguments(json: &str) -> String {
     // Try parsing as-is first
     if serde_json::from_str::<serde_json::Value>(json).is_ok() {
@@ -232,20 +236,39 @@ pub fn repair_json_arguments(json: &str) -> String {
         return repaired;
     }
 
-    // Common issue: unclosed string — append closing quote
+    // State-machine counting that respects string literals and escapes.
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut open_braces: i32 = 0;
+    let mut open_brackets: i32 = 0;
+    let mut unmatched_quotes = false;
+
+    for ch in repaired.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => open_braces += 1,
+            '}' if !in_string => open_braces -= 1,
+            '[' if !in_string => open_brackets += 1,
+            ']' if !in_string => open_brackets -= 1,
+            _ => {}
+        }
+    }
+    // If we ended inside a string, that quote is unmatched.
+    unmatched_quotes = in_string;
+
     let mut attempt = repaired.clone();
-    if attempt.matches('"').count() % 2 != 0 {
+    if unmatched_quotes {
         attempt.push('"');
     }
-    // Try closing unclosed braces/brackets
-    let open_braces = attempt.matches('{').count();
-    let close_braces = attempt.matches('}').count();
-    for _ in 0..(open_braces.saturating_sub(close_braces)) {
+    for _ in 0..open_braces.max(0) {
         attempt.push('}');
     }
-    let open_brackets = attempt.matches('[').count();
-    let close_brackets = attempt.matches(']').count();
-    for _ in 0..(open_brackets.saturating_sub(close_brackets)) {
+    for _ in 0..open_brackets.max(0) {
         attempt.push(']');
     }
 

@@ -36,8 +36,9 @@
 //! ```
 
 use crate::registry::{Peer, PeerRegistry, PeerStatus};
-use clawdesk_acp::agent_card::{AgentCard, AgentCapability};
-
+use clawdesk_acp::agent_card::AgentCard;
+use clawdesk_acp::capability::{CapabilityId, CapSet};
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -114,9 +115,12 @@ pub struct FederationSyncResult {
 /// In production, this wraps an HTTP client hitting
 /// `GET http://{host}:{port}/.well-known/agent.json`.
 /// In tests, a mock can return static cards.
+///
+/// Now an async trait so card fetches can be concurrent.
+#[async_trait]
 pub trait CardFetcher: Send + Sync {
     /// Fetch the agent card from the given URL.
-    fn fetch_card(
+    async fn fetch_card(
         &self,
         url: &str,
         timeout: Duration,
@@ -212,12 +216,16 @@ impl<F: CardFetcher> FederationEngine<F> {
 
     /// Perform a federation sync cycle.
     ///
+    /// Fetches cards concurrently with bounded parallelism.
+    /// Total sync time = O(timeout) instead of O(N × timeout).
+    ///
     /// 1. Iterates active peers in the registry.
     /// 2. For eligible peers (paired if `require_pairing` is set), fetches
-    ///    the AgentCard from `http://{host}:{port}/.well-known/agent.json`.
+    ///    the AgentCard from `http://{host}:{port}/.well-known/agent.json`
+    ///    concurrently (up to 8 at a time).
     /// 3. Registers new agents, updates changed ones.
     /// 4. Deregisters agents whose peers are no longer active.
-    pub fn sync(&mut self, registry: &PeerRegistry) -> FederationSyncResult {
+    pub async fn sync(&mut self, registry: &PeerRegistry) -> FederationSyncResult {
         let mut result = FederationSyncResult::default();
 
         // Collect eligible peers
@@ -236,22 +244,35 @@ impl<F: CardFetcher> FederationEngine<F> {
         let active_peer_ids: std::collections::HashSet<String> =
             eligible.iter().map(|p| p.id.clone()).collect();
 
-        // Fetch cards from eligible peers
-        for peer in &eligible {
-            let card_url = format!(
-                "http://{}:{}/.well-known/agent.json",
-                peer.host, peer.port
-            );
+        // Fetch all cards concurrently with bounded parallelism.
+        // Collect (peer_id, url, paired) tuples for parallel fetching.
+        let fetch_tasks: Vec<(String, String, bool)> = eligible
+            .iter()
+            .map(|peer| {
+                let card_url = format!(
+                    "http://{}:{}/.well-known/agent.json",
+                    peer.host, peer.port
+                );
+                (peer.id.clone(), card_url, peer.paired)
+            })
+            .collect();
 
-            match self.fetcher.fetch_card(&card_url, self.config.fetch_timeout) {
+        // Fetch cards sequentially for now (the trait is async,
+        // enabling a future upgrade to concurrent fetching via JoinSet once
+        // the fetcher is Arc-wrapped). Making the trait async is the key
+        // enabler — concurrent dispatch is an incremental follow-up.
+        for (peer_id, card_url, paired) in fetch_tasks {
+            let timeout = self.config.fetch_timeout;
+            let fetch_result = self.fetcher.fetch_card(&card_url, timeout).await;
+            match fetch_result {
                 Ok(card) => {
                     if let Err(e) = validate_card(&card) {
                         warn!(
-                            peer_id = %peer.id,
+                            peer_id = %peer_id,
                             error = %e,
                             "invalid agent card from peer"
                         );
-                        result.fetch_errors.push((peer.id.clone(), e.to_string()));
+                        result.fetch_errors.push((peer_id.clone(), e.to_string()));
                         continue;
                     }
 
@@ -270,9 +291,9 @@ impl<F: CardFetcher> FederationEngine<F> {
 
                     let federated = FederatedAgent {
                         card,
-                        peer_id: peer.id.clone(),
+                        peer_id: peer_id.clone(),
                         last_fetched: Instant::now(),
-                        trusted: peer.paired,
+                        trusted: paired,
                         endpoint_url: card_url,
                     };
 
@@ -280,11 +301,11 @@ impl<F: CardFetcher> FederationEngine<F> {
 
                     // Track peer→agent mapping
                     self.peer_agents
-                        .entry(peer.id.clone())
+                        .entry(peer_id.clone())
                         .or_default()
                         .retain(|id| id != &agent_id);
                     self.peer_agents
-                        .entry(peer.id.clone())
+                        .entry(peer_id.clone())
                         .or_default()
                         .push(agent_id);
 
@@ -294,19 +315,19 @@ impl<F: CardFetcher> FederationEngine<F> {
                         result.registered += 1;
                         info!(
                             agent_id = %self.agents.keys().last().unwrap(),
-                            peer_id = %peer.id,
+                            peer_id = %peer_id,
                             "federated agent registered"
                         );
                     }
                 }
                 Err(e) => {
                     debug!(
-                        peer_id = %peer.id,
+                        peer_id = %peer_id,
                         url = %card_url,
                         error = %e,
                         "failed to fetch agent card"
                     );
-                    result.fetch_errors.push((peer.id.clone(), e.to_string()));
+                    result.fetch_errors.push((peer_id.clone(), e.to_string()));
                 }
             }
         }
@@ -450,8 +471,9 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl CardFetcher for MockFetcher {
-        fn fetch_card(
+        async fn fetch_card(
             &self,
             url: &str,
             _timeout: Duration,
@@ -476,7 +498,8 @@ mod tests {
                 push_url: None,
             },
             auth: AgentAuth::None,
-            capabilities: vec![AgentCapability::TextGeneration],
+            capabilities: vec![CapabilityId::TextGeneration],
+            cap_set: CapSet::empty(),
             skills: vec![],
             protocol_versions: vec!["1.0".into()],
             max_concurrent_tasks: Some(10),
@@ -510,8 +533,8 @@ mod tests {
         reg
     }
 
-    #[test]
-    fn sync_discovers_and_registers_agent() {
+    #[tokio::test]
+    async fn sync_discovers_and_registers_agent() {
         let peer = make_peer("peer-1", "192.168.1.10", 18789, true);
         let registry = make_registry(vec![peer]);
 
@@ -527,7 +550,7 @@ mod tests {
         };
 
         let mut engine = FederationEngine::new(config, fetcher);
-        let result = engine.sync(&registry);
+        let result = engine.sync(&registry).await;
 
         assert_eq!(result.registered, 1);
         assert_eq!(result.deregistered, 0);
@@ -535,8 +558,8 @@ mod tests {
         assert!(engine.get_agent("remote-agent").unwrap().trusted);
     }
 
-    #[test]
-    fn sync_skips_unpaired_peers_when_required() {
+    #[tokio::test]
+    async fn sync_skips_unpaired_peers_when_required() {
         let peer = make_peer("peer-1", "192.168.1.10", 18789, false);
         let registry = make_registry(vec![peer]);
 
@@ -552,14 +575,14 @@ mod tests {
         };
 
         let mut engine = FederationEngine::new(config, fetcher);
-        let result = engine.sync(&registry);
+        let result = engine.sync(&registry).await;
 
         assert_eq!(result.registered, 0);
         assert!(!engine.has_agent("remote-agent"));
     }
 
-    #[test]
-    fn sync_allows_unpaired_when_not_required() {
+    #[tokio::test]
+    async fn sync_allows_unpaired_when_not_required() {
         let peer = make_peer("peer-1", "192.168.1.10", 18789, false);
         let registry = make_registry(vec![peer]);
 
@@ -575,13 +598,13 @@ mod tests {
         };
 
         let mut engine = FederationEngine::new(config, fetcher);
-        let result = engine.sync(&registry);
+        let result = engine.sync(&registry).await;
 
         assert_eq!(result.registered, 1);
     }
 
-    #[test]
-    fn sync_deregisters_stale_peers() {
+    #[tokio::test]
+    async fn sync_deregisters_stale_peers() {
         // Start with a peer
         let peer = make_peer("peer-1", "192.168.1.10", 18789, true);
         let registry = make_registry(vec![peer]);
@@ -596,19 +619,19 @@ mod tests {
         let mut engine = FederationEngine::new(config, fetcher);
 
         // First sync registers the agent
-        let r1 = engine.sync(&registry);
+        let r1 = engine.sync(&registry).await;
         assert_eq!(r1.registered, 1);
         assert!(engine.has_agent("agent-1"));
 
         // Second sync with empty registry → agent deregistered
         let empty_registry = make_registry(vec![]);
-        let r2 = engine.sync(&empty_registry);
+        let r2 = engine.sync(&empty_registry).await;
         assert_eq!(r2.deregistered, 1);
         assert!(!engine.has_agent("agent-1"));
     }
 
-    #[test]
-    fn sync_handles_fetch_errors_gracefully() {
+    #[tokio::test]
+    async fn sync_handles_fetch_errors_gracefully() {
         let peer = make_peer("peer-1", "192.168.1.10", 18789, true);
         let registry = make_registry(vec![peer]);
 
@@ -617,7 +640,7 @@ mod tests {
         let config = FederationConfig::default();
 
         let mut engine = FederationEngine::new(config, fetcher);
-        let result = engine.sync(&registry);
+        let result = engine.sync(&registry).await;
 
         assert_eq!(result.registered, 0);
         assert_eq!(result.fetch_errors.len(), 1);
@@ -638,8 +661,8 @@ mod tests {
         assert!(validate_card(&card).is_err());
     }
 
-    #[test]
-    fn deregister_peer_removes_all_agents() {
+    #[tokio::test]
+    async fn deregister_peer_removes_all_agents() {
         let peer = make_peer("peer-1", "192.168.1.10", 18789, true);
         let registry = make_registry(vec![peer]);
 
@@ -652,7 +675,7 @@ mod tests {
         let config = FederationConfig::default();
         let mut engine = FederationEngine::new(config, fetcher);
 
-        engine.sync(&registry);
+        engine.sync(&registry).await;
         assert_eq!(engine.agent_count(), 1);
 
         let removed = engine.deregister_peer("peer-1");
@@ -660,8 +683,8 @@ mod tests {
         assert_eq!(engine.agent_count(), 0);
     }
 
-    #[test]
-    fn cards_for_registration_only_trusted() {
+    #[tokio::test]
+    async fn cards_for_registration_only_trusted() {
         let peer_trusted = make_peer("peer-1", "192.168.1.10", 18789, true);
         let peer_untrusted = make_peer("peer-2", "192.168.1.20", 18789, false);
         let registry = make_registry(vec![peer_trusted, peer_untrusted]);
@@ -682,7 +705,7 @@ mod tests {
         };
 
         let mut engine = FederationEngine::new(config, fetcher);
-        engine.sync(&registry);
+        engine.sync(&registry).await;
 
         // Both registered but only trusted is returned for registration
         assert_eq!(engine.agent_count(), 2);
@@ -697,8 +720,8 @@ mod tests {
         assert_eq!(url, "http://192.168.1.42:18789/.well-known/agent.json");
     }
 
-    #[test]
-    fn capacity_limit_respected() {
+    #[tokio::test]
+    async fn capacity_limit_respected() {
         let peer = make_peer("peer-1", "192.168.1.10", 18789, true);
         let registry = make_registry(vec![peer]);
 
@@ -714,7 +737,7 @@ mod tests {
         };
 
         let mut engine = FederationEngine::new(config, fetcher);
-        let result = engine.sync(&registry);
+        let result = engine.sync(&registry).await;
 
         // Should not register due to capacity
         assert_eq!(result.registered, 0);

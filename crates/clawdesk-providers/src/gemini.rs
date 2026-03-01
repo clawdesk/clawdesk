@@ -286,16 +286,9 @@ impl Provider for GeminiProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "gemini".into(),
-                        model: model.clone(),
-                        after: start.elapsed(),
-                    }
+                    ProviderError::timeout("gemini", model.clone(), start.elapsed())
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "gemini".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("gemini", e.to_string())
                 }
             })?;
 
@@ -305,34 +298,19 @@ impl Provider for GeminiProvider {
         if !status.is_success() {
             let status_code = status.as_u16();
             return match status_code {
-                429 => Err(ProviderError::RateLimit {
-                    provider: "gemini".into(),
-                    retry_after: None,
-                }),
-                401 | 403 => Err(ProviderError::AuthFailure {
-                    provider: "gemini".into(),
-                    profile_id: "default".into(),
-                }),
-                _ => Err(ProviderError::ServerError {
-                    provider: "gemini".into(),
-                    status: status_code,
-                }),
+                429 => Err(ProviderError::rate_limit("gemini", None)),
+                401 | 403 => Err(ProviderError::auth_failure("gemini", "default")),
+                _ => Err(ProviderError::server_error("gemini", status_code)),
             };
         }
 
         let api_response: GeminiResponse =
-            response.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "gemini".into(),
-                detail: e.to_string(),
-            })?;
+            response.json().await.map_err(|e| ProviderError::format_error("gemini", e.to_string()))?;
 
         let candidate = api_response
             .candidates
             .and_then(|mut c| if c.is_empty() { None } else { Some(c.remove(0)) })
-            .ok_or_else(|| ProviderError::FormatError {
-                provider: "gemini".into(),
-                detail: "no candidates in response".into(),
-            })?;
+            .ok_or_else(|| ProviderError::format_error("gemini", "no candidates in response"))?;
 
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
@@ -414,25 +392,16 @@ impl Provider for GeminiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "gemini".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("gemini", e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(ProviderError::ServerError {
-                provider: "gemini".into(),
-                status: response.status().as_u16(),
-            });
+            return Err(ProviderError::server_error("gemini", response.status().as_u16()));
         }
 
         let mut buffer = String::new();
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(|e| {
-            ProviderError::NetworkError {
-                provider: "gemini".into(),
-                detail: e.to_string(),
-            }
+            ProviderError::network_error("gemini", e.to_string())
         })? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -526,23 +495,14 @@ impl Provider for GeminiProvider {
             .get(&url)
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "gemini".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("gemini", e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
             if status == 401 || status == 403 {
-                return Err(ProviderError::AuthFailure {
-                    provider: "gemini".into(),
-                    profile_id: "default".into(),
-                });
+                return Err(ProviderError::auth_failure("gemini", "default"));
             }
-            return Err(ProviderError::ServerError {
-                provider: "gemini".into(),
-                status,
-            });
+            return Err(ProviderError::server_error("gemini", status));
         }
 
         Ok(())

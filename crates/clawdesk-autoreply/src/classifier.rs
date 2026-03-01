@@ -185,6 +185,7 @@ mod tests {
                 channel,
             },
             media: vec![],
+            artifact_refs: vec![],
             reply_context: None,
             origin: MessageOrigin::Internal {
                 source: "test".to_string(),

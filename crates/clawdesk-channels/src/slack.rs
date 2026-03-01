@@ -101,6 +101,7 @@ impl SlackChannel {
             body_for_agent: None,
             sender,
             media: vec![],
+            artifact_refs: vec![],
             reply_context: None,
             origin,
             timestamp: chrono::Utc::now(),

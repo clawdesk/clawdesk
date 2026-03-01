@@ -130,7 +130,7 @@ impl Default for BetaParam {
 pub struct Identity {
     /// Agent's name
     pub name: String,
-    /// Background description (equivalent to OpenClaw's identity.md)
+    /// Background description (equivalent to the identity.md)
     pub background: String,
     /// Soul description — personality narrative
     pub soul: String,

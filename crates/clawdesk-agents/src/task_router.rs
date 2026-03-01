@@ -4,6 +4,66 @@ use crate::harness::HarnessKind;
 use aho_corasick::AhoCorasick;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+// ── Static Aho-Corasick automata (built once) ──────────────
+
+static CODING_AC: OnceLock<AhoCorasick> = OnceLock::new();
+static RESEARCH_AC: OnceLock<AhoCorasick> = OnceLock::new();
+static ACTION_AC: OnceLock<AhoCorasick> = OnceLock::new();
+
+fn coding_ac() -> &'static AhoCorasick {
+    CODING_AC.get_or_init(|| {
+        AhoCorasick::new([
+            "refactor",
+            "implement",
+            "fix",
+            "debug",
+            "compile",
+            "build",
+            "cargo",
+            "pytest",
+            "typescript",
+            "rust",
+            "python",
+            "review",
+            "pr",
+        ])
+        .expect("valid coding patterns")
+    })
+}
+
+fn research_ac() -> &'static AhoCorasick {
+    RESEARCH_AC.get_or_init(|| {
+        AhoCorasick::new([
+            "research",
+            "summarize",
+            "compare",
+            "analyze",
+            "investigate",
+            "brief",
+            "report",
+            "document",
+        ])
+        .expect("valid research patterns")
+    })
+}
+
+fn action_ac() -> &'static AhoCorasick {
+    ACTION_AC.get_or_init(|| {
+        AhoCorasick::new([
+            "create",
+            "write",
+            "edit",
+            "run",
+            "execute",
+            "refactor",
+            "fix",
+            "send",
+        ])
+        .expect("valid action patterns")
+    })
+}
 
 /// Execution target.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -49,50 +109,11 @@ impl TaskFeatures {
         let lower = task.to_ascii_lowercase();
         let token_est = std::cmp::max(1, lower.split_whitespace().count()) * 4 / 3;
 
-        let coding_patterns = AhoCorasick::new([
-            "refactor",
-            "implement",
-            "fix",
-            "debug",
-            "compile",
-            "build",
-            "cargo",
-            "pytest",
-            "typescript",
-            "rust",
-            "python",
-            "review",
-            "pr",
-        ])
-        .expect("valid coding patterns");
-        let research_patterns = AhoCorasick::new([
-            "research",
-            "summarize",
-            "compare",
-            "analyze",
-            "investigate",
-            "brief",
-            "report",
-            "document",
-        ])
-        .expect("valid research patterns");
-        let action_patterns = AhoCorasick::new([
-            "create",
-            "write",
-            "edit",
-            "run",
-            "execute",
-            "refactor",
-            "fix",
-            "send",
-        ])
-        .expect("valid action patterns");
-
         let mentions_files =
             lower.contains('/') || lower.contains(".rs") || lower.contains(".ts") || lower.contains(".py");
-        let is_coding = coding_patterns.find(&lower).is_some();
-        let is_research = research_patterns.find(&lower).is_some();
-        let has_action = action_patterns.find(&lower).is_some();
+        let is_coding = coding_ac().find(&lower).is_some();
+        let is_research = research_ac().find(&lower).is_some();
+        let has_action = action_ac().find(&lower).is_some();
         let short_prompt = lower.split_whitespace().count() < 20;
         let is_simple_question = short_prompt && !has_action && !is_coding && !is_research;
 
@@ -163,31 +184,65 @@ pub struct RoutingDecision {
 #[derive(Debug, Clone)]
 struct LinUcbArm {
     a: Vec<Vec<f64>>,
+    /// Cached inverse of A — maintained via Sherman-Morrison on each update.
+    /// Avoids O(d³) Gaussian elimination on every `predict_and_bonus()`.
+    a_inv: Vec<Vec<f64>>,
     b: Vec<f64>,
 }
 
 impl LinUcbArm {
     fn new(d: usize) -> Self {
         let mut a = vec![vec![0.0; d]; d];
-        for (i, row) in a.iter_mut().enumerate() {
-            row[i] = 1.0;
+        let mut a_inv = vec![vec![0.0; d]; d];
+        for i in 0..d {
+            a[i][i] = 1.0;
+            a_inv[i][i] = 1.0;
         }
-        Self { a, b: vec![0.0; d] }
+        Self { a, a_inv, b: vec![0.0; d] }
     }
 
+    /// Update arm with observation (x, reward).
+    ///
+    /// A_new = A_old + x * x^T  →  updates A in O(d²)
+    /// A_inv_new via Sherman-Morrison: A_inv - (A_inv * x)(x^T * A_inv) / (1 + x^T * A_inv * x)
     fn update(&mut self, x: &[f64], reward: f64) {
-        for i in 0..x.len() {
+        let d = x.len();
+        // Update b: b += reward * x
+        for i in 0..d {
             self.b[i] += reward * x[i];
-            for j in 0..x.len() {
+        }
+        // Update A: A += x * x^T
+        for i in 0..d {
+            for j in 0..d {
                 self.a[i][j] += x[i] * x[j];
+            }
+        }
+        // Sherman-Morrison update for A_inv:
+        // u = A_inv * x
+        let u = mat_vec(&self.a_inv, x);
+        // denom = 1 + x^T * u
+        let denom = 1.0 + dot(x, &u);
+        if denom.abs() < 1e-12 {
+            // Degenerate — fall back to full recompute next predict
+            return;
+        }
+        let inv_denom = 1.0 / denom;
+        // A_inv -= (u * u^T) / denom  (since u = A_inv * x, and x^T * A_inv = u^T)
+        for i in 0..d {
+            for j in 0..d {
+                self.a_inv[i][j] -= u[i] * u[j] * inv_denom;
             }
         }
     }
 
+    /// Predict reward and UCB bonus using cached A_inv.
+    ///
+    /// theta = A_inv * b  →  O(d²) matrix-vector multiply
+    /// bonus = alpha * sqrt(x^T * A_inv * x)  →  O(d²)
     fn predict_and_bonus(&self, x: &[f64], alpha: f64) -> (f64, f64) {
-        let theta = solve_linear(&self.a, &self.b).unwrap_or_else(|| vec![0.0; x.len()]);
+        let theta = mat_vec(&self.a_inv, &self.b);
         let pred = dot(&theta, x);
-        let z = solve_linear(&self.a, x).unwrap_or_else(|| vec![0.0; x.len()]);
+        let z = mat_vec(&self.a_inv, x);
         let quad = dot(x, &z).max(0.0);
         let bonus = alpha * quad.sqrt();
         (pred, bonus)
@@ -314,7 +369,13 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
+/// Matrix-vector multiply: result[i] = sum_j m[i][j] * v[j].
+fn mat_vec(m: &[Vec<f64>], v: &[f64]) -> Vec<f64> {
+    m.iter().map(|row| dot(row, v)).collect()
+}
+
 /// Solve A x = b via Gaussian elimination with partial pivoting.
+#[allow(dead_code)]
 fn solve_linear(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     let n = b.len();
     if a.len() != n || a.iter().any(|row| row.len() != n) {

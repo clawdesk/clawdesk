@@ -18,3 +18,4 @@ tokio-util = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+dashmap = { workspace = true }

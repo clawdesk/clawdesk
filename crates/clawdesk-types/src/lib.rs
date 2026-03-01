@@ -16,6 +16,7 @@
 //! - **Protocol types**: Canonical gateway message format
 //! - **Auto-reply types**: Trigger classification, send policy
 
+pub mod artifact;
 pub mod autoreply;
 pub mod channel;
 pub mod config;
@@ -24,17 +25,21 @@ pub mod error;
 pub mod failover;
 pub mod media;
 pub mod message;
+pub mod ordered_lock;
 pub mod plugin;
 pub mod protocol;
 pub mod reactions;
+pub mod ring;
 pub mod security;
 pub mod session;
+pub mod taint;
 pub mod tokenizer;
 
 // Re-export key types at crate root
 pub use channel::{ChannelId, ChannelMeta};
 pub use config::{ClawDeskConfig, ValidatedConfig};
-pub use error::{ClawDeskError, ProviderError};
+pub use error::{ClawDeskError, ProviderError, ProviderErrorKind};
+pub use ring::DropOldest;
 pub use tokenizer::estimate_tokens;
 pub use message::{
     InboundMessage, MediaAttachment, MessageOrigin, NormalizedMessage, OutboundMessage,
@@ -42,3 +47,4 @@ pub use message::{
 };
 pub use reactions::{Reaction, ReactionEvent, RichContent, CardContent, PollContent, QuickReplySet, ButtonContent};
 pub use session::{Session, SessionConfig, SessionKey, SessionSummary};
+pub use artifact::{ArtifactRef, ArtifactData, ArtifactId, ArtifactIndex};

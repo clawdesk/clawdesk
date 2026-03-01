@@ -2,7 +2,7 @@
 //!
 //! ## Eligibility Engine (P1)
 //!
-//! Ports OpenClaw's `shouldIncludeSkill()` runtime requirements checker.
+//! Ports the `shouldIncludeSkill()` runtime requirements checker.
 //! Determines whether a skill should be loaded based on:
 //!
 //! 1. **Explicit disable**: skill disabled in config
@@ -241,9 +241,9 @@ impl EligibilityEngine {
     }
 }
 
-/// Normalize OS identifier to match OpenClaw conventions.
+/// Normalize OS identifier to match legacy conventions.
 ///
-/// OpenClaw uses `"darwin"` for macOS, `"linux"` for Linux, `"windows"` for Windows.
+/// The legacy system uses `"darwin"` for macOS, `"linux"` for Linux, `"windows"` for Windows.
 /// Rust's `std::env::consts::OS` already uses these names, but we normalize
 /// to lowercase for case-insensitive comparison.
 fn normalize_os(os: &str) -> String {

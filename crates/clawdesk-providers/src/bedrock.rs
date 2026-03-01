@@ -67,15 +67,9 @@ impl BedrockProvider {
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-east-1".to_string());
         let access_key_id = std::env::var("AWS_ACCESS_KEY_ID")
-            .map_err(|_| ProviderError::AuthFailure {
-                provider: "bedrock".into(),
-                profile_id: "env".into(),
-            })?;
+            .map_err(|_| ProviderError::auth_failure("bedrock", "env"))?;
         let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-            .map_err(|_| ProviderError::AuthFailure {
-                provider: "bedrock".into(),
-                profile_id: "env".into(),
-            })?;
+            .map_err(|_| ProviderError::auth_failure("bedrock", "env"))?;
 
         Ok(Self::new(region, access_key_id, secret_access_key, default_model))
     }
@@ -379,16 +373,9 @@ impl Provider for BedrockProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "bedrock".into(),
-                        model: model_id.clone(),
-                        after: start.elapsed(),
-                    }
+                    ProviderError::timeout("bedrock", model_id.clone(), start.elapsed())
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "bedrock".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("bedrock", e.to_string())
                 }
             })?;
 
@@ -398,26 +385,14 @@ impl Provider for BedrockProvider {
         if !status.is_success() {
             let status_code = status.as_u16();
             return match status_code {
-                429 => Err(ProviderError::RateLimit {
-                    provider: "bedrock".into(),
-                    retry_after: None,
-                }),
-                403 => Err(ProviderError::AuthFailure {
-                    provider: "bedrock".into(),
-                    profile_id: "aws".into(),
-                }),
-                _ => Err(ProviderError::ServerError {
-                    provider: "bedrock".into(),
-                    status: status_code,
-                }),
+                429 => Err(ProviderError::rate_limit("bedrock", None)),
+                403 => Err(ProviderError::auth_failure("bedrock", "aws")),
+                _ => Err(ProviderError::server_error("bedrock", status_code)),
             };
         }
 
         let api_response: BedrockConverseResponse =
-            response.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "bedrock".into(),
-                detail: e.to_string(),
-            })?;
+            response.json().await.map_err(|e| ProviderError::format_error("bedrock", e.to_string()))?;
 
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
@@ -469,10 +444,7 @@ impl Provider for BedrockProvider {
         info!(region = %self.region, "bedrock health check");
         // Verify credentials are present.
         if self.access_key_id.is_empty() || self.secret_access_key.is_empty() {
-            return Err(ProviderError::AuthFailure {
-                provider: "bedrock".into(),
-                profile_id: "aws".into(),
-            });
+            return Err(ProviderError::auth_failure("bedrock", "aws"));
         }
         Ok(())
     }

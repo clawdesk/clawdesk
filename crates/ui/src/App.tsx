@@ -42,8 +42,10 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { LogsPage } from "./pages/LogsPage";
 import { A2APage } from "./pages/A2APage";
 import { RuntimePage } from "./pages/RuntimePage";
+import { ExtensionsPage } from "./pages/ExtensionsPage";
+import { McpPage } from "./pages/McpPage";
 
-type NavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "settings" | "logs";
+type NavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "settings" | "logs" | "extensions" | "mcp";
 type RiskLevel = "low" | "medium" | "high";
 type StatusLevel = "ok" | "warn" | "error";
 type InspectorTab = "plan" | "approvals" | "proof" | "undo" | "trace" | "memory" | "graph";
@@ -264,15 +266,18 @@ const NAV_ITEMS: { key: NavKey; label: string; shortcut: string; icon: string }[
   { key: "runtime", label: "Runtime", shortcut: "4", icon: "activity" },
   { key: "skills", label: "Skills", shortcut: "5", icon: "library" },
   { key: "automations", label: "Automations", shortcut: "6", icon: "routines" },
-  { key: "settings", label: "Settings", shortcut: "7", icon: "settings" },
-  { key: "logs", label: "Logs", shortcut: "8", icon: "scroll-text" },
+  { key: "extensions", label: "Extensions", shortcut: "7", icon: "puzzle" },
+  { key: "mcp", label: "MCP", shortcut: "8", icon: "plug" },
+  { key: "settings", label: "Settings", shortcut: "9", icon: "settings" },
+  { key: "logs", label: "Logs", shortcut: "0", icon: "scroll-text" },
 ];
 
 const NAV_GROUPS: ShellNavGroup[] = [
   { label: "", items: [NAV_ITEMS[0], NAV_ITEMS[1]] },
   { label: "Cluster", items: [NAV_ITEMS[2], NAV_ITEMS[3]] },
   { label: "Build", items: [NAV_ITEMS[4], NAV_ITEMS[5]] },
-  { label: "System", items: [NAV_ITEMS[6], NAV_ITEMS[7]] },
+  { label: "Connect", items: [NAV_ITEMS[6], NAV_ITEMS[7]] },
+  { label: "System", items: [NAV_ITEMS[8], NAV_ITEMS[9]] },
 ];
 
 const INITIAL_THREADS: ThreadItem[] = [];
@@ -1275,7 +1280,13 @@ export default function App() {
             });
           });
         }).catch(() => { });
-        pushToast(`${pipelineName} ${success ? "completed" : "failed"}.`);
+        // AutomationsPage shows a detailed per-step toast for manual runs.
+        // For cron-scheduled runs the result appears in the Routines sidebar.
+        // Only show a global toast when the pipeline truly failed so the user
+        // gets an alert even if they aren't on the Automations page.
+        if (!success) {
+          pushToast(`${pipelineName} failed.`);
+        }
       },
       onIncomingMessage: (payload) => {
         const data = payload as IncomingMessagePayload | null;
@@ -4205,6 +4216,12 @@ export default function App() {
           <LogsPage
             pushToast={pushToast}
           />
+        )}
+        {activeNav === "extensions" && (
+          <ExtensionsPage pushToast={pushToast} />
+        )}
+        {activeNav === "mcp" && (
+          <McpPage pushToast={pushToast} />
         )}
       </AppShell>
 

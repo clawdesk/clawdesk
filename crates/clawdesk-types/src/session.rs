@@ -46,8 +46,10 @@ impl CompactId {
     fn as_str(&self) -> &str {
         match self {
             Self::Inline { len, buf } => {
-                // Safety: we stored valid UTF-8 bytes in new()
-                unsafe { std::str::from_utf8_unchecked(&buf[..*len as usize]) }
+                // Invariant: new() only stores bytes from validated &str,
+                // so this will never fail.  Safe alternative to from_utf8_unchecked.
+                std::str::from_utf8(&buf[..*len as usize])
+                    .expect("CompactId::Inline contains invalid UTF-8 (bug in CompactId::new)")
             }
             Self::Heap(s) => s.as_str(),
         }

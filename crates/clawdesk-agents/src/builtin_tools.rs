@@ -43,7 +43,7 @@ static BG_PROCESSES: std::sync::LazyLock<
 /// - Environment variable passthrough
 /// - Output truncation to prevent memory exhaustion
 ///
-/// Aligns with OpenClaw's `exec` tool: skills reference `shell_exec` in their
+/// Aligns with the `exec` tool: skills reference `shell_exec` in their
 /// prompt instructions, and the LLM calls this tool to execute the commands.
 pub struct ShellTool {
     /// If set, commands are executed relative to this directory.
@@ -153,6 +153,25 @@ impl Tool for ShellTool {
 
         debug!(command, ?working_dir, background, timeout_secs, "ShellTool executing");
 
+        // Exec policy enforcement — validate command before execution.
+        // Skip policy checks for internal control commands (bg_status, bg_kill).
+        if !command.starts_with("bg_status ") && !command.starts_with("bg_kill ") {
+            use crate::exec_policy::{ExecPolicy, ExecPolicyConfig, ExecVerdict};
+            let exec_policy = ExecPolicy::new(ExecPolicyConfig::default());
+            if let ExecVerdict::Deny { reason } = exec_policy.check(command) {
+                warn!(command, reason = %reason, "ShellTool: command blocked by exec policy");
+                return Err(format!("command blocked by exec policy: {}", reason));
+            }
+
+            // Taint tracking — check for embedded secrets/credentials.
+            use clawdesk_types::taint::{TaintSink, TaintedValue, TaintLabel};
+            let tainted = TaintedValue::new(command.to_string(), TaintLabel::ToolOutput);
+            if let Err(violation) = TaintSink::shell_exec_sink().validate(&tainted) {
+                warn!(command, violation = %violation, "ShellTool: command blocked by taint policy");
+                return Err(format!("command blocked: {}", violation));
+            }
+        }
+
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(command);
         if let Some(ref dir) = working_dir {
@@ -218,10 +237,12 @@ impl Tool for ShellTool {
             let sid = stripped.trim();
             let procs = BG_PROCESSES.read().await;
             if let Some(entry) = procs.get(sid) {
-                let code = entry.exit_code.lock().await;
+                let (code, stdout, stderr) = tokio::join!(
+                    entry.exit_code.lock(),
+                    entry.stdout_buf.lock(),
+                    entry.stderr_buf.lock()
+                );
                 let elapsed = entry.started_at.elapsed().as_secs();
-                let stdout = entry.stdout_buf.lock().await;
-                let stderr = entry.stderr_buf.lock().await;
                 let status = if code.is_some() { "completed" } else { "running" };
                 return Ok(format!(
                     "Session: {sid}\nStatus: {status}\nElapsed: {elapsed}s\nExit code: {}\nStdout ({} bytes):\n{}\nStderr ({} bytes):\n{}",
@@ -243,8 +264,12 @@ impl Tool for ShellTool {
                     #[cfg(unix)]
                     {
                         if let Some(pid) = child.id() {
-                            // Send SIGTERM via libc
-                            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                            // Safe wrapper: libc::kill with error check.  The pid is valid
+                            // because child.id() returns Some only while the child is alive.
+                            let ret = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                            if ret != 0 {
+                                tracing::warn!(pid, "SIGTERM delivery failed (errno={})", std::io::Error::last_os_error());
+                            }
                         }
                     }
                     tokio::select! {
@@ -375,6 +400,16 @@ impl Tool for HttpTool {
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or("missing 'url' argument")?;
+
+        // Taint tracking — check URL for embedded secrets/credentials.
+        {
+            use clawdesk_types::taint::{TaintSink, TaintedValue, TaintLabel};
+            let tainted_url = TaintedValue::new(url.to_string(), TaintLabel::ToolOutput);
+            if let Err(violation) = TaintSink::api_key_sink().validate(&tainted_url) {
+                warn!(url, violation = %violation, "HttpTool: URL blocked by taint policy");
+                return Err(format!("URL blocked: {}", violation));
+            }
+        }
 
         let method = args
             .get("method")
@@ -1158,9 +1193,118 @@ impl Tool for MemoryStoreTool {
 
 // ─── Messaging Tool ──────────────────────────────────────────────────────────
 
-/// GAP-11: Built-in messaging tool — sends messages through channels.
+/// Built-in messaging tool — sends messages through channels.
 ///
-/// Follows the OpenClaw `message` / `sessions_send` pattern:
+/// Follows the `message` / `sessions_send` pattern:
+/// - The LLM calls this tool when it wants to proactively send a message
+///   to a specific channel or recipient.
+/// - Execution delegates to an injected async callback (the gateway layer
+///   wires the actual channel send).
+/// - Sent messages are tracked for duplicate suppression (the runner checks
+///   `AgentResponse.messaging_tool_sent` to avoid echoing tool-sent content).
+// ─── Memory Forget Tool ──────────────────────────────────────────────────────
+
+/// Allows the LLM to delete specific memories — stale, incorrect, or
+/// user-requested deletions. Completes the memory lifecycle:
+/// search → store → forget.
+///
+/// ## Architecture
+///
+/// ```text
+/// LLM ─→ tool_call("memory_forget", {memory_id})
+///     ─→ MemoryForgetTool::execute()
+///         ─→ forget_fn(memory_id)
+///             ─→ MemoryManager::forget(id)
+///         ←─ Ok("deleted")
+/// ```
+pub struct MemoryForgetTool {
+    /// Async callback that performs the actual memory deletion.
+    forget_fn: std::sync::Arc<
+        dyn Fn(
+                String,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+            + Send
+            + Sync,
+    >,
+}
+
+impl MemoryForgetTool {
+    /// Create from an async callback to `MemoryManager::forget()`.
+    pub fn with_async_forget(
+        forget_fn: std::sync::Arc<
+            dyn Fn(
+                    String,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self { forget_fn }
+    }
+
+    /// Create a no-op forget tool for when memory isn't available.
+    pub fn noop() -> Self {
+        Self {
+            forget_fn: std::sync::Arc::new(|_| {
+                Box::pin(async { Ok(()) })
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for MemoryForgetTool {
+    fn name(&self) -> &str {
+        "memory_forget"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "memory_forget".into(),
+            description: "Delete a specific memory by its ID. Use when the user asks you to \
+                forget something, when information is outdated, or when correcting stored facts. \
+                Get the memory_id from memory_search results."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "The ID of the memory to delete (from memory_search results)"
+                    }
+                },
+                "required": ["memory_id"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::Memory]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let memory_id = args
+            .get("memory_id")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'memory_id' argument")?;
+
+        if memory_id.trim().is_empty() {
+            return Err("memory_id must not be empty".into());
+        }
+
+        (self.forget_fn)(memory_id.to_string()).await?;
+
+        Ok(format!("Memory {} deleted successfully.", memory_id))
+    }
+}
+
+// ─── Messaging Tool ──────────────────────────────────────────────────────────
+
+/// Built-in messaging tool — sends messages through channels.
+///
+/// Follows the `message` / `sessions_send` pattern:
 /// - The LLM calls this tool when it wants to proactively send a message
 ///   to a specific channel or recipient.
 /// - Execution delegates to an injected async callback (the gateway layer
@@ -1191,6 +1335,9 @@ pub struct MessageSendTool {
             + Send
             + Sync,
     >,
+    /// Actually-connected channel names (populated from ChannelRegistry).
+    /// Used in the tool schema so the LLM only sees channels that exist.
+    available_channels: Vec<String>,
 }
 
 /// Record of a message sent via the messaging tool, for duplicate suppression.
@@ -1212,7 +1359,7 @@ pub struct MessagingToolSend {
 ///
 /// Accumulated during `execute_loop()` and attached to `AgentResponse`.
 /// The reply formatter uses this to strip payloads that duplicate
-/// tool-sent content (following OpenClaw's `filterMessagingToolDuplicates`).
+/// tool-sent content (following the `filterMessagingToolDuplicates`).
 #[derive(Debug, Clone, Default)]
 pub struct MessagingToolTracker {
     /// All successful sends during this agent run.
@@ -1247,8 +1394,7 @@ impl MessagingToolTracker {
 
     /// Check if a reply text is a duplicate of a tool-sent message.
     ///
-    /// Uses bidirectional substring containment (matching OpenClaw's
-    /// `isMessagingToolDuplicate`). Minimum length threshold of 10 chars.
+    /// Uses bidirectional substring containment (matching the    /// `isMessagingToolDuplicate`). Minimum length threshold of 10 chars.
     pub fn is_duplicate(&self, reply_text: &str) -> bool {
         let normalized = Self::normalize_text(reply_text);
         if normalized.len() < 10 {
@@ -1297,6 +1443,9 @@ impl MessageSendTool {
     ///
     /// The callback receives `(target, channel_id, content, media_urls)` and
     /// returns `Ok(delivery_id)` or `Err(error_msg)`.
+    ///
+    /// `available_channels` is the list of actually-connected channel names
+    /// (e.g., `["telegram", "discord"]`) from `ChannelRegistry`.
     pub fn new(
         send_fn: std::sync::Arc<
             dyn Fn(
@@ -1311,8 +1460,9 @@ impl MessageSendTool {
                 + Send
                 + Sync,
         >,
+        available_channels: Vec<String>,
     ) -> Self {
-        Self { send_fn }
+        Self { send_fn, available_channels }
     }
 
     /// Create a no-op messaging tool (for testing or when messaging is disabled).
@@ -1323,6 +1473,7 @@ impl MessageSendTool {
                     Ok(format!("noop-delivery-{}", target))
                 })
             }),
+            available_channels: vec![],
         }
     }
 }
@@ -1334,31 +1485,37 @@ impl Tool for MessageSendTool {
     }
 
     fn schema(&self) -> ToolSchema {
+        // Build dynamic channel description from actually-connected channels
+        let channel_desc = if self.available_channels.is_empty() {
+            "Channel name (e.g., 'telegram', 'discord', 'slack')".to_string()
+        } else {
+            let names: Vec<String> = self.available_channels.iter()
+                .map(|c| format!("'{}'", c))
+                .collect();
+            format!("Connected channel name: {}", names.join(", "))
+        };
+
         ToolSchema {
             name: "message_send".into(),
-            description: "Send a message to a specific channel or recipient. Use when you need to proactively deliver information to a user or channel (e.g., notifications, replies to external threads, cross-channel messages).".into(),
+            description: "Send a message to another channel. Just provide the channel name and content — the system automatically routes to the correct chat. Do NOT ask the user for channel IDs, chat IDs, or any numeric identifiers.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "to": {
-                        "type": "string",
-                        "description": "Target identifier — a channel ID, user ID, or thread ID to send the message to"
-                    },
                     "channel": {
                         "type": "string",
-                        "description": "Channel provider to send through (e.g., 'telegram', 'discord', 'slack'). If omitted, uses the originating channel."
+                        "description": channel_desc
                     },
                     "content": {
                         "type": "string",
-                        "description": "The message content to send"
+                        "description": "The message text to send"
                     },
-                    "media_urls": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Optional list of media URLs (images, files) to attach to the message"
+                    "to": {
+                        "type": "string",
+                        "description": "Optional. Defaults to the last active chat on the channel. Only set if you have a specific numeric ID.",
+                        "default": "default"
                     }
                 },
-                "required": ["to", "content"]
+                "required": ["channel", "content"]
             }),
         }
     }
@@ -1371,7 +1528,7 @@ impl Tool for MessageSendTool {
         let target = args
             .get("to")
             .and_then(|v| v.as_str())
-            .ok_or("missing 'to' argument")?
+            .unwrap_or("default")
             .to_string();
 
         let channel = args
@@ -1411,18 +1568,385 @@ impl Tool for MessageSendTool {
         )
         .await?;
 
-        // Return a structured result the runner can parse for tracking
-        let result = json!({
-            "status": "sent",
-            "delivery_id": delivery_id,
-            "target": target,
-            "channel": channel,
-            "content_length": content.len(),
-            "media_count": media_urls.len(),
-        });
-
-        Ok(result.to_string())
+        // Return a human-friendly result that the LLM can relay to the user
+        let channel_name = channel.as_deref().unwrap_or("unknown");
+        Ok(format!("Message delivered to {} successfully.", channel_name))
     }
+}
+
+// ─── Op8: Live Workspace Awareness ──────────────────────────────────────────
+
+/// Tool that searches the workspace for files matching a glob pattern.
+///
+/// Returns file paths relative to the workspace root, confined by
+/// [`WorkspaceGuard`] so the agent cannot escape the sandbox.
+pub struct WorkspaceSearchTool {
+    /// `(glob_pattern, max_results) → Ok(json_array_of_paths)`
+    search_fn: Arc<
+        dyn Fn(
+                String,
+                usize,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+}
+
+impl WorkspaceSearchTool {
+    pub fn new(
+        search_fn: Arc<
+            dyn Fn(
+                    String,
+                    usize,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self { search_fn }
+    }
+}
+
+#[async_trait]
+impl Tool for WorkspaceSearchTool {
+    fn name(&self) -> &str {
+        "workspace_search"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "workspace_search".into(),
+            description: "Search the workspace for files matching a glob pattern. Returns paths \
+                relative to the workspace root. Supports standard glob syntax: * (any chars), \
+                ** (recursive), ? (single char), [abc] (character class)."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern to match files, e.g. '**/*.rs', 'src/**/*.ts', '*.toml'"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default: 100, max: 1000)"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::FileSystem]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        debug!("WorkspaceSearchTool executing with args: {:?}", args);
+
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "pattern is required".to_string())?
+            .to_string();
+
+        let max_results = args
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100)
+            .min(1000) as usize;
+
+        (self.search_fn)(pattern, max_results).await
+    }
+}
+
+/// Tool that searches file contents within the workspace for a text pattern.
+///
+/// Returns matching file paths with line numbers and context, confined by
+/// [`WorkspaceGuard`].
+pub struct WorkspaceGrepTool {
+    /// `(query, is_regex, include_glob, max_results) → Ok(json_matches)`
+    grep_fn: Arc<
+        dyn Fn(
+                String,
+                bool,
+                Option<String>,
+                usize,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+}
+
+impl WorkspaceGrepTool {
+    pub fn new(
+        grep_fn: Arc<
+            dyn Fn(
+                    String,
+                    bool,
+                    Option<String>,
+                    usize,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self { grep_fn }
+    }
+}
+
+#[async_trait]
+impl Tool for WorkspaceGrepTool {
+    fn name(&self) -> &str {
+        "workspace_grep"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "workspace_grep".into(),
+            description: "Search file contents within the workspace for a text or regex pattern. \
+                Returns matching file paths, line numbers, and surrounding context lines."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Text string or regex pattern to search for"
+                    },
+                    "is_regex": {
+                        "type": "boolean",
+                        "description": "Whether the query is a regex pattern (default: false, plain text)"
+                    },
+                    "include_pattern": {
+                        "type": "string",
+                        "description": "Optional glob pattern to limit which files are searched (e.g. '**/*.rs')"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of matching lines to return (default: 50, max: 500)"
+                    }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::FileSystem]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        debug!("WorkspaceGrepTool executing with args: {:?}", args);
+
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "query is required".to_string())?
+            .to_string();
+
+        let is_regex = args
+            .get("is_regex")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let include_pattern = args
+            .get("include_pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let max_results = args
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .min(500) as usize;
+
+        (self.grep_fn)(query, is_regex, include_pattern, max_results).await
+    }
+}
+
+/// Register the workspace_search (glob) and workspace_grep (text search) tools.
+///
+/// - `search_fn`: `(glob_pattern, max_results) → Ok(json_paths)`
+/// - `grep_fn`: `(query, is_regex, include_glob, max_results) → Ok(json_matches)`
+pub fn register_workspace_tools(
+    registry: &mut crate::tools::ToolRegistry,
+    search_fn: Arc<
+        dyn Fn(
+                String,
+                usize,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+    grep_fn: Arc<
+        dyn Fn(
+                String,
+                bool,
+                Option<String>,
+                usize,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+) {
+    use std::sync::Arc;
+    registry.register(Arc::new(WorkspaceSearchTool::new(search_fn)));
+    registry.register(Arc::new(WorkspaceGrepTool::new(grep_fn)));
+}
+
+// ─── Op12: Long-Running Durable Tasks ───────────────────────────────────────
+
+/// Tool that manages long-running durable tasks (builds, deployments, pipelines)
+/// with checkpoint/resume capability.
+///
+/// Operations:
+/// - **create**: Register a new long-running task with durable storage
+/// - **status**: Query a task's current state, progress, and checkpoint info
+/// - **checkpoint**: Save the current task state for resume after restart
+/// - **resume**: Resume a checkpointed task from the last completed step
+/// - **cancel**: Cancel a running task durably
+pub struct DurableTaskTool {
+    /// `(operation, task_args_json) → Ok(result_json)`
+    task_fn: Arc<
+        dyn Fn(
+                String,
+                serde_json::Value,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+}
+
+impl DurableTaskTool {
+    pub fn new(
+        task_fn: Arc<
+            dyn Fn(
+                    String,
+                    serde_json::Value,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self { task_fn }
+    }
+}
+
+#[async_trait]
+impl Tool for DurableTaskTool {
+    fn name(&self) -> &str {
+        "durable_task"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "durable_task".into(),
+            description: "Manage long-running durable tasks that survive process restarts. \
+                Supports creating tasks, querying status, saving checkpoints for resume, \
+                and canceling. Use for builds, deployments, multi-step pipelines, and any \
+                work that may outlive the current session."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["create", "status", "checkpoint", "resume", "cancel", "list"],
+                        "description": "Operation to perform"
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID (required for status, checkpoint, resume, cancel)"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Human-readable task name (for create)"
+                    },
+                    "executor_agent": {
+                        "type": "string",
+                        "description": "Agent ID to execute the task (for create)"
+                    },
+                    "input": {
+                        "type": "object",
+                        "description": "Input payload for the task (for create/resume)"
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Checkpoint label (for checkpoint, e.g. 'after step 3')"
+                    },
+                    "step_outputs": {
+                        "type": "object",
+                        "description": "Intermediate step outputs to save (for checkpoint)"
+                    },
+                    "completed_steps": {
+                        "type": "integer",
+                        "description": "Number of completed steps (for checkpoint)"
+                    }
+                },
+                "required": ["operation"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![] // Task management is an orchestration primitive
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        debug!("DurableTaskTool executing with args: {:?}", args);
+
+        let operation = args
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "operation is required".to_string())?
+            .to_string();
+
+        match operation.as_str() {
+            "create" => {
+                if args.get("executor_agent").and_then(|v| v.as_str()).is_none() {
+                    return Err("executor_agent is required for create".into());
+                }
+            }
+            "status" | "checkpoint" | "resume" | "cancel" => {
+                if args.get("task_id").and_then(|v| v.as_str()).is_none() {
+                    return Err(format!("task_id is required for {}", operation));
+                }
+            }
+            "list" => {}
+            _ => return Err(format!("unknown operation: {}", operation)),
+        }
+
+        (self.task_fn)(operation, args).await
+    }
+}
+
+/// Register the durable_task tool with an async callback.
+///
+/// The callback receives `(operation, args_json)` and should route to the
+/// appropriate task management operation (create/status/checkpoint/resume/cancel).
+pub fn register_durable_task_tool(
+    registry: &mut crate::tools::ToolRegistry,
+    task_fn: Arc<
+        dyn Fn(
+                String,
+                serde_json::Value,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+) {
+    use std::sync::Arc;
+    registry.register(Arc::new(DurableTaskTool::new(task_fn)));
 }
 
 // ─── Registry Builder ────────────────────────────────────────────────────────
@@ -1443,13 +1967,22 @@ pub fn register_builtin_tools(
     registry.register(Arc::new(FileWriteTool::new(workspace.clone())));
     registry.register(Arc::new(FileListTool::new(workspace)));
     registry.register(Arc::new(WebSearchTool::new()));
+
+    // Register persistent process manager tools
+    let process_mgr = Arc::new(crate::process_manager::ProcessManager::default());
+    registry.register(Arc::new(ProcessStartTool::new(Arc::clone(&process_mgr))));
+    registry.register(Arc::new(ProcessPollTool::new(Arc::clone(&process_mgr))));
+    registry.register(Arc::new(ProcessWriteTool::new(Arc::clone(&process_mgr))));
+    registry.register(Arc::new(ProcessKillTool::new(Arc::clone(&process_mgr))));
+    registry.register(Arc::new(ProcessListTool::new(process_mgr)));
+
     // MemorySearchTool is registered separately via register_memory_tool()
     // because it needs a callback to the MemoryManager.
     // MessageSendTool is registered separately via register_messaging_tool()
     // because it needs a callback to the channel gateway.
 }
 
-// ─── GAP-7: Sub-Agent Tool ──────────────────────────────────────────────────
+// ─── Sub-Agent Tool ──────────────────────────────────────────────────
 
 /// Tool that allows an agent to spawn a sub-agent for delegation.
 ///
@@ -1545,11 +2078,17 @@ impl crate::tools::Tool for SpawnSubAgentTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(120);
 
-        (self.spawn_fn)(agent_id, task, timeout_secs).await
+        // Recursion depth check — prevent runaway sub-agent spawning.
+        if let Err(e) = crate::recursion_depth::check_depth() {
+            return Err(format!("sub-agent spawn blocked: {}", e));
+        }
+        crate::recursion_depth::with_incremented_depth(
+            (self.spawn_fn)(agent_id, task, timeout_secs),
+        ).await
     }
 }
 
-/// Register the sub-agent spawn tool with an async spawn callback (GAP-7).
+/// Register the sub-agent spawn tool with an async spawn callback.
 ///
 /// The callback receives `(agent_id, task, timeout_secs)` and returns
 /// `Ok(response_text)` from the sub-agent or `Err(error_message)`.
@@ -1569,10 +2108,14 @@ pub fn register_subagent_tool(
     registry.register(Arc::new(SpawnSubAgentTool::new(spawn_fn)));
 }
 
-/// Register the messaging tool with an async send callback (GAP-11).
+/// Register the messaging tool with an async send callback.
 ///
 /// The callback receives `(target, channel_id, content, media_urls)` and
 /// returns `Ok(delivery_id)` or `Err(error_message)`.
+///
+/// `available_channels` is the list of actually-connected channel names
+/// (e.g., `["telegram", "discord"]`) — embedded in the tool schema so the
+/// LLM only sees channels that actually exist.
 pub fn register_messaging_tool(
     registry: &mut crate::tools::ToolRegistry,
     send_fn: std::sync::Arc<
@@ -1586,9 +2129,590 @@ pub fn register_messaging_tool(
             + Send
             + Sync,
     >,
+    available_channels: Vec<String>,
 ) {
     use std::sync::Arc;
-    registry.register(Arc::new(MessageSendTool::new(send_fn)));
+    registry.register(Arc::new(MessageSendTool::new(send_fn, available_channels)));
+}
+
+// ─── Op6: Cross-Channel Notification Routing ────────────────────────────────
+
+/// Priority level for notification routing. Higher priorities may trigger
+/// additional channels (e.g., critical → SMS + Slack) or different UX
+/// (e.g., @here mention in Slack).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationPriority {
+    Info,
+    Warning,
+    Critical,
+}
+
+impl NotificationPriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+/// Tool that sends a notification to one or more channels simultaneously
+/// (fan-out), with optional priority and named target (e.g. `#ops`, `@user`).
+///
+/// Unlike [`MessageSendTool`] which sends a conversational message to a
+/// single channel, this tool is designed for operational notifications that
+/// may need to reach the user on multiple platforms at once.
+pub struct SendNotificationTool {
+    /// `(channels, target, message, priority) → Ok(vec_of_delivery_ids_json)`
+    notify_fn: Arc<
+        dyn Fn(
+                Vec<String>,
+                Option<String>,
+                String,
+                String,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+    /// Connected channel names, embedded into the schema for LLM visibility.
+    available_channels: Vec<String>,
+}
+
+impl SendNotificationTool {
+    pub fn new(
+        notify_fn: Arc<
+            dyn Fn(
+                    Vec<String>,
+                    Option<String>,
+                    String,
+                    String,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send
+                + Sync,
+        >,
+        available_channels: Vec<String>,
+    ) -> Self {
+        Self {
+            notify_fn,
+            available_channels,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SendNotificationTool {
+    fn name(&self) -> &str {
+        "send_notification"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        let channel_enum: Vec<serde_json::Value> = self
+            .available_channels
+            .iter()
+            .map(|c| json!(c))
+            .collect();
+
+        ToolSchema {
+            name: "send_notification".into(),
+            description: "Send a notification to one or more channels simultaneously. \
+                Supports priority levels and named targets (e.g. #channel-name, @user). \
+                Use this for operational alerts, status updates, and cross-channel fan-out \
+                rather than conversational messages."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "channels": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": channel_enum,
+                        },
+                        "description": "Target channels to notify (fan-out to all listed)"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Notification body text"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Channel-specific target — e.g. '#ops' for a Slack channel, '@alice' for a DM. If omitted, uses the default destination for each channel."
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["info", "warning", "critical"],
+                        "description": "Notification priority (default: info). Critical may trigger additional delivery channels or @here mentions."
+                    }
+                },
+                "required": ["channels", "message"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::Messaging]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        debug!("SendNotificationTool executing with args: {:?}", args);
+
+        let channels: Vec<String> = args
+            .get("channels")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        if channels.is_empty() {
+            return Err("channels array must not be empty".into());
+        }
+
+        let message = args
+            .get("message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "message is required".to_string())?
+            .to_string();
+
+        let target = args
+            .get("target")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let priority = args
+            .get("priority")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info")
+            .to_string();
+
+        (self.notify_fn)(channels, target, message, priority).await
+    }
+}
+
+/// Register the send_notification tool with an async fan-out callback.
+///
+/// The callback receives `(channels, target, message, priority)` and should
+/// deliver to each channel, returning a JSON summary of delivery results.
+pub fn register_notification_tool(
+    registry: &mut crate::tools::ToolRegistry,
+    notify_fn: Arc<
+        dyn Fn(
+                Vec<String>,
+                Option<String>,
+                String,
+                String,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+    available_channels: Vec<String>,
+) {
+    use std::sync::Arc;
+    registry.register(Arc::new(SendNotificationTool::new(
+        notify_fn,
+        available_channels,
+    )));
+}
+
+// ─── Op7: Dynamic MCP Server Connection ─────────────────────────────────────
+
+/// Tool that lets the LLM connect to an MCP server at runtime and discover
+/// its available tools.
+///
+/// The response lists discovered tools with their schemas so the LLM can
+/// subsequently invoke them via [`McpCallTool`].
+pub struct McpConnectTool {
+    /// `(server_name, transport_type, command_or_url, args) → Ok(discovered_tools_json)`
+    connect_fn: Arc<
+        dyn Fn(
+                String,
+                String,
+                String,
+                Vec<String>,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+}
+
+impl McpConnectTool {
+    pub fn new(
+        connect_fn: Arc<
+            dyn Fn(
+                    String,
+                    String,
+                    String,
+                    Vec<String>,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self { connect_fn }
+    }
+}
+
+#[async_trait]
+impl Tool for McpConnectTool {
+    fn name(&self) -> &str {
+        "mcp_connect"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "mcp_connect".into(),
+            description: "Connect to an MCP (Model Context Protocol) server and discover its \
+                available tools. After connecting, use mcp_call to invoke discovered tools. \
+                Supports stdio (local command) and SSE (HTTP URL) transports."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "server_name": {
+                        "type": "string",
+                        "description": "A unique name for this server connection (used to reference it later in mcp_call)"
+                    },
+                    "transport": {
+                        "type": "string",
+                        "enum": ["stdio", "sse"],
+                        "description": "Transport type: 'stdio' for local commands, 'sse' for HTTP SSE endpoints"
+                    },
+                    "command_or_url": {
+                        "type": "string",
+                        "description": "For stdio: the command to run (e.g. 'npx'). For sse: the server URL."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Command arguments for stdio transport (e.g. ['-y', '@modelcontextprotocol/server-github']). Ignored for SSE."
+                    }
+                },
+                "required": ["server_name", "transport", "command_or_url"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ExternalApi]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        debug!("McpConnectTool executing with args: {:?}", args);
+
+        let server_name = args
+            .get("server_name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "server_name is required".to_string())?
+            .to_string();
+
+        let transport = args
+            .get("transport")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "transport is required (stdio or sse)".to_string())?
+            .to_string();
+
+        let command_or_url = args
+            .get("command_or_url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "command_or_url is required".to_string())?
+            .to_string();
+
+        let cmd_args: Vec<String> = args
+            .get("args")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        (self.connect_fn)(server_name, transport, command_or_url, cmd_args).await
+    }
+}
+
+/// Tool that calls a tool on a previously-connected MCP server.
+///
+/// Works in tandem with [`McpConnectTool`]: first connect to discover tools,
+/// then use this to invoke them by name.
+pub struct McpCallTool {
+    /// `(server_name, tool_name, arguments_json) → Ok(result_text)`
+    call_fn: Arc<
+        dyn Fn(
+                String,
+                String,
+                serde_json::Value,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+}
+
+impl McpCallTool {
+    pub fn new(
+        call_fn: Arc<
+            dyn Fn(
+                    String,
+                    String,
+                    serde_json::Value,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self { call_fn }
+    }
+}
+
+#[async_trait]
+impl Tool for McpCallTool {
+    fn name(&self) -> &str {
+        "mcp_call"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "mcp_call".into(),
+            description: "Call a tool on a connected MCP server. Use mcp_connect first to \
+                connect and discover available tools, then call them by server name and tool name."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "server": {
+                        "type": "string",
+                        "description": "The server_name used when connecting via mcp_connect"
+                    },
+                    "tool": {
+                        "type": "string",
+                        "description": "The tool name as returned by mcp_connect"
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "Tool arguments matching the schema returned by mcp_connect"
+                    }
+                },
+                "required": ["server", "tool"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ExternalApi]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        debug!("McpCallTool executing with args: {:?}", args);
+
+        let server = args
+            .get("server")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "server is required".to_string())?
+            .to_string();
+
+        let tool = args
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "tool is required".to_string())?
+            .to_string();
+
+        let arguments = args
+            .get("arguments")
+            .cloned()
+            .unwrap_or(json!({}));
+
+        (self.call_fn)(server, tool, arguments).await
+    }
+}
+
+/// Register the MCP connect + call tools with async callbacks.
+///
+/// - `connect_fn`: `(server_name, transport, command_or_url, args) → Ok(tools_json)`
+/// - `call_fn`: `(server, tool_name, arguments) → Ok(result_text)`
+pub fn register_mcp_tools(
+    registry: &mut crate::tools::ToolRegistry,
+    connect_fn: Arc<
+        dyn Fn(
+                String,
+                String,
+                String,
+                Vec<String>,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+    call_fn: Arc<
+        dyn Fn(
+                String,
+                String,
+                serde_json::Value,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+) {
+    use std::sync::Arc;
+    registry.register(Arc::new(McpConnectTool::new(connect_fn)));
+    registry.register(Arc::new(McpCallTool::new(call_fn)));
+}
+
+// ─── Op3: Pipeline Composition ──────────────────────────────────────────────
+
+/// Tool that lets the LLM compose and optionally execute agent pipelines.
+///
+/// A pipeline is a directed graph of named stages: sequential agent calls,
+/// parallel branches with merge strategies, conditional routing gates, and
+/// text transforms. This tool bridges the [`AgentPipeline`] infrastructure
+/// to the agent's tool-calling surface.
+pub struct PipelineComposeTool {
+    /// `(pipeline_json) → Ok(pipeline_id_or_result)`
+    compose_fn: Arc<
+        dyn Fn(
+                serde_json::Value,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+}
+
+impl PipelineComposeTool {
+    pub fn new(
+        compose_fn: Arc<
+            dyn Fn(
+                    serde_json::Value,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self { compose_fn }
+    }
+}
+
+#[async_trait]
+impl Tool for PipelineComposeTool {
+    fn name(&self) -> &str {
+        "compose_pipeline"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "compose_pipeline".into(),
+            description: "Build and optionally execute a multi-agent pipeline. Define a sequence \
+                of stages (agent calls, parallel branches, routing gates, transforms) that process \
+                input through a DAG. Use this for complex multi-step workflows that coordinate \
+                multiple agents."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Human-readable pipeline name"
+                    },
+                    "stages": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["agent", "transform", "gate", "parallel"],
+                                    "description": "Stage type: agent (invoke an agent), transform (apply text operation), gate (conditional branch), parallel (fan-out)"
+                                },
+                                "agent_id": {
+                                    "type": "string",
+                                    "description": "Agent ID for 'agent' stages"
+                                },
+                                "expression": {
+                                    "type": "string",
+                                    "description": "For 'transform': a Jinja-like template. For 'gate': a condition expression (e.g. 'contains:error')"
+                                },
+                                "branches": {
+                                    "type": "array",
+                                    "items": { "type": "object" },
+                                    "description": "Sub-stages for parallel execution"
+                                },
+                                "merge": {
+                                    "type": "string",
+                                    "enum": ["concat", "structured", "first_success", "best"],
+                                    "description": "Merge strategy for parallel branches (default: concat)"
+                                },
+                                "timeout_secs": {
+                                    "type": "integer",
+                                    "description": "Per-stage timeout in seconds (default: 60)"
+                                }
+                            },
+                            "required": ["type"]
+                        },
+                        "description": "Ordered list of pipeline stages to execute sequentially"
+                    },
+                    "error_policy": {
+                        "type": "string",
+                        "enum": ["fail_fast", "continue_on_error", "retry"],
+                        "description": "Error handling policy (default: fail_fast)"
+                    },
+                    "run_immediately": {
+                        "type": "boolean",
+                        "description": "If true, execute the pipeline now with the provided input. If false, save for later execution."
+                    },
+                    "input": {
+                        "type": "string",
+                        "description": "Input text to feed into the pipeline (required if run_immediately is true)"
+                    }
+                },
+                "required": ["name", "stages"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![] // Pipeline composition is an orchestration primitive
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        debug!("PipelineComposeTool executing with args: {:?}", args);
+
+        // Validate required fields
+        if args.get("name").and_then(|v| v.as_str()).is_none() {
+            return Err("name is required".into());
+        }
+        if args.get("stages").and_then(|v| v.as_array()).map_or(true, |a| a.is_empty()) {
+            return Err("stages array must not be empty".into());
+        }
+        if args.get("run_immediately").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if args.get("input").and_then(|v| v.as_str()).is_none() {
+                return Err("input is required when run_immediately is true".into());
+            }
+        }
+
+        (self.compose_fn)(args).await
+    }
+}
+
+/// Register the compose_pipeline tool with an async callback.
+///
+/// The callback receives the full pipeline JSON definition and should
+/// construct an `AgentPipeline`, validate it, and either persist it or
+/// execute it immediately via `PipelineExecutor`.
+pub fn register_pipeline_compose_tool(
+    registry: &mut crate::tools::ToolRegistry,
+    compose_fn: Arc<
+        dyn Fn(
+                serde_json::Value,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+) {
+    use std::sync::Arc;
+    registry.register(Arc::new(PipelineComposeTool::new(compose_fn)));
 }
 
 /// Register the memory search tool with an async recall callback.
@@ -1627,6 +2751,25 @@ pub fn register_memory_store_tool_async(
 ) {
     use std::sync::Arc;
     registry.register(Arc::new(MemoryStoreTool::with_async_store(store_fn)));
+}
+
+/// Register the memory forget tool with an async forget callback.
+///
+/// The callback receives a `memory_id` string and should delete the entry via
+/// `MemoryManager::forget()`.
+pub fn register_memory_forget_tool_async(
+    registry: &mut crate::tools::ToolRegistry,
+    forget_fn: std::sync::Arc<
+        dyn Fn(
+                String,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+            + Send
+            + Sync,
+    >,
+) {
+    use std::sync::Arc;
+    registry.register(Arc::new(MemoryForgetTool::with_async_forget(forget_fn)));
 }
 
 // ─── A2A Sessions Send Tool ─────────────────────────────────────────────────
@@ -1836,7 +2979,124 @@ pub fn register_agents_list_tool(
     registry.register(Arc::new(AgentsListTool::new(list_fn)));
 }
 
-// ─── GAP-1: Dynamic Agent Spawning ─────────────────────────────────────────
+// ─── Op5: Agent Discovery for Delegation ────────────────────────────────────
+
+/// Tool that queries the ACP agent directory for agents matching required
+/// capabilities, returning ranked candidates with scores.
+///
+/// Designed as the "discovery → delegate" companion to [`SessionsSendTool`] and
+/// [`SpawnSubAgentTool`]: the LLM first calls `discover_agents` to find
+/// candidates, then picks one and delegates via `sessions_send` or
+/// `spawn_subagent`.
+pub struct DiscoverAgentsTool {
+    /// `(capability_names, min_score) → JSON array of matching agents`
+    discover_fn: Arc<
+        dyn Fn(
+                Vec<String>,
+                f64,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+}
+
+impl DiscoverAgentsTool {
+    pub fn new(
+        discover_fn: Arc<
+            dyn Fn(
+                    Vec<String>,
+                    f64,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self { discover_fn }
+    }
+}
+
+#[async_trait]
+impl Tool for DiscoverAgentsTool {
+    fn name(&self) -> &str {
+        "discover_agents"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "discover_agents".into(),
+            description: "Search the agent directory for agents matching required capabilities. \
+                Returns ranked candidates with scores. Use this before sessions_send or \
+                spawn_subagent to find the best agent for a task."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "capabilities": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Required capability names, e.g. ['web_search', 'code_execution']. \
+                            Uses hierarchical matching: requesting 'media_processing' also matches \
+                            agents with 'image_processing', 'audio_processing', etc."
+                    },
+                    "min_score": {
+                        "type": "number",
+                        "description": "Minimum capability match score between 0.0 and 1.0 (default: 0.5). \
+                            A score of 1.0 means all requested capabilities are present."
+                    }
+                },
+                "required": ["capabilities"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![] // Read-only directory query
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        debug!("DiscoverAgentsTool executing with args: {:?}", args);
+
+        let capabilities: Vec<String> = args
+            .get("capabilities")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        if capabilities.is_empty() {
+            return Err("capabilities array must not be empty".into());
+        }
+
+        let min_score = args
+            .get("min_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0);
+
+        (self.discover_fn)(capabilities, min_score).await
+    }
+}
+
+/// Register the discover_agents tool with an async callback.
+///
+/// The callback receives `(capability_names, min_score)` and returns a JSON
+/// string with matching agents ranked by score.
+pub fn register_discover_agents_tool(
+    registry: &mut crate::tools::ToolRegistry,
+    discover_fn: Arc<
+        dyn Fn(
+                Vec<String>,
+                f64,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+) {
+    registry.register(Arc::new(DiscoverAgentsTool::new(discover_fn)));
+}
+
+// ─── Dynamic Agent Spawning ─────────────────────────────────────────
 
 /// Tool capability delegation mode for ephemeral agents.
 ///
@@ -2033,7 +3293,7 @@ impl Tool for DynamicSpawnTool {
     }
 }
 
-/// Register the dynamic agent spawn tool (GAP-1).
+/// Register the dynamic agent spawn tool.
 ///
 /// The callback receives a `DynamicSpawnRequest` and returns
 /// `Ok(response_text)` from the ephemeral agent or `Err(error_message)`.
@@ -2049,4 +3309,821 @@ pub fn register_dynamic_spawn_tool(
     >,
 ) {
     registry.register(Arc::new(DynamicSpawnTool::new(spawn_fn)));
+}
+
+// ─── Op1: Browser Action Tools ──────────────────────────────────────────────
+
+/// Browser integration tool — dispatches LLM tool calls to a browser backend.
+///
+/// Uses the callback pattern (like `MessageSendTool`) because the actual
+/// `CdpSession` is managed externally. The `execute_fn` callback receives
+/// `(tool_name, json_args)` and returns the result text or error.
+///
+/// Seven instances are created, one per browser tool definition, all sharing
+/// the same callback closure.
+pub struct BrowserActionTool {
+    tool_name: String,
+    description: String,
+    parameters: serde_json::Value,
+    /// Callback: `(tool_name, args_json) → Result<output_text, error_msg>`.
+    execute_fn: Arc<
+        dyn Fn(
+                String,
+                serde_json::Value,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+}
+
+impl BrowserActionTool {
+    /// Create a browser tool for a specific action.
+    pub fn new(
+        tool_name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+        execute_fn: Arc<
+            dyn Fn(
+                    String,
+                    serde_json::Value,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            description: description.into(),
+            parameters,
+            execute_fn,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for BrowserActionTool {
+    fn name(&self) -> &str {
+        &self.tool_name
+    }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: self.tool_name.clone(),
+            description: self.description.clone(),
+            parameters: self.parameters.clone(),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::Browser]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        (self.execute_fn)(self.tool_name.clone(), args).await
+    }
+}
+
+/// Browser tool definitions for LLM function-calling integration.
+///
+/// Returns `(name, description, json_schema_parameters)` tuples for the 7
+/// browser actions. Defined here so `clawdesk-agents` doesn't need to depend
+/// on `clawdesk-browser`.
+fn browser_tool_definitions() -> Vec<(&'static str, &'static str, serde_json::Value)> {
+    vec![
+        (
+            "browser_navigate",
+            "Navigate to a URL in the browser",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to navigate to"
+                    }
+                },
+                "required": ["url"]
+            }),
+        ),
+        (
+            "browser_click",
+            "Click an element by CSS selector",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector for the element to click"
+                    }
+                },
+                "required": ["selector"]
+            }),
+        ),
+        (
+            "browser_type",
+            "Type text into an input element",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector for the input element"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text to type into the input"
+                    }
+                },
+                "required": ["selector", "text"]
+            }),
+        ),
+        (
+            "browser_screenshot",
+            "Take a screenshot of the current page",
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+        (
+            "browser_extract_text",
+            "Extract text from the page or a specific element",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "Optional CSS selector to extract text from a specific element"
+                    }
+                }
+            }),
+        ),
+        (
+            "browser_get_title",
+            "Get the current page title",
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+        (
+            "browser_eval_js",
+            "Execute JavaScript on the page and return the result",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "JavaScript expression to evaluate"
+                    }
+                },
+                "required": ["expression"]
+            }),
+        ),
+    ]
+}
+
+/// Register all 7 browser action tools into the tool registry.
+///
+/// The `execute_fn` callback is shared across all browser tools. It receives
+/// `(tool_name, json_args)` and should dispatch to the actual browser backend
+/// (e.g., via `clawdesk_browser::execute_tool_call`).
+///
+/// ## Example (in `clawdesk-tauri` state init)
+///
+/// ```ignore
+/// let session = Arc::new(tokio::sync::Mutex::new(cdp_session));
+/// let execute_fn = Arc::new(move |name: String, args: serde_json::Value| {
+///     let session = session.clone();
+///     Box::pin(async move {
+///         let s = session.lock().await;
+///         clawdesk_browser::execute_tool_call(&s, &name, &args).await
+///     }) as Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+/// });
+/// register_browser_tools(&mut registry, execute_fn);
+/// ```
+pub fn register_browser_tools(
+    registry: &mut crate::tools::ToolRegistry,
+    execute_fn: Arc<
+        dyn Fn(
+                String,
+                serde_json::Value,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync,
+    >,
+) {
+    use std::sync::Arc;
+
+    for (name, desc, params) in browser_tool_definitions() {
+        registry.register(Arc::new(BrowserActionTool::new(
+            name,
+            desc,
+            params,
+            execute_fn.clone(),
+        )));
+    }
+}
+
+// ─── Op2: Cron Management Tools ─────────────────────────────────────────────
+
+/// Schedule a recurring task via the cron manager.
+///
+/// Callback: `(name, schedule, prompt, agent_id, timeout_secs, task_id) → Result<task_id, error>`.
+pub struct CronScheduleTool {
+    schedule_fn: Arc<
+        dyn Fn(
+                String, String, String, Option<String>, u64, Option<String>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send + Sync,
+    >,
+}
+
+impl CronScheduleTool {
+    pub fn new(
+        schedule_fn: Arc<
+            dyn Fn(
+                    String, String, String, Option<String>, u64, Option<String>,
+                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send + Sync,
+        >,
+    ) -> Self {
+        Self { schedule_fn }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for CronScheduleTool {
+    fn name(&self) -> &str { "cron_schedule" }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: "cron_schedule".to_string(),
+            description: "Schedule a recurring task. Creates or updates a cron job that \
+                         runs an agent prompt on a schedule."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Human-readable task name" },
+                    "schedule": { "type": "string", "description": "Cron expression (5-field: '*/5 * * * *' = every 5 min)" },
+                    "prompt": { "type": "string", "description": "The prompt to execute on each scheduled run" },
+                    "agent_id": { "type": "string", "description": "Target agent ID (optional, defaults to current agent)" },
+                    "timeout_secs": { "type": "integer", "description": "Max execution time in seconds", "default": 300 },
+                    "task_id": { "type": "string", "description": "Existing task ID to update (omit to create new)" }
+                },
+                "required": ["name", "schedule", "prompt"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::Scheduling]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let name = args.get("name").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: name")?.to_string();
+        let schedule = args.get("schedule").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: schedule")?.to_string();
+        let prompt = args.get("prompt").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: prompt")?.to_string();
+        let agent_id = args.get("agent_id").and_then(|v| v.as_str()).map(String::from);
+        let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(300);
+        let task_id = args.get("task_id").and_then(|v| v.as_str()).map(String::from);
+
+        (self.schedule_fn)(name, schedule, prompt, agent_id, timeout_secs, task_id).await
+    }
+}
+
+/// List all scheduled cron tasks.
+pub struct CronListTool {
+    list_fn: Arc<
+        dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send + Sync,
+    >,
+}
+
+impl CronListTool {
+    pub fn new(
+        list_fn: Arc<
+            dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send + Sync,
+        >,
+    ) -> Self {
+        Self { list_fn }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for CronListTool {
+    fn name(&self) -> &str { "cron_list" }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: "cron_list".to_string(),
+            description: "List all scheduled cron tasks with their status and schedule.".to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::Scheduling]
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> Result<String, String> {
+        (self.list_fn)().await
+    }
+}
+
+/// Remove a scheduled cron task by ID.
+pub struct CronRemoveTool {
+    remove_fn: Arc<
+        dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send + Sync,
+    >,
+}
+
+impl CronRemoveTool {
+    pub fn new(
+        remove_fn: Arc<
+            dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send + Sync,
+        >,
+    ) -> Self {
+        Self { remove_fn }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for CronRemoveTool {
+    fn name(&self) -> &str { "cron_remove" }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: "cron_remove".to_string(),
+            description: "Remove/cancel a scheduled cron task by ID.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "ID of the cron task to remove" }
+                },
+                "required": ["task_id"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::Scheduling]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let task_id = args.get("task_id").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: task_id")?.to_string();
+        (self.remove_fn)(task_id).await
+    }
+}
+
+/// Manually trigger a cron task immediately.
+pub struct CronTriggerTool {
+    trigger_fn: Arc<
+        dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send + Sync,
+    >,
+}
+
+impl CronTriggerTool {
+    pub fn new(
+        trigger_fn: Arc<
+            dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                + Send + Sync,
+        >,
+    ) -> Self {
+        Self { trigger_fn }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for CronTriggerTool {
+    fn name(&self) -> &str { "cron_trigger" }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: "cron_trigger".to_string(),
+            description: "Manually trigger a scheduled cron task immediately, ignoring its \
+                         schedule. Returns the execution result."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "ID of the cron task to trigger" }
+                },
+                "required": ["task_id"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::Scheduling]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let task_id = args.get("task_id").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: task_id")?.to_string();
+        (self.trigger_fn)(task_id).await
+    }
+}
+
+/// Register all 4 cron management tools into the tool registry.
+///
+/// Each callback captures `Arc<CronManager>` and delegates to its methods.
+/// Call this during state initialization after constructing the CronManager.
+pub fn register_cron_tools(
+    registry: &mut crate::tools::ToolRegistry,
+    schedule_fn: Arc<
+        dyn Fn(
+                String, String, String, Option<String>, u64, Option<String>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send + Sync,
+    >,
+    list_fn: Arc<
+        dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send + Sync,
+    >,
+    remove_fn: Arc<
+        dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send + Sync,
+    >,
+    trigger_fn: Arc<
+        dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send + Sync,
+    >,
+) {
+    use std::sync::Arc;
+    registry.register(Arc::new(CronScheduleTool::new(schedule_fn)));
+    registry.register(Arc::new(CronListTool::new(list_fn)));
+    registry.register(Arc::new(CronRemoveTool::new(remove_fn)));
+    registry.register(Arc::new(CronTriggerTool::new(trigger_fn)));
+}
+
+// ─── T10: Persistent Process Manager Tools ──────────────────────────────────
+
+/// Start a persistent background process that can be polled and interacted with.
+pub struct ProcessStartTool {
+    manager: Arc<crate::process_manager::ProcessManager>,
+}
+
+impl ProcessStartTool {
+    pub fn new(manager: Arc<crate::process_manager::ProcessManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for ProcessStartTool {
+    fn name(&self) -> &str {
+        "process_start"
+    }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: "process_start".to_string(),
+            description: "Start a persistent background process. Returns a process ID for \
+                         polling output and sending input. Use for servers, watch commands, \
+                         and interactive tools."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "process_id": {
+                        "type": "string",
+                        "description": "Unique identifier for this process (e.g., 'dev-server', 'test-runner')."
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to run in the background."
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Working directory for the process."
+                    }
+                },
+                "required": ["process_id", "command"]
+            }),
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ShellExec]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let process_id = args.get("process_id").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: process_id")?.to_string();
+        let command = args.get("command").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: command")?;
+        let working_dir = args.get("working_dir").and_then(|v| v.as_str());
+
+        // Exec policy check on the command
+        {
+            use crate::exec_policy::{ExecPolicy, ExecPolicyConfig, ExecVerdict};
+            let policy = ExecPolicy::new(ExecPolicyConfig::default());
+            if let ExecVerdict::Deny { reason } = policy.check(command) {
+                return Err(format!("command blocked by exec policy: {}", reason));
+            }
+        }
+
+        self.manager
+            .start(process_id.clone(), command, working_dir, None)
+            .await?;
+
+        Ok(format!("Process '{}' started. Use process_poll to read output, process_write to send input.", process_id))
+    }
+}
+
+/// Poll a running process for new stdout/stderr output since last poll.
+pub struct ProcessPollTool {
+    manager: Arc<crate::process_manager::ProcessManager>,
+}
+
+impl ProcessPollTool {
+    pub fn new(manager: Arc<crate::process_manager::ProcessManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for ProcessPollTool {
+    fn name(&self) -> &str {
+        "process_poll"
+    }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: "process_poll".to_string(),
+            description: "Read new output from a running process since the last poll. \
+                         Returns stdout, stderr, and process status."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "process_id": {
+                        "type": "string",
+                        "description": "ID of the process to poll."
+                    }
+                },
+                "required": ["process_id"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let process_id = args.get("process_id").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: process_id")?;
+
+        let result = self.manager.poll(process_id).await?;
+        Ok(serde_json::json!({
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "running": result.running,
+            "exit_code": result.exit_code,
+            "elapsed_secs": result.elapsed_secs,
+        }).to_string())
+    }
+}
+
+/// Write data to a running process's stdin.
+pub struct ProcessWriteTool {
+    manager: Arc<crate::process_manager::ProcessManager>,
+}
+
+impl ProcessWriteTool {
+    pub fn new(manager: Arc<crate::process_manager::ProcessManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for ProcessWriteTool {
+    fn name(&self) -> &str {
+        "process_write"
+    }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: "process_write".to_string(),
+            description: "Write data to a running process's stdin. Use for interactive \
+                         programs that need input (e.g., answering prompts, sending commands)."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "process_id": {
+                        "type": "string",
+                        "description": "ID of the process to write to."
+                    },
+                    "data": {
+                        "type": "string",
+                        "description": "Data to write to stdin (a newline is NOT added automatically)."
+                    }
+                },
+                "required": ["process_id", "data"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let process_id = args.get("process_id").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: process_id")?;
+        let data = args.get("data").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: data")?;
+
+        self.manager.write(process_id, data).await?;
+        Ok(format!("Wrote {} bytes to process '{}'.", data.len(), process_id))
+    }
+}
+
+/// Kill a running managed process.
+pub struct ProcessKillTool {
+    manager: Arc<crate::process_manager::ProcessManager>,
+}
+
+impl ProcessKillTool {
+    pub fn new(manager: Arc<crate::process_manager::ProcessManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for ProcessKillTool {
+    fn name(&self) -> &str {
+        "process_kill"
+    }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: "process_kill".to_string(),
+            description: "Kill a running managed process and remove it from the registry."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "process_id": {
+                        "type": "string",
+                        "description": "ID of the process to kill."
+                    }
+                },
+                "required": ["process_id"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let process_id = args.get("process_id").and_then(|v| v.as_str())
+            .ok_or("Missing required parameter: process_id")?;
+
+        self.manager.kill(process_id).await?;
+        Ok(format!("Process '{}' killed.", process_id))
+    }
+}
+
+/// List all active managed processes.
+pub struct ProcessListTool {
+    manager: Arc<crate::process_manager::ProcessManager>,
+}
+
+impl ProcessListTool {
+    pub fn new(manager: Arc<crate::process_manager::ProcessManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for ProcessListTool {
+    fn name(&self) -> &str {
+        "process_list"
+    }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: "process_list".to_string(),
+            description: "List all active managed processes with their status, command, \
+                         and resource usage."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        }
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> Result<String, String> {
+        let statuses = self.manager.list().await;
+        if statuses.is_empty() {
+            return Ok("No active managed processes.".to_string());
+        }
+        Ok(serde_json::to_string_pretty(&statuses)
+            .unwrap_or_else(|_| "Failed to serialize process list".to_string()))
+    }
+}
+
+// ─── T7: MCP Namespace Bridge Tool ──────────────────────────────────────────
+
+/// Discovered MCP tool metadata — passed to `register_mcp_bridge_tools()`.
+#[derive(Debug, Clone)]
+pub struct McpDiscoveredTool {
+    /// MCP server name (e.g., "github").
+    pub server_name: String,
+    /// Original tool name on the MCP server (e.g., "create_issue").
+    pub original_name: String,
+    /// Tool description from MCP server.
+    pub description: String,
+    /// Tool input schema from MCP server.
+    pub input_schema: serde_json::Value,
+}
+
+/// A transparent MCP bridge tool that registers in the ToolRegistry under a
+/// namespaced name (e.g., `mcp_github_create_issue`). When the LLM calls it,
+/// execute() routes through the MCP client callback.
+pub struct McpBridgeToolInstance {
+    namespaced_name: String,
+    original_name: String,
+    server_name: String,
+    description: String,
+    input_schema: serde_json::Value,
+    call_fn: Arc<
+        dyn Fn(String, String, serde_json::Value)
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send + Sync,
+    >,
+}
+
+#[async_trait::async_trait]
+impl crate::tools::Tool for McpBridgeToolInstance {
+    fn name(&self) -> &str {
+        &self.namespaced_name
+    }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: self.namespaced_name.clone(),
+            description: format!(
+                "[MCP: {}/{}] {}",
+                self.server_name, self.original_name, self.description
+            ),
+            parameters: self.input_schema.clone(),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        (self.call_fn)(
+            self.server_name.clone(),
+            self.original_name.clone(),
+            args,
+        )
+        .await
+    }
+}
+
+/// Register MCP bridge tools into the ToolRegistry.
+///
+/// Each discovered MCP tool gets a namespaced name (`mcp_{server}_{tool}`)
+/// and is registered as a transparent bridge that routes through the MCP client.
+/// The `call_fn` callback receives `(server_name, tool_name, arguments)` and
+/// dispatches via the MCP protocol.
+///
+/// Call this during agent initialization after MCP server discovery completes.
+pub fn register_mcp_bridge_tools(
+    registry: &mut crate::tools::ToolRegistry,
+    tools: Vec<McpDiscoveredTool>,
+    call_fn: Arc<
+        dyn Fn(String, String, serde_json::Value)
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+            + Send + Sync,
+    >,
+) {
+    use std::sync::Arc;
+    for tool in tools {
+        let namespaced = format!(
+            "mcp_{}_{}",
+            tool.server_name.replace('-', "_").replace(' ', "_").to_lowercase(),
+            tool.original_name.replace('-', "_").to_lowercase(),
+        );
+        info!(
+            namespaced = %namespaced,
+            server = %tool.server_name,
+            tool = %tool.original_name,
+            "registering MCP bridge tool"
+        );
+        registry.register(Arc::new(McpBridgeToolInstance {
+            namespaced_name: namespaced,
+            original_name: tool.original_name,
+            server_name: tool.server_name,
+            description: tool.description,
+            input_schema: tool.input_schema,
+            call_fn: Arc::clone(&call_fn),
+        }));
+    }
 }

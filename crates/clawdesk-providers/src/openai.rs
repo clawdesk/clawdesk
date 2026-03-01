@@ -139,10 +139,7 @@ impl Provider for OpenAiProvider {
         };
 
         // Build JSON body and add tools if present
-        let mut body = serde_json::to_value(&api_request).map_err(|e| ProviderError::FormatError {
-            provider: "openai".into(),
-            detail: e.to_string(),
-        })?;
+        let mut body = serde_json::to_value(&api_request).map_err(|e| ProviderError::format_error("openai", e.to_string()))?;
         if !request.tools.is_empty() {
             let tools: Vec<serde_json::Value> = request.tools.iter().map(|t| {
                 serde_json::json!({
@@ -166,16 +163,9 @@ impl Provider for OpenAiProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "openai".into(),
-                        model: model.clone(),
-                        after: start.elapsed(),
-                    }
+                    ProviderError::timeout("openai", model.clone(), start.elapsed())
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "openai".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("openai", e.to_string())
                 }
             })?;
 
@@ -185,35 +175,20 @@ impl Provider for OpenAiProvider {
         if !status.is_success() {
             let status_code = status.as_u16();
             return match status_code {
-                429 => Err(ProviderError::RateLimit {
-                    provider: "openai".into(),
-                    retry_after: None,
-                }),
-                401 | 403 => Err(ProviderError::AuthFailure {
-                    provider: "openai".into(),
-                    profile_id: "default".into(),
-                }),
-                _ => Err(ProviderError::ServerError {
-                    provider: "openai".into(),
-                    status: status_code,
-                }),
+                429 => Err(ProviderError::rate_limit("openai", None)),
+                401 | 403 => Err(ProviderError::auth_failure("openai", "default")),
+                _ => Err(ProviderError::server_error("openai", status_code)),
             };
         }
 
         let api_response: OpenAiResponse =
-            response.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "openai".into(),
-                detail: e.to_string(),
-            })?;
+            response.json().await.map_err(|e| ProviderError::format_error("openai", e.to_string()))?;
 
         let choice = api_response
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| ProviderError::FormatError {
-                provider: "openai".into(),
-                detail: "no choices in response".into(),
-            })?;
+            .ok_or_else(|| ProviderError::format_error("openai", "no choices in response"))?;
 
         let tool_calls = choice
             .message
@@ -328,22 +303,13 @@ impl Provider for OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "openai".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("openai", e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
             return match status {
-                429 => Err(ProviderError::RateLimit {
-                    provider: "openai".into(),
-                    retry_after: None,
-                }),
-                _ => Err(ProviderError::ServerError {
-                    provider: "openai".into(),
-                    status,
-                }),
+                429 => Err(ProviderError::rate_limit("openai", None)),
+                _ => Err(ProviderError::server_error("openai", status)),
             };
         }
 
@@ -359,10 +325,7 @@ impl Provider for OpenAiProvider {
         let mut tool_call_accum: Vec<(String, String, String)> = Vec::new(); // (id, name, args_json)
 
         while let Some(chunk) = response.chunk().await.map_err(|e| {
-            ProviderError::NetworkError {
-                provider: "openai".into(),
-                detail: e.to_string(),
-            }
+            ProviderError::network_error("openai", e.to_string())
         })? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 

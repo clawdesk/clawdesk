@@ -27,6 +27,7 @@
 //! File I/O is done via `tokio::fs` to avoid blocking the async runtime.
 
 use chrono::{DateTime, Utc};
+use clawdesk_types::DropOldest;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::sync::RwLock;
@@ -84,13 +85,14 @@ impl Default for FileMemoryConfig {
 /// Suitable for development, testing, and environments without a vector DB.
 pub struct FileMemoryStore {
     config: FileMemoryConfig,
-    entries: RwLock<Vec<FileMemoryEntry>>,
+    entries: RwLock<DropOldest<FileMemoryEntry>>,
 }
 
 impl FileMemoryStore {
     /// Create or load a file-backed memory store.
     pub async fn open(config: FileMemoryConfig) -> Result<Self, String> {
-        let entries = if config.path.exists() {
+        let mut ring = DropOldest::new(config.max_entries.max(1));
+        if config.path.exists() {
             let data = tokio::fs::read_to_string(&config.path)
                 .await
                 .map_err(|e| format!("read {}: {}", config.path.display(), e))?;
@@ -108,18 +110,17 @@ impl FileMemoryStore {
                 entries = parsed.len(),
                 "Loaded file-backed memory store"
             );
-            parsed
+            ring.extend(parsed);
         } else {
             info!(
                 path = %config.path.display(),
                 "Creating new file-backed memory store"
             );
-            Vec::new()
-        };
+        }
 
         Ok(Self {
             config,
-            entries: RwLock::new(entries),
+            entries: RwLock::new(ring),
         })
     }
 
@@ -143,16 +144,12 @@ impl FileMemoryStore {
 
         let mut entries = self.entries.write().await;
 
-        // FIFO eviction if at capacity
-        if entries.len() >= self.config.max_entries {
-            entries.remove(0);
-        }
-
+        // DropOldest handles FIFO eviction automatically
         entries.push(entry);
         debug!(id = %id, total = entries.len(), "file memory stored");
 
         // Persist to disk
-        self.persist_locked(&entries).await?;
+        self.persist_locked(&entries.to_vec()).await?;
 
         Ok(id)
     }
@@ -251,7 +248,7 @@ impl FileMemoryStore {
         entries.retain(|e| e.id != id);
         let removed = entries.len() < before;
         if removed {
-            self.persist_locked(&entries).await?;
+            self.persist_locked(&entries.to_vec()).await?;
         }
         Ok(removed)
     }

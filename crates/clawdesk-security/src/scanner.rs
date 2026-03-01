@@ -44,6 +44,10 @@ pub struct CascadeScannerConfig {
     pub patterns: Vec<ScanPattern>,
     /// Fixed-string patterns for the AC automaton (Tier 0.5).
     pub ac_patterns: Vec<AcPattern>,
+    /// Maximum allowed regex pattern length (defense-in-depth).
+    /// Patterns exceeding this length are logged and skipped.
+    /// Default: 512 characters.
+    pub max_pattern_length: usize,
 }
 
 impl Default for CascadeScannerConfig {
@@ -52,6 +56,7 @@ impl Default for CascadeScannerConfig {
             max_content_length: 100_000,
             patterns: Self::default_patterns(),
             ac_patterns: Self::default_ac_patterns(),
+            max_pattern_length: 512,
         }
     }
 }
@@ -165,7 +170,28 @@ pub struct CascadeScanner {
 }
 
 impl CascadeScanner {
-    pub fn new(config: CascadeScannerConfig) -> Self {
+    pub fn new(mut config: CascadeScannerConfig) -> Self {
+        // Validate regex patterns: reject those exceeding max_pattern_length.
+        // This is defense-in-depth — the Rust `regex` crate already guarantees
+        // linear-time matching for all patterns it accepts, but a length limit
+        // prevents excessive NFA state explosion and future-proofs against
+        // alternative regex backends (e.g. fancy-regex) that lack this guarantee.
+        let max_len = config.max_pattern_length;
+        config.patterns.retain(|p| {
+            let src = p.pattern.as_str();
+            if src.len() > max_len {
+                tracing::warn!(
+                    pattern_name = %p.name,
+                    pattern_len = src.len(),
+                    max_len = max_len,
+                    "Skipping regex pattern: exceeds max_pattern_length"
+                );
+                false
+            } else {
+                true
+            }
+        });
+
         // Build AC automaton from all fixed-string needles (lowercased for case-insensitive).
         let needles: Vec<String> = config
             .ac_patterns
@@ -397,5 +423,30 @@ mod tests {
         assert!(rules.contains(&"ast_eval"));
         assert!(rules.contains(&"ast_exec"));
         assert!(rules.contains(&"ast_javascript_uri"));
+    }
+
+    #[test]
+    fn test_oversized_pattern_is_skipped() {
+        // Create a config with a very low max_pattern_length
+        let mut config = CascadeScannerConfig::default();
+        config.max_pattern_length = 10;
+        // Count patterns that survive validation
+        let original_count = config.patterns.len();
+        let scanner = CascadeScanner::new(config);
+        // Some default patterns are longer than 10 chars and should be skipped
+        assert!(scanner.config.patterns.len() < original_count);
+    }
+
+    #[test]
+    fn test_default_patterns_pass_validation() {
+        // All default patterns must be under the default 512-char limit
+        let config = CascadeScannerConfig::default();
+        for p in &config.patterns {
+            assert!(
+                p.pattern.as_str().len() <= 512,
+                "Pattern '{}' exceeds default max_pattern_length",
+                p.name
+            );
+        }
     }
 }

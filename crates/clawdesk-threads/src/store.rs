@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use sochdb::EmbeddedConnection;
 use tracing::{debug, error, info, warn};
 
@@ -45,13 +45,17 @@ impl Default for ThreadStoreConfig {
 /// All reads and writes are ACID-transactional via SochDB's WAL + MVCC.
 pub struct ThreadStore {
     db: Arc<EmbeddedConnection>,
-    /// Serializes all access to the EmbeddedConnection.
+    /// Serializes write access to the EmbeddedConnection.
     ///
     /// EmbeddedConnection uses a shared `active_txn_id` AtomicU64 for
-    /// transaction management. Without external serialization, concurrent
-    /// reads and writes race on `ensure_txn()`, potentially causing
-    /// `commit()` to commit the wrong transaction → data loss.
-    lock: Mutex<()>,
+    /// transaction management. Concurrent *writes* race on `ensure_txn()`,
+    /// potentially causing `commit()` to commit the wrong transaction.
+    /// Reads use MVCC snapshot isolation and are safe to run concurrently.
+    ///
+    /// RwLock allows many concurrent readers (get/scan) while serializing
+    /// writers (put/delete/commit). This eliminates the global chokepoint
+    /// where read-heavy workloads (multi-channel chat) were bottlenecked.
+    lock: RwLock<()>,
 }
 
 impl ThreadStore {
@@ -144,7 +148,7 @@ impl ThreadStore {
                     info!(?path, "Thread store opened — ACID storage active");
                     return Ok(Self {
                         db: Arc::new(db),
-                        lock: Mutex::new(()),
+                        lock: RwLock::new(()),
                     });
                 }
                 Err(e) => {
@@ -174,7 +178,7 @@ impl ThreadStore {
     /// Wrap an existing `Arc<EmbeddedConnection>` (for sharing with other subsystems
     /// that already have a SochDB handle, e.g. `SochStore`).
     pub fn from_shared(db: Arc<EmbeddedConnection>) -> Self {
-        Self { db, lock: Mutex::new(()) }
+        Self { db, lock: RwLock::new(()) }
     }
 
     /// Get a reference to the underlying EmbeddedConnection.
@@ -613,7 +617,7 @@ impl ThreadStore {
     /// Should be called periodically (e.g. every 60 seconds or on app exit)
     /// to keep WAL bounded and ensure durability.
     pub fn checkpoint_and_gc(&self) -> Result<u64> {
-        let _guard = self.lock.lock();
+        let _guard = self.lock.write();
         let seq = self.db.checkpoint().map_err(|e| ThreadStoreError::Io {
             detail: format!("checkpoint failed: {e}"),
         })?;
@@ -624,7 +628,7 @@ impl ThreadStore {
 
     /// Force fsync to make all buffered writes durable.
     pub fn sync(&self) -> Result<()> {
-        let _guard = self.lock.lock();
+        let _guard = self.lock.write();
         self.db.fsync().map_err(|e| ThreadStoreError::Io {
             detail: format!("fsync failed: {e}"),
         })
@@ -647,7 +651,7 @@ impl ThreadStore {
     /// TxnWalBuffer but NEVER flush to the WAL file. On restart,
     /// `replay_for_recovery()` finds no committed writes → data loss.
     fn put(&self, key: &str, value: &[u8]) -> Result<()> {
-        let _guard = self.lock.lock();
+        let _guard = self.lock.write();
         self.db
             .put(key, value)
             .map_err(|e| ThreadStoreError::Io {
@@ -663,7 +667,7 @@ impl ThreadStore {
 
     /// Get a value by key (serialized to prevent ensure_txn race).
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let _guard = self.lock.lock();
+        let _guard = self.lock.read();
         self.db
             .get(key)
             .map_err(|e| ThreadStoreError::Io {
@@ -673,7 +677,7 @@ impl ThreadStore {
 
     /// Delete a key with immediate commit for WAL durability.
     fn delete(&self, key: &str) -> Result<()> {
-        let _guard = self.lock.lock();
+        let _guard = self.lock.write();
         self.db
             .delete(key)
             .map_err(|e| ThreadStoreError::Io {
@@ -689,7 +693,7 @@ impl ThreadStore {
 
     /// Prefix scan returning (key_string, value_bytes) pairs.
     fn scan(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
-        let _guard = self.lock.lock();
+        let _guard = self.lock.read();
         self.db
             .scan(prefix)
             .map_err(|e| ThreadStoreError::Io {
@@ -699,7 +703,7 @@ impl ThreadStore {
 
     /// Prefix scan returning only keys.
     fn scan_keys(&self, prefix: &str) -> Result<Vec<String>> {
-        let _guard = self.lock.lock();
+        let _guard = self.lock.read();
         let entries = self
             .db
             .scan(prefix)
@@ -778,7 +782,7 @@ impl std::fmt::Debug for ThreadStore {
 impl Drop for ThreadStore {
     fn drop(&mut self) {
         info!("Shutting down ThreadStore — flushing WAL and checkpointing");
-        let _guard = self.lock.lock();
+        let _guard = self.lock.write();
         if let Err(e) = self.db.checkpoint() {
             warn!(error = %e, "Failed to checkpoint ThreadStore WAL on shutdown");
         }

@@ -62,7 +62,7 @@ pub fn route_message(
     }
 }
 
-// ── GAP-4: Channel binding resolver ──────────────────────────
+// ── Channel binding resolver ──────────────────────────
 
 /// A channel binding entry describing which agent handles messages
 /// for a specific channel/account/group/thread combination.
@@ -171,6 +171,7 @@ mod tests {
                 channel,
             },
             media: vec![],
+            artifact_refs: vec![],
             reply_context: None,
             origin: MessageOrigin::Internal {
                 source: "test".to_string(),

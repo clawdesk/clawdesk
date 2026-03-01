@@ -29,8 +29,11 @@
 //! - `loader` — Filesystem skill loader (scans `~/.clawdesk/skills/`)
 //! - `selector` — Token-budgeted skill selection (greedy knapsack)
 
+pub mod archetype;
+pub mod browser_skill;
 pub mod bundled;
 pub mod bundled_design;
+pub mod bundled_packs;
 pub mod agent_filter;
 pub mod commands;
 pub mod corpus_ingest;
@@ -50,6 +53,8 @@ pub mod life_os;
 pub mod loader;
 pub mod openclaw_adapter;
 pub mod orchestrator;
+pub mod pack;
+pub mod pack_distribution;
 pub mod promotion;
 pub mod registry;
 pub mod resolver;
@@ -57,6 +62,7 @@ pub mod scaffold;
 pub mod selector;
 pub mod skill_provider;
 pub mod snapshot;
+pub mod quality_loop;
 pub mod store;
 pub mod store_cache;
 pub mod store_federation;
@@ -83,3 +89,9 @@ pub use federated_registry::{FederatedRegistry, ContentAddress, FederationSource
 pub use store_federation::{StoreFederationBridge, BridgeEvent};
 pub use store_sync::{SyncConfig, SyncState, SyncResult, SyncError, compute_merkle_root};
 pub use store_cache::{StoreCache, CacheError};
+pub use archetype::{Archetype, ArchetypeRegistry, ResolvedArchetype};
+pub use browser_skill::BrowserSkillProvider;
+pub use bundled_packs::load_bundled_packs;
+pub use pack::{PackId, PackRegistry, PackTier, SkillPack};
+pub use pack_distribution::{PackContentAddress, PackResolver, PackSourceTier};
+pub use quality_loop::{QualityTracker, QualitySignal, WeightOptimizer, QualityGate};

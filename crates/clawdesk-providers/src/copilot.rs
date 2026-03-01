@@ -254,10 +254,7 @@ impl CopilotProvider {
 
         // Need a GitHub token to exchange
         let github_token = self.github_token.as_deref().ok_or_else(|| {
-            ProviderError::AuthFailure {
-                provider: "copilot".into(),
-                profile_id: "Run device code flow to authenticate with GitHub".into(),
-            }
+            ProviderError::auth_failure("copilot", "Run device code flow to authenticate with GitHub")
         })?;
 
         // Exchange GitHub token for Copilot API key
@@ -271,25 +268,16 @@ impl CopilotProvider {
             .header("Editor-Plugin-Version", "copilot/1.155.0")
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "copilot".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("copilot", e.to_string()))?;
 
         let status = resp.status().as_u16();
         if status != 200 {
             let body = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::AuthFailure {
-                provider: "copilot".into(),
-                profile_id: format!("token exchange failed: HTTP {status}: {body}"),
-            });
+            return Err(ProviderError::auth_failure("copilot", format!("token exchange failed: HTTP {status}: {body}")));
         }
 
         let token_resp: CopilotTokenResponse =
-            resp.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "copilot".into(),
-                detail: format!("token parse error: {e}"),
-            })?;
+            resp.json().await.map_err(|e| ProviderError::format_error("copilot", format!("token parse error: {e}")))?;
 
         let key = CachedApiKey {
             token: token_resp.token.clone(),
@@ -336,16 +324,10 @@ impl CopilotProvider {
             ])
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "copilot".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("copilot", e.to_string()))?;
 
         let device: DeviceCodeResponse = resp.json().await.map_err(|e| {
-            ProviderError::FormatError {
-                provider: "copilot".into(),
-                detail: format!("device code parse error: {e}"),
-            }
+            ProviderError::format_error("copilot", format!("device code parse error: {e}"))
         })?;
 
         info!(
@@ -370,16 +352,10 @@ impl CopilotProvider {
                 ])
                 .send()
                 .await
-                .map_err(|e| ProviderError::NetworkError {
-                    provider: "copilot".into(),
-                    detail: e.to_string(),
-                })?;
+                .map_err(|e| ProviderError::network_error("copilot", e.to_string()))?;
 
             let token_resp: TokenResponse = resp.json().await.map_err(|e| {
-                ProviderError::FormatError {
-                    provider: "copilot".into(),
-                    detail: format!("token poll parse error: {e}"),
-                }
+                ProviderError::format_error("copilot", format!("token poll parse error: {e}"))
             })?;
 
             if let Some(token) = token_resp.access_token {
@@ -397,16 +373,10 @@ impl CopilotProvider {
                     continue;
                 }
                 Some("expired_token") => {
-                    return Err(ProviderError::AuthFailure {
-                        provider: "copilot".into(),
-                        profile_id: "device code expired — please restart".into(),
-                    });
+                    return Err(ProviderError::auth_failure("copilot", "device code expired — please restart"));
                 }
                 Some(other) => {
-                    return Err(ProviderError::AuthFailure {
-                        provider: "copilot".into(),
-                        profile_id: format!("auth error: {other}"),
-                    });
+                    return Err(ProviderError::auth_failure("copilot", format!("auth error: {other}")));
                 }
                 None => continue,
             }
@@ -578,16 +548,9 @@ impl Provider for CopilotProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "copilot".into(),
-                        model: model.to_string(),
-                        after: std::time::Duration::from_secs(120),
-                    }
+                    ProviderError::timeout("copilot", model.to_string(), std::time::Duration::from_secs(120))
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "copilot".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("copilot", e.to_string())
                 }
             })?;
 
@@ -595,43 +558,25 @@ impl Provider for CopilotProvider {
         if status != 200 {
             let body_text = resp.text().await.unwrap_or_default();
             return Err(match status {
-                429 => ProviderError::RateLimit {
-                    provider: "copilot".into(),
-                    retry_after: None,
-                },
+                429 => ProviderError::rate_limit("copilot", None),
                 401 | 403 => {
                     // Invalidate cached token
                     *self.cached_key.lock().await = None;
-                    ProviderError::AuthFailure {
-                        provider: "copilot".into(),
-                        profile_id: String::new(),
-                    }
+                    ProviderError::auth_failure("copilot", String::new())
                 }
-                s if s >= 500 => ProviderError::ServerError {
-                    provider: "copilot".into(),
-                    status: s,
-                },
-                _ => ProviderError::FormatError {
-                    provider: "copilot".into(),
-                    detail: format!("HTTP {status}: {body_text}"),
-                },
+                s if s >= 500 => ProviderError::server_error("copilot", s),
+                _ => ProviderError::format_error("copilot", format!("HTTP {status}: {body_text}")),
             });
         }
 
         let resp_body: CompletionResponse =
-            resp.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "copilot".into(),
-                detail: format!("JSON parse error: {e}"),
-            })?;
+            resp.json().await.map_err(|e| ProviderError::format_error("copilot", format!("JSON parse error: {e}")))?;
 
         let choice = resp_body
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| ProviderError::FormatError {
-                provider: "copilot".into(),
-                detail: "no choices".into(),
-            })?;
+            .ok_or_else(|| ProviderError::format_error("copilot", "no choices"))?;
 
         let content = choice.message.content.unwrap_or_default();
         let finish_reason = Self::parse_finish_reason(choice.finish_reason.as_deref());

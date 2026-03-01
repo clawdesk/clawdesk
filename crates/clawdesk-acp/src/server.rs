@@ -37,8 +37,30 @@ use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex as TokioMutex, RwLock};
-use tracing::info;
+use tracing::{info, warn};
+
+/// Optional callback for persisting task state changes.
+///
+/// Implementors write task snapshots to durable storage (e.g., SochDB)
+/// on each state transition so tasks survive crashes/restarts.
+pub trait TaskPersistence: Send + Sync + 'static {
+    /// Persist a task snapshot after a state change.
+    fn persist_task(&self, task: &Task) -> Result<(), String>;
+    /// Load all non-terminal tasks on startup.
+    fn load_active_tasks(&self) -> Result<Vec<Task>, String>;
+    /// Remove a completed/canceled/failed task from persistent storage.
+    fn remove_task(&self, task_id: &str) -> Result<(), String>;
+}
+
+/// No-op persistence (default — in-memory only).
+struct NullPersistence;
+impl TaskPersistence for NullPersistence {
+    fn persist_task(&self, _task: &Task) -> Result<(), String> { Ok(()) }
+    fn load_active_tasks(&self) -> Result<Vec<Task>, String> { Ok(vec![]) }
+    fn remove_task(&self, _task_id: &str) -> Result<(), String> { Ok(()) }
+}
 
 /// Shared A2A state, passed to handlers.
 pub struct A2AState {
@@ -58,6 +80,8 @@ pub struct A2AState {
     pub policy: TokioMutex<PolicyEngine>,
     /// Agent source registry: agent_id → AgentSource.
     pub agent_sources: RwLock<FxHashMap<String, AgentSource>>,
+    /// Task persistence backend (#7) — persists tasks to durable storage.
+    persistence: Arc<dyn TaskPersistence>,
     /// Serializes directory writes (readers remain lock-free).
     directory_mu: tokio::sync::Mutex<()>,
 }
@@ -71,6 +95,7 @@ impl A2AState {
             tasks: DashMap::new(),
             policy: TokioMutex::new(PolicyEngine::permissive()),
             agent_sources: RwLock::new(FxHashMap::default()),
+            persistence: Arc::new(NullPersistence),
             directory_mu: tokio::sync::Mutex::new(()),
         }
     }
@@ -84,8 +109,30 @@ impl A2AState {
             tasks: DashMap::new(),
             policy: TokioMutex::new(PolicyEngine::new(policy)),
             agent_sources: RwLock::new(FxHashMap::default()),
+            persistence: Arc::new(NullPersistence),
             directory_mu: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Set a custom task persistence backend.
+    pub fn with_persistence(mut self, persistence: Arc<dyn TaskPersistence>) -> Self {
+        self.persistence = persistence;
+        self
+    }
+
+    /// Load persisted tasks from durable storage into the in-memory DashMap.
+    ///
+    /// Call this during startup to recover tasks that survived a restart.
+    pub fn load_persisted_tasks(&self) -> Result<usize, String> {
+        let tasks = self.persistence.load_active_tasks()?;
+        let count = tasks.len();
+        for task in tasks {
+            self.tasks.insert(task.id.as_str().to_string(), task);
+        }
+        if count > 0 {
+            info!(count, "loaded persisted tasks from durable storage");
+        }
+        Ok(count)
     }
 
     /// RCU write: clone the current directory, apply a mutation, swap in the
@@ -96,6 +143,96 @@ impl A2AState {
         let mut new_dir = (**self.directory.load()).clone();
         f(&mut new_dir);
         self.directory.store(Arc::new(new_dir));
+    }
+
+    // ── Task Timeout Sweep (#8) ──────────────────────────────────────
+
+    /// Sweep all non-terminal tasks and fire `TaskEvent::Timeout` on any
+    /// that have exceeded the given duration since their last update.
+    ///
+    /// Returns the number of timed-out tasks.
+    pub fn sweep_timed_out_tasks(&self, max_age: Duration) -> usize {
+        let cutoff = chrono::Utc::now()
+            - chrono::Duration::from_std(max_age)
+                .unwrap_or(chrono::Duration::seconds(300));
+        let mut timed_out = 0;
+
+        // Iterate all tasks and timeout any that are stale.
+        for mut entry in self.tasks.iter_mut() {
+            let task = entry.value_mut();
+            if !task.state.is_terminal() && task.updated_at < cutoff {
+                if let Ok(_) = task.apply_event(TaskEvent::Timeout) {
+                    timed_out += 1;
+                    warn!(
+                        task_id = %task.id,
+                        state = ?task.state,
+                        "task timed out (exceeded {:?} since last update)",
+                        max_age
+                    );
+                }
+            }
+        }
+        timed_out
+    }
+
+    /// Spawn a background task-timeout sweeper that runs at the given interval.
+    ///
+    /// This fires `TaskEvent::Timeout` on any non-terminal task that hasn't
+    /// been updated within `task_timeout`.
+    pub fn spawn_timeout_sweeper(
+        self: &Arc<Self>,
+        interval: Duration,
+        task_timeout: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(interval);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                timer.tick().await;
+                let timed_out = state.sweep_timed_out_tasks(task_timeout);
+                if timed_out > 0 {
+                    info!(count = timed_out, "task timeout sweep completed");
+                }
+            }
+        })
+    }
+
+    // ── Auth Verification (#11) ──────────────────────────────────────
+
+    /// Verify that a requesting agent is authorized.
+    ///
+    /// Checks the bearer token against the agent's registered auth scheme
+    /// in the directory. Returns `Ok(())` or `Err(reason)`.
+    pub fn verify_auth(&self, agent_id: &str, bearer_token: Option<&str>) -> Result<(), String> {
+        let dir = self.directory.load();
+        let entry = dir.get(agent_id)
+            .ok_or_else(|| format!("agent '{}' not found in directory", agent_id))?;
+
+        // Enforce the auth scheme declared on the agent card.
+        match &entry.card.auth {
+            crate::agent_card::AgentAuth::None => Ok(()),
+            crate::agent_card::AgentAuth::Bearer => {
+                bearer_token
+                    .ok_or_else(|| "missing Authorization header (bearer token required)".to_string())
+                    .map(|_| ()) // Accept any bearer token — validation against issuer is app-level.
+            }
+            crate::agent_card::AgentAuth::ApiKey { header_name } => {
+                // For API key auth, caller must provide a header — we just check presence.
+                bearer_token
+                    .ok_or_else(|| format!("missing API key (expected in header: {})", header_name))
+                    .map(|_| ())
+            }
+            crate::agent_card::AgentAuth::OAuth2 { .. } => {
+                bearer_token
+                    .ok_or_else(|| "missing OAuth2 bearer token".to_string())
+                    .map(|_| ())
+            }
+            crate::agent_card::AgentAuth::Mtls => {
+                // mTLS verification happens at the transport layer; allow here.
+                Ok(())
+            }
+        }
     }
 }
 
@@ -115,7 +252,7 @@ pub struct TaskSendRequest {
     /// Optionally specify which agent should handle this.
     pub target_agent: Option<String>,
     /// Required capabilities (for routing if no target specified).
-    pub required_capabilities: Option<Vec<crate::agent_card::AgentCapability>>,
+    pub required_capabilities: Option<Vec<crate::capability::CapabilityId>>,
 }
 
 /// Response for task operations.
@@ -147,7 +284,7 @@ pub struct AgentSummary {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub capabilities: Vec<crate::agent_card::AgentCapability>,
+    pub capabilities: Vec<crate::capability::CapabilityId>,
     pub skill_count: usize,
     pub is_healthy: bool,
     pub active_tasks: u32,
@@ -239,9 +376,12 @@ impl A2AHandler {
             .tasks
             .insert(task_id.as_str().to_string(), task);
 
-        // In a real implementation, we'd now dispatch the task to the executor
-        // via HTTP POST to executor_id's A2A endpoint. For now, the task
-        // is stored and can be polled.
+        // Persist to durable storage (#7).
+        if let Some(ref entry) = state.tasks.get(task_id.as_str()) {
+            if let Err(e) = state.persistence.persist_task(entry.value()) {
+                warn!(task = %task_id, error = %e, "failed to persist task (non-fatal)");
+            }
+        }
 
         // ── RPC dispatch (async, fire-and-forget) ─────────────────────────
         // If the executor is a remote agent (has a known endpoint in the
@@ -335,6 +475,11 @@ impl A2AHandler {
 
         task.apply_event(TaskEvent::Cancel { reason })?;
 
+        // Persist state change (#7).
+        if let Err(e) = state.persistence.persist_task(&task) {
+            warn!(task_id = %task_id, error = %e, "failed to persist canceled task");
+        }
+
         Ok(TaskResponse {
             task_id: task.id.as_str().to_string(),
             state: task.state,
@@ -356,6 +501,11 @@ impl A2AHandler {
             .ok_or_else(|| format!("task '{}' not found", task_id))?;
 
         task.apply_event(TaskEvent::ProvideInput { input })?;
+
+        // Persist state change (#7).
+        if let Err(e) = state.persistence.persist_task(&task) {
+            warn!(task_id = %task_id, error = %e, "failed to persist task input");
+        }
 
         Ok(TaskResponse {
             task_id: task.id.as_str().to_string(),

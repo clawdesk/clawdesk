@@ -25,7 +25,7 @@ use crate::embedding::{EmbeddingProvider, EmbeddingResult, BatchEmbeddingResult}
 use async_trait::async_trait;
 use clawdesk_types::error::MemoryError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -89,8 +89,20 @@ pub trait EmbeddingCacheStore: Send + Sync + 'static {
 pub struct PersistentCachedProvider {
     inner: Arc<dyn EmbeddingProvider>,
     store: Arc<dyn EmbeddingCacheStore>,
-    l1: Mutex<HashMap<String, EmbeddingResult>>,
+    /// L1 hot cache: HashMap for O(1) lookup + VecDeque for LRU order.
+    l1: Mutex<L1Cache>,
     config: PersistentCacheConfig,
+}
+
+/// LRU-ordered L1 cache.
+///
+/// `entries` holds the cached data. `lru_order` tracks access order
+/// (most-recently-used at back, least-recently-used at front).
+/// On access, the key is promoted to the back. On eviction,
+/// the front entry is removed.
+struct L1Cache {
+    entries: HashMap<String, EmbeddingResult>,
+    lru_order: VecDeque<String>,
 }
 
 impl PersistentCachedProvider {
@@ -103,7 +115,10 @@ impl PersistentCachedProvider {
         Self {
             inner,
             store,
-            l1: Mutex::new(HashMap::with_capacity(config.l1_max_entries.min(1024))),
+            l1: Mutex::new(L1Cache {
+                entries: HashMap::with_capacity(config.l1_max_entries.min(1024)),
+                lru_order: VecDeque::with_capacity(config.l1_max_entries.min(1024)),
+            }),
             config,
         }
     }
@@ -117,21 +132,41 @@ impl PersistentCachedProvider {
 
     /// Try to get an embedding from L1 cache.
     async fn l1_get(&self, key: &str) -> Option<EmbeddingResult> {
-        let l1 = self.l1.lock().await;
-        l1.get(key).cloned()
+        let mut l1 = self.l1.lock().await;
+        if let Some(result) = l1.entries.get(key).cloned() {
+            // Promote to MRU position (move to back of LRU order).
+            if let Some(pos) = l1.lru_order.iter().position(|k| k == key) {
+                l1.lru_order.remove(pos);
+            }
+            l1.lru_order.push_back(key.to_string());
+            Some(result)
+        } else {
+            None
+        }
     }
 
-    /// Insert into L1 cache with bounded eviction.
+    /// Insert into L1 cache with LRU eviction.
     async fn l1_put(&self, key: String, result: EmbeddingResult) {
         let mut l1 = self.l1.lock().await;
-        if l1.len() >= self.config.l1_max_entries {
-            // Simple eviction: remove an arbitrary entry.
-            // A proper LRU would be better but adds complexity.
-            if let Some(evict_key) = l1.keys().next().cloned() {
-                l1.remove(&evict_key);
+        if l1.entries.contains_key(&key) {
+            // Already present — just update value and promote.
+            l1.entries.insert(key.clone(), result);
+            if let Some(pos) = l1.lru_order.iter().position(|k| k == &key) {
+                l1.lru_order.remove(pos);
+            }
+            l1.lru_order.push_back(key);
+            return;
+        }
+        // Evict LRU entry if at capacity.
+        while l1.entries.len() >= self.config.l1_max_entries {
+            if let Some(evict_key) = l1.lru_order.pop_front() {
+                l1.entries.remove(&evict_key);
+            } else {
+                break;
             }
         }
-        l1.insert(key, result);
+        l1.lru_order.push_back(key.clone());
+        l1.entries.insert(key, result);
     }
 
     /// Try to get an embedding from L2 (persistent) cache.
@@ -213,11 +248,13 @@ impl PersistentCachedProvider {
     /// Store an embedding in both L1 and L2.
     async fn store(&self, text: &str, result: &EmbeddingResult) {
         let key = self.cache_key(text);
-        self.l1_put(key.clone(), result.clone()).await;
-        self.l2_put(&key, result).await;
+        tokio::join!(
+            self.l1_put(key.clone(), result.clone()),
+            self.l2_put(&key, result)
+        );
     }
 
-    // ── Task 6: Unified cache layer API ────────────────────────────
+    // ── Unified cache layer API ────────────────────────────
 
     /// Check if an embedding is already cached for the given text.
     ///
@@ -252,7 +289,7 @@ impl PersistentCachedProvider {
 
     /// Get the current L1 cache size (for metrics/observability).
     pub async fn l1_size(&self) -> usize {
-        self.l1.lock().await.len()
+        self.l1.lock().await.entries.len()
     }
 }
 

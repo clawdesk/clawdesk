@@ -48,6 +48,7 @@ use clawdesk_skills::registry::SkillRegistry;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -302,11 +303,15 @@ pub async fn bootstrap(config: &ClawDeskConfig) -> BootstrapResult {
         "bootstrap complete"
     );
 
-    // Create InboundAdapterRegistry for channels that support inbound message ingestion.
-    // Channels implementing the InboundAdapter trait can be registered here during
-    // factory creation. For now, the registry is created empty and ready for adapters
-    // to be registered as channel plugins are loaded or hot-reloaded.
-    let inbound_registry = InboundAdapterRegistry::new(256);
+    // Create InboundAdapterRegistry and populate it with bridge adapters
+    // for every registered channel, connecting the Channel → InboundAdapter pipeline.
+    let mut inbound_registry = InboundAdapterRegistry::new(256);
+
+    for (_id, channel) in registry.iter() {
+        let adapter = clawdesk_channels::bridge_adapter::bridge_adapter_for(Arc::clone(channel));
+        inbound_registry.register(Arc::new(adapter));
+        tracing::info!(channel = %_id, "bridge adapter registered for channel");
+    }
 
     BootstrapResult {
         channels: registry,

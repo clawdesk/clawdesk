@@ -1,4 +1,4 @@
-//! A2: Batch ingestion pipeline for OpenClaw skill directories.
+//! A2: Batch ingestion pipeline for legacy skill directories.
 //!
 //! Scans a directory of SKILL.md files, parses via `openclaw_adapter`,
 //! validates security constraints, resolves inter-skill dependencies,
@@ -44,7 +44,7 @@ use tracing::{debug, info, warn, error};
 /// A lockfile entry for one skill version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockEntry {
-    /// Skill identifier (e.g., "openclaw/weather").
+    /// Skill identifier (e.g., "legacy/weather").
     pub skill_id: String,
     /// Version string.
     pub version: String,
@@ -186,14 +186,14 @@ impl IngestResult {
 ///
 /// Pipeline stages (each skill goes through in order):
 /// 1. **Scan** — find `SKILL.md` in each subdirectory
-/// 2. **Parse** — `parse_skill_md()` + `adapt_skill()` via OpenClaw adapter
+/// 2. **Parse** — `parse_skill_md()` + `adapt_skill()` via legacy adapter
 /// 3. **Hash** — SHA-256 content-addressable identification  
 /// 4. **Verify** — check trust level via `SkillVerifier`
 /// 5. **Check deps** — binary dependency availability via `installer.rs`
 /// 6. **Resolve** — topological sort of inter-skill dependencies
 /// 7. **Register** — add to `SkillRegistry` in dependency order
 pub struct CorpusIngest<'a> {
-    /// Adapter config for the OpenClaw parser.
+    /// Adapter config for the legacy parser.
     config: AdapterConfig,
     /// Skill verifier for trust level checks.
     verifier: &'a SkillVerifier,
@@ -677,7 +677,7 @@ mod tests {
             generated_at: "2026-01-01T00:00:00Z".into(),
             scan_root: "./skills".into(),
             entries: vec![LockEntry {
-                skill_id: "openclaw/weather".into(),
+                skill_id: "legacy/weather".into(),
                 version: "0.1.0".into(),
                 content_hash: "abc123".into(),
                 tier: "Direct".into(),
@@ -692,7 +692,7 @@ mod tests {
         let json = serde_json::to_string(&lockfile).unwrap();
         let parsed: IngestLockfile = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.entries.len(), 1);
-        assert_eq!(parsed.entries[0].skill_id, "openclaw/weather");
+        assert_eq!(parsed.entries[0].skill_id, "legacy/weather");
     }
 
     #[test]

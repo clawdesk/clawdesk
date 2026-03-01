@@ -731,10 +731,14 @@ impl PipelineExecutor {
 
         let concurrency = branches.len().min(self.max_parallelism);
 
+        // Share input across all branches via Arc<str> — O(1) per branch
+        // instead of O(|input|) String clone per branch.
+        let shared_input: Arc<str> = Arc::from(input);
+
         for (branch_idx, branch) in branches.iter().enumerate().take(concurrency) {
             let backend = Arc::clone(&self.backend);
             let branch = branch.clone();
-            let input = input.to_string();
+            let input = Arc::clone(&shared_input);
             let cancel = self.cancel.clone();
 
             join_set.spawn(async move {

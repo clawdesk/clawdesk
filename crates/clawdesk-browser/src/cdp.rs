@@ -136,20 +136,24 @@ impl CdpSession {
     }
 
     /// Build a click command (via JS).
+    ///
+    /// The selector is escaped to prevent JS injection.
     pub fn click(&self, selector: &str) -> CdpCommand {
         let js = format!(
             "document.querySelector('{}')?.click()",
-            selector.replace('\'', "\\'")
+            escape_js_string(selector)
         );
         self.evaluate(&js)
     }
 
     /// Build a type text command (via JS).
+    ///
+    /// Both selector and text are escaped to prevent JS injection.
     pub fn type_text(&self, selector: &str, text: &str) -> CdpCommand {
         let js = format!(
             "(() => {{ const el = document.querySelector('{}'); if (el) {{ el.value = '{}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); }} }})()",
-            selector.replace('\'', "\\'"),
-            text.replace('\'', "\\'")
+            escape_js_string(selector),
+            escape_js_string(text)
         );
         self.evaluate(&js)
     }
@@ -435,6 +439,37 @@ impl CdpSession {
     }
 }
 
+// ── JS String Escaping ───────────────────────────────────────
+
+/// Escape a string for safe embedding inside a JavaScript single-quoted
+/// string literal. Handles backslashes, quotes, newlines, carriage returns,
+/// tabs, null bytes, and other control characters.
+///
+/// This prevents injection when interpolating user-controlled values
+/// into `Runtime.evaluate` expressions.
+fn escape_js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            // Other control characters: encode as Unicode escape
+            c if c.is_control() => {
+                for unit in c.encode_utf16(&mut [0; 2]) {
+                    out.push_str(&format!("\\u{:04x}", unit));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +511,40 @@ mod tests {
     fn launch_args_headed() {
         let args = CdpSession::browser_launch_args(9222, false, "/tmp/chrome-data");
         assert!(!args.iter().any(|a| a.contains("headless")));
+    }
+
+    #[test]
+    fn escape_js_handles_backslash_quote_injection() {
+        // The classic bypass: \'; alert(1);//
+        // Without proper escaping, the backslash escapes the inserted \'
+        // leaving the original quote to close the string.
+        let malicious = r"\'; alert(1);//";
+        let escaped = escape_js_string(malicious);
+        // The backslash must be doubled BEFORE the quote is escaped:
+        // input:   \    '    ;    ...
+        // escaped: \\   \'   ;    ...
+        // In JS: the \\ is a literal \, and \' is a literal ' inside the string.
+        assert!(escaped.starts_with("\\\\\\'"));
+        // The key property: there is no unescaped quote in the output
+        // (every ' is preceded by \, every \ is doubled)
+        assert_eq!(escaped, "\\\\\\'; alert(1);//");
+    }
+
+    #[test]
+    fn escape_js_handles_newlines_and_control() {
+        let input = "line1\nline2\rline3\ttab\0null";
+        let escaped = escape_js_string(input);
+        assert!(!escaped.contains('\n'));
+        assert!(!escaped.contains('\r'));
+        assert!(!escaped.contains('\0'));
+        assert!(escaped.contains("\\n"));
+        assert!(escaped.contains("\\r"));
+        assert!(escaped.contains("\\0"));
+    }
+
+    #[test]
+    fn escape_js_passthrough_safe_chars() {
+        let safe = "hello world 123 <div>";
+        assert_eq!(escape_js_string(safe), safe);
     }
 }

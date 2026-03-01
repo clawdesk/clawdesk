@@ -83,6 +83,18 @@ pub struct GatewayState {
     /// Every thread is an A2A-capable agent; this registry holds per-thread
     /// AgentCards keyed by `agent:{id}:{thread_hex}`.
     pub thread_agents: Arc<ThreadAgentRegistry>,
+
+    // --- Webhook ingestion ---
+    /// In-memory store for webhook configurations (GAP-A).
+    pub webhook_store: crate::webhook::WebhookStore,
+
+    // --- Reactive event bus (GAP-D) ---
+    /// Central event bus for reactive triggers and pipeline dispatch.
+    pub event_bus: Arc<clawdesk_bus::dispatch::EventBus>,
+
+    // --- Cross-channel artifact pipeline (GAP-E) ---
+    /// Content-addressed artifact store backed by MediaCache.
+    pub artifact_pipeline: Arc<clawdesk_media::ArtifactPipeline>,
 }
 
 impl GatewayState {
@@ -122,6 +134,24 @@ impl GatewayState {
                 ),
             )),
             thread_agents: Arc::new(ThreadAgentRegistry::new("http://localhost:18789")),
+            webhook_store: crate::webhook::WebhookStore::new(),
+            event_bus: clawdesk_bus::dispatch::EventBus::new(128),
+            artifact_pipeline: {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".to_string());
+                let cache_dir = std::path::PathBuf::from(home)
+                    .join(".clawdesk")
+                    .join("artifacts");
+                let cache = clawdesk_media::MediaCache::new(cache_dir, 512)
+                    .unwrap_or_else(|_| {
+                        clawdesk_media::MediaCache::new(
+                            std::env::temp_dir().join("clawdesk-gw-artifacts"),
+                            512,
+                        ).expect("artifact cache")
+                    });
+                Arc::new(clawdesk_media::ArtifactPipeline::new(Arc::new(cache)))
+            },
         }
     }
 

@@ -27,10 +27,10 @@
 use crate::dispatch::EventBus;
 use crate::event::{Event, EventKind, Priority};
 use async_trait::async_trait;
+use dashmap::DashMap;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
@@ -89,38 +89,35 @@ pub trait PipelineRunner: Send + Sync + 'static {
 ///
 /// Thread-safe (wrapped in `RwLock`) for concurrent access.
 pub struct PipelineRegistry {
-    pipelines: RwLock<HashMap<String, PipelineDefinition>>,
+    pipelines: DashMap<String, PipelineDefinition>,
 }
 
 impl PipelineRegistry {
     pub fn new() -> Self {
         Self {
-            pipelines: RwLock::new(HashMap::new()),
+            pipelines: DashMap::new(),
         }
     }
 
     /// Register a pipeline definition.
     pub async fn register(&self, pipeline: PipelineDefinition) {
         info!(id = %pipeline.id, name = %pipeline.name, "registering pipeline");
-        self.pipelines
-            .write()
-            .await
-            .insert(pipeline.id.clone(), pipeline);
+        self.pipelines.insert(pipeline.id.clone(), pipeline);
     }
 
     /// Unregister a pipeline by ID.
     pub async fn unregister(&self, id: &str) -> bool {
-        self.pipelines.write().await.remove(id).is_some()
+        self.pipelines.remove(id).is_some()
     }
 
     /// Look up a pipeline by ID.
     pub async fn get(&self, id: &str) -> Option<PipelineDefinition> {
-        self.pipelines.read().await.get(id).cloned()
+        self.pipelines.get(id).map(|e| e.value().clone())
     }
 
     /// List all registered pipeline IDs.
     pub async fn list(&self) -> Vec<String> {
-        self.pipelines.read().await.keys().cloned().collect()
+        self.pipelines.iter().map(|e| e.key().clone()).collect()
     }
 }
 

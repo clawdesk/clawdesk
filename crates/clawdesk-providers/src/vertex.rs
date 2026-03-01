@@ -71,20 +71,11 @@ impl VertexProvider {
             }
         }
 
-        let adc_file = Self::default_adc_file().ok_or_else(|| ProviderError::AuthFailure {
-            provider: "vertex".to_string(),
-            profile_id: "default".to_string(),
-        })?;
+        let adc_file = Self::default_adc_file().ok_or_else(|| ProviderError::auth_failure("vertex".to_string(), "default".to_string()))?;
 
-        let data = tokio::fs::read_to_string(adc_file).await.map_err(|_| ProviderError::AuthFailure {
-            provider: "vertex".into(),
-            profile_id: "default".into(),
-        })?;
+        let data = tokio::fs::read_to_string(adc_file).await.map_err(|_| ProviderError::auth_failure("vertex", "default"))?;
         
-        let adc_json: Value = serde_json::from_str(&data).map_err(|_| ProviderError::AuthFailure {
-            provider: "vertex".into(),
-            profile_id: "default".into(),
-        })?;
+        let adc_json: Value = serde_json::from_str(&data).map_err(|_| ProviderError::auth_failure("vertex", "default"))?;
 
         let (client_id, client_secret, refresh_token) = match (
             adc_json["client_id"].as_str(),
@@ -92,10 +83,7 @@ impl VertexProvider {
             adc_json["refresh_token"].as_str(),
         ) {
             (Some(cid), Some(cs), Some(rt)) => (cid, cs, rt),
-            _ => return Err(ProviderError::AuthFailure {
-                provider: "vertex".into(),
-                profile_id: "default".into(),
-            }),
+            _ => return Err(ProviderError::auth_failure("vertex", "default")),
         };
 
         let req_body = serde_json::json!({
@@ -110,16 +98,10 @@ impl VertexProvider {
             .json(&req_body)
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "vertex".into(),
-                detail: e.to_string(),
-            })?
+            .map_err(|e| ProviderError::network_error("vertex", e.to_string()))?
             .json()
             .await
-            .map_err(|e| ProviderError::FormatError {
-                provider: "vertex".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::format_error("vertex", e.to_string()))?;
 
         if let (Some(access_token), Some(expires_in)) = (
             value["access_token"].as_str(),
@@ -134,10 +116,7 @@ impl VertexProvider {
             
             Ok(token)
         } else {
-            Err(ProviderError::AuthFailure {
-                provider: "vertex".into(),
-                profile_id: "default".into(),
-            })
+            Err(ProviderError::auth_failure("vertex", "default"))
         }
     }
 
@@ -387,16 +366,9 @@ impl Provider for VertexProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "vertex".into(),
-                        model: model.clone(),
-                        after: start.elapsed(),
-                    }
+                    ProviderError::timeout("vertex", model.clone(), start.elapsed())
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "vertex".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("vertex", e.to_string())
                 }
             })?;
 
@@ -406,34 +378,19 @@ impl Provider for VertexProvider {
         if !status.is_success() {
             let status_code = status.as_u16();
             return match status_code {
-                429 => Err(ProviderError::RateLimit {
-                    provider: "vertex".into(),
-                    retry_after: None,
-                }),
-                401 | 403 => Err(ProviderError::AuthFailure {
-                    provider: "vertex".into(),
-                    profile_id: "default".into(),
-                }),
-                _ => Err(ProviderError::ServerError {
-                    provider: "vertex".into(),
-                    status: status_code,
-                }),
+                429 => Err(ProviderError::rate_limit("vertex", None)),
+                401 | 403 => Err(ProviderError::auth_failure("vertex", "default")),
+                _ => Err(ProviderError::server_error("vertex", status_code)),
             };
         }
 
         let api_response: GeminiResponse =
-            response.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "vertex".into(),
-                detail: e.to_string(),
-            })?;
+            response.json().await.map_err(|e| ProviderError::format_error("vertex", e.to_string()))?;
 
         let candidate = api_response
             .candidates
             .and_then(|mut c| if c.is_empty() { None } else { Some(c.remove(0)) })
-            .ok_or_else(|| ProviderError::FormatError {
-                provider: "vertex".into(),
-                detail: "no candidates in response".into(),
-            })?;
+            .ok_or_else(|| ProviderError::format_error("vertex", "no candidates in response"))?;
 
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
@@ -517,25 +474,16 @@ impl Provider for VertexProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "vertex".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("vertex", e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(ProviderError::ServerError {
-                provider: "vertex".into(),
-                status: response.status().as_u16(),
-            });
+            return Err(ProviderError::server_error("vertex", response.status().as_u16()));
         }
 
         let mut buffer = String::new();
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(|e| {
-            ProviderError::NetworkError {
-                provider: "vertex".into(),
-                detail: e.to_string(),
-            }
+            ProviderError::network_error("vertex", e.to_string())
         })? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 

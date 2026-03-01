@@ -1,4 +1,4 @@
-//! T20: Structured error types for the Tauri shell layer.
+//! Structured error types for the Tauri shell layer.
 //!
 //! Commands return `Result<T, String>` (Tauri convention). This module provides
 //! [`CommandError`] — a serializable error envelope that gives the frontend
@@ -15,7 +15,7 @@ pub enum AppError {
 
 pub type AppResult<T> = Result<T, AppError>;
 
-/// T20: Structured error envelope returned to the frontend via IPC.
+/// Structured error envelope returned to the frontend via IPC.
 ///
 /// Serialized as JSON when converted to String via `Into<String>`.
 /// The frontend can parse the JSON to obtain machine-readable error codes.

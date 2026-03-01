@@ -1,197 +1,48 @@
 ---
 name: discord
-description: "Discord ops via the message tool (channel=discord)."
+description: "Send messages to Discord via message_send(channel='discord', content='...')."
 metadata: { "openclaw": { "emoji": "🎮", "requires": { "config": ["channels.discord.token"] } } }
-allowed-tools: ["message"]
+allowed-tools: ["message_send"]
 ---
 
-# Discord (Via `message`)
+# Discord Messaging
 
-Use the `message` tool. No provider-specific `discord` tool exposed to the agent.
+Send messages to Discord using the `message_send` tool. Routing is automatic — **never ask for channel IDs, guild IDs, or user IDs**.
 
-## Musts
+## How to Send
 
-- Always: `channel: "discord"`.
-- Respect gating: `channels.discord.actions.*` (some default off: `roles`, `moderation`, `presence`, `channels`).
-- Prefer explicit ids: `guildId`, `channelId`, `messageId`, `userId`.
-- Multi-account: optional `accountId`.
-
-## Guidelines
-
-- Avoid Markdown tables in outbound Discord messages.
-- Mention users as `<@USER_ID>`.
-- Prefer Discord components v2 (`components`) for rich UI; use legacy `embeds` only when you must.
-
-## Targets
-
-- Send-like actions: `to: "channel:<id>"` or `to: "user:<id>"`.
-- Message-specific actions: `channelId: "<id>"` (or `to`) + `messageId: "<id>"`.
-
-## Common Actions (Examples)
-
-Send message:
+Just call `message_send` with `channel: "discord"` and `content: "<your message>"`. The system handles routing automatically.
 
 ```json
-{
-  "action": "send",
-  "channel": "discord",
-  "to": "channel:123",
-  "message": "hello",
-  "silent": true
-}
+{ "channel": "discord", "content": "Hello from the agent!" }
 ```
 
-Send with media:
+That's it. No IDs needed. The `to` parameter defaults to the active Discord channel.
 
+## Examples
+
+Send a simple message:
 ```json
-{
-  "action": "send",
-  "channel": "discord",
-  "to": "channel:123",
-  "message": "see attachment",
-  "media": "file:///tmp/example.png"
-}
+{ "channel": "discord", "content": "Hello!" }
 ```
 
-- Optional `silent: true` to suppress Discord notifications.
-
-Send with components v2 (recommended for rich UI):
-
+Send a longer message:
 ```json
-{
-  "action": "send",
-  "channel": "discord",
-  "to": "channel:123",
-  "message": "Status update",
-  "components": "[Carbon v2 components]"
-}
+{ "channel": "discord", "content": "Here's the weekly report:\n\n• Task A: done\n• Task B: in progress\n• Task C: blocked" }
 ```
 
-- `components` expects Carbon component instances (Container, TextDisplay, etc.) from JS/TS integrations.
-- Do not combine `components` with `embeds` (Discord rejects v2 + embeds).
+## Rules
 
-Legacy embeds (not recommended):
-
-```json
-{
-  "action": "send",
-  "channel": "discord",
-  "to": "channel:123",
-  "message": "Status update",
-  "embeds": [{ "title": "Legacy", "description": "Embeds are legacy." }]
-}
-```
-
-- `embeds` are ignored when components v2 are present.
-
-React:
-
-```json
-{
-  "action": "react",
-  "channel": "discord",
-  "channelId": "123",
-  "messageId": "456",
-  "emoji": "✅"
-}
-```
-
-Read:
-
-```json
-{
-  "action": "read",
-  "channel": "discord",
-  "to": "channel:123",
-  "limit": 20
-}
-```
-
-Edit / delete:
-
-```json
-{
-  "action": "edit",
-  "channel": "discord",
-  "channelId": "123",
-  "messageId": "456",
-  "message": "fixed typo"
-}
-```
-
-```json
-{
-  "action": "delete",
-  "channel": "discord",
-  "channelId": "123",
-  "messageId": "456"
-}
-```
-
-Poll:
-
-```json
-{
-  "action": "poll",
-  "channel": "discord",
-  "to": "channel:123",
-  "pollQuestion": "Lunch?",
-  "pollOption": ["Pizza", "Sushi", "Salad"],
-  "pollMulti": false,
-  "pollDurationHours": 24
-}
-```
-
-Pins:
-
-```json
-{
-  "action": "pin",
-  "channel": "discord",
-  "channelId": "123",
-  "messageId": "456"
-}
-```
-
-Threads:
-
-```json
-{
-  "action": "thread-create",
-  "channel": "discord",
-  "channelId": "123",
-  "messageId": "456",
-  "threadName": "bug triage"
-}
-```
-
-Search:
-
-```json
-{
-  "action": "search",
-  "channel": "discord",
-  "guildId": "999",
-  "query": "release notes",
-  "channelIds": ["123", "456"],
-  "limit": 10
-}
-```
-
-Presence (often gated):
-
-```json
-{
-  "action": "set-presence",
-  "channel": "discord",
-  "activityType": "playing",
-  "activityName": "with fire",
-  "status": "online"
-}
-```
+- **NEVER ask the user for Discord channel IDs, guild IDs, or user IDs.**
+- **NEVER refuse to send because you don't have an ID.** Just call `message_send`.
+- Always set `channel: "discord"`.
+- Omit the `to` parameter — it defaults to the correct destination automatically.
+- Only set `to` if the user explicitly provides a numeric Discord channel ID.
+- Mention users as `<@USER_ID>` only if the user provides the ID.
 
 ## Writing Style (Discord)
 
 - Short, conversational, low ceremony.
-- No markdown tables.
-- Mention users as `<@USER_ID>`.
+- Avoid Markdown tables — Discord renders them poorly.
+- Use bullet points and short paragraphs.
+- Keep messages under 2000 characters (Discord limit).

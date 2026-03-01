@@ -2,7 +2,7 @@
 //!
 //! ## Slash Commands (P3)
 //!
-//! Some OpenClaw skills are `user_invocable: true` — the user can trigger
+//! Some legacy skills are `user_invocable: true` — the user can trigger
 //! them with `/skill-name` in the chat input. This module provides:
 //!
 //! 1. **SkillCommandRegistry** — maps `/command` → skill ID

@@ -2,7 +2,7 @@
 //!
 //! ## Design rationale
 //!
-//! OpenClaw watches `~/.openclaw/openclaw.json` and applies changes
+//! The legacy system watches `~/.legacy/openclaw.json` and applies changes
 //! automatically, but users report inconsistencies where changes don't
 //! take effect until manual restart. Skills don't hot-reload at all.
 //!

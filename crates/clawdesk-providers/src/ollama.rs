@@ -58,23 +58,14 @@ impl OllamaProvider {
             .get(self.api_url("/api/tags"))
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "ollama".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("ollama", e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(ProviderError::ServerError {
-                provider: "ollama".into(),
-                status: resp.status().as_u16(),
-            });
+            return Err(ProviderError::server_error("ollama", resp.status().as_u16()));
         }
 
         let body: OllamaTagsResponse = resp.json().await.map_err(|e| {
-            ProviderError::FormatError {
-                provider: "ollama".into(),
-                detail: e.to_string(),
-            }
+            ProviderError::format_error("ollama", e.to_string())
         })?;
 
         let models: Vec<String> = body.models.into_iter().map(|m| m.name).collect();
@@ -443,24 +434,14 @@ impl Provider for OllamaProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "ollama".into(),
-                        model: model.clone(),
-                        after: start.elapsed(),
-                    }
+                    ProviderError::timeout("ollama", model.clone(), start.elapsed())
                 } else if e.is_connect() {
-                    ProviderError::NetworkError {
-                        provider: "ollama".into(),
-                        detail: format!(
+                    ProviderError::network_error("ollama", format!(
                             "cannot connect to Ollama at {} — is it running? ({})",
                             self.base_url, e
-                        ),
-                    }
+                        ))
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "ollama".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("ollama", e.to_string())
                 }
             })?;
 
@@ -472,23 +453,14 @@ impl Provider for OllamaProvider {
             let body = response.text().await.unwrap_or_default();
 
             if body.contains("not found") || body.contains("model") {
-                return Err(ProviderError::FormatError {
-                    provider: "ollama".into(),
-                    detail: format!("model '{}' not found — try `ollama pull {}`", model, model),
-                });
+                return Err(ProviderError::format_error("ollama", format!("model '{}' not found — try `ollama pull {}`", model, model)));
             }
 
-            return Err(ProviderError::ServerError {
-                provider: "ollama".into(),
-                status: status_code,
-            });
+            return Err(ProviderError::server_error("ollama", status_code));
         }
 
         let api_response: OllamaChatResponse =
-            response.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "ollama".into(),
-                detail: e.to_string(),
-            })?;
+            response.json().await.map_err(|e| ProviderError::format_error("ollama", e.to_string()))?;
 
         // Extract tool calls: first from structured response, fallback to content regex.
         let mut tool_calls: Vec<ToolCall> = api_response
@@ -566,25 +538,16 @@ impl Provider for OllamaProvider {
             .json(&api_request)
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "ollama".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("ollama", e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(ProviderError::ServerError {
-                provider: "ollama".into(),
-                status: response.status().as_u16(),
-            });
+            return Err(ProviderError::server_error("ollama", response.status().as_u16()));
         }
 
         let mut buffer = String::new();
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(|e| {
-            ProviderError::NetworkError {
-                provider: "ollama".into(),
-                detail: e.to_string(),
-            }
+            ProviderError::network_error("ollama", e.to_string())
         })? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 

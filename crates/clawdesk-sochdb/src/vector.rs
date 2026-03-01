@@ -35,6 +35,53 @@ struct VectorMeta {
     content: Option<String>,
 }
 
+/// Metadata record written by the atomic memory writer (`sochdb::atomic_memory`).
+/// Has `memory_id`, `version`, `dimensions` plus a String→String metadata map
+/// instead of the `VectorMeta` layout. We need to read this format and
+/// extract `content` from the inner metadata map.
+#[derive(Debug, Serialize, Deserialize)]
+struct EmbeddingMetaCompat {
+    #[serde(default)]
+    memory_id: String,
+    #[serde(default)]
+    version: u64,
+    #[serde(default)]
+    dimensions: usize,
+    #[serde(default)]
+    metadata: std::collections::HashMap<String, String>,
+}
+
+/// Deserialize meta bytes into `(metadata_json, content)`.
+///
+/// Handles **both** storage formats:
+/// - `VectorMeta` (non-atomic / legacy) — has `content` as a top-level field
+/// - `EmbeddingMeta` (atomic writer) — has `content` inside `metadata` HashMap
+fn parse_meta_bytes(bytes: &[u8]) -> (Option<serde_json::Value>, Option<String>) {
+    // Try VectorMeta first (native format)
+    if let Ok(vm) = serde_json::from_slice::<VectorMeta>(bytes) {
+        if vm.content.is_some() || vm.metadata.is_some() {
+            // If content is None, try extracting from metadata
+            let content = vm.content.or_else(|| {
+                vm.metadata.as_ref()
+                    .and_then(|m| m.get("content"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            });
+            return (vm.metadata, content);
+        }
+    }
+
+    // Try EmbeddingMeta (atomic writer format)
+    if let Ok(em) = serde_json::from_slice::<EmbeddingMetaCompat>(bytes) {
+        let content = em.metadata.get("content").cloned();
+        // Convert HashMap<String, String> → serde_json::Value for consistency
+        let metadata_json = serde_json::to_value(&em.metadata).ok();
+        return (metadata_json, content);
+    }
+
+    (None, None)
+}
+
 /// Legacy record format (JSON with embedded embedding array).
 #[derive(Debug, Serialize, Deserialize)]
 struct VectorRecord {
@@ -206,6 +253,68 @@ fn score_vectors(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
 // memory/conversation vector stores (<10K vectors per user). For larger
 // deployments, see `sochdb::SochClient::vectors()`.
 
+/// Scan all vector entries in a collection and partition into data/meta maps.
+///
+/// Shared helper used by both `search()` and `hybrid_search()` to avoid
+/// duplicating the scan + partition logic.
+///
+/// Scans **both** the non-atomic prefix (`vectors/{collection}/`) and the
+/// atomic-write prefix (`_vectors/{collection}/`). The atomic memory writer
+/// stores entries under `_vectors/` while the legacy `insert()` path used
+/// `vectors/`. We merge both namespaces so recall finds all memories
+/// regardless of which storage path created them.
+fn scan_collection(
+    store: &SochStore,
+    collection: &str,
+) -> Result<
+    (
+        std::collections::HashMap<String, Vec<u8>>,
+        std::collections::HashMap<String, Vec<u8>>,
+    ),
+    StorageError,
+> {
+    let mut data_map: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
+    let mut meta_map: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
+
+    // Scan both prefixes — non-atomic (vectors/) and atomic (_vectors/).
+    let prefixes = [
+        format!("vectors/{}/", collection),
+        format!("_vectors/{}/", collection),
+    ];
+
+    for prefix in &prefixes {
+        let entries = store
+            .connection()
+            .scan(prefix)
+            .map_err(|e| StorageError::OpenFailed {
+                detail: e.to_string(),
+            })?;
+
+        for (key_str, value) in &entries {
+            if key_str.ends_with("/data") {
+                let id = key_str
+                    .strip_prefix(prefix)
+                    .and_then(|s| s.strip_suffix("/data"))
+                    .unwrap_or(key_str)
+                    .to_string();
+                // Don't overwrite if already present from the non-atomic prefix
+                data_map.entry(id).or_insert_with(|| value.clone());
+            } else if key_str.ends_with("/meta") {
+                let id = key_str
+                    .strip_prefix(prefix)
+                    .and_then(|s| s.strip_suffix("/meta"))
+                    .unwrap_or(key_str)
+                    .to_string();
+                meta_map.entry(id).or_insert_with(|| value.clone());
+            }
+        }
+    }
+
+    Ok((data_map, meta_map))
+}
+
 #[async_trait]
 impl VectorStore for SochStore {
     async fn create_collection(&self, config: CollectionConfig) -> Result<(), StorageError> {
@@ -260,39 +369,12 @@ impl VectorStore for SochStore {
         k: usize,
         min_score: Option<f32>,
     ) -> Result<Vec<VectorSearchResult>, StorageError> {
-        let metric = load_metric(self, collection);
-        let prefix = format!("vectors/{}/", collection);
-
-        let entries = self
-            .connection()
-            .scan(&prefix)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
-
-        // Partition scan results into data/meta/legacy maps keyed by vector id.
-        let mut data_map: std::collections::HashMap<String, Vec<u8>> =
-            std::collections::HashMap::new();
-        let mut meta_map: std::collections::HashMap<String, Vec<u8>> =
-            std::collections::HashMap::new();
-
-        for (key_str, value) in &entries {
-            if key_str.ends_with("/data") {
-                let id = key_str
-                    .strip_prefix(&prefix)
-                    .and_then(|s| s.strip_suffix("/data"))
-                    .unwrap_or(key_str)
-                    .to_string();
-                data_map.insert(id, value.clone());
-            } else if key_str.ends_with("/meta") {
-                let id = key_str
-                    .strip_prefix(&prefix)
-                    .and_then(|s| s.strip_suffix("/meta"))
-                    .unwrap_or(key_str)
-                    .to_string();
-                meta_map.insert(id, value.clone());
-            }
+        if k == 0 {
+            return Ok(Vec::new());
         }
+        let metric = load_metric(self, collection);
+
+        let (data_map, mut meta_map) = scan_collection(self, collection)?;
 
         let mut topk = TopKBuffer::new(k);
 
@@ -339,16 +421,12 @@ impl VectorStore for SochStore {
             .into_sorted_desc()
             .into_iter()
             .map(|entry| {
-                let meta: VectorMeta =
-                    serde_json::from_slice(&entry.meta_bytes).unwrap_or(VectorMeta {
-                        metadata: None,
-                        content: None,
-                    });
+                let (metadata, content) = parse_meta_bytes(&entry.meta_bytes);
                 VectorSearchResult {
                     id: entry.id,
                     score: entry.score,
-                    metadata: meta.metadata.unwrap_or(serde_json::json!({})),
-                    content: meta.content,
+                    metadata: metadata.unwrap_or(serde_json::json!({})),
+                    content,
                 }
             })
             .collect();
@@ -369,40 +447,13 @@ impl VectorStore for SochStore {
         k: usize,
         vector_weight: f32,
     ) -> Result<Vec<VectorSearchResult>, StorageError> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
         let metric = load_metric(self, collection);
-        let prefix = format!("vectors/{}/", collection);
         let text_weight = 1.0 - vector_weight;
 
-        let entries = self
-            .connection()
-            .scan(&prefix)
-            .map_err(|e| StorageError::OpenFailed {
-                detail: e.to_string(),
-            })?;
-
-        // Partition scan entries.
-        let mut data_map: std::collections::HashMap<String, Vec<u8>> =
-            std::collections::HashMap::new();
-        let mut meta_map: std::collections::HashMap<String, Vec<u8>> =
-            std::collections::HashMap::new();
-
-        for (key_str, value) in &entries {
-            if key_str.ends_with("/data") {
-                let id = key_str
-                    .strip_prefix(&prefix)
-                    .and_then(|s| s.strip_suffix("/data"))
-                    .unwrap_or(key_str)
-                    .to_string();
-                data_map.insert(id, value.clone());
-            } else if key_str.ends_with("/meta") {
-                let id = key_str
-                    .strip_prefix(&prefix)
-                    .and_then(|s| s.strip_suffix("/meta"))
-                    .unwrap_or(key_str)
-                    .to_string();
-                meta_map.insert(id, value.clone());
-            }
-        }
+        let (data_map, mut meta_map) = scan_collection(self, collection)?;
 
         // ── BM25 scoring pass ──────────────────────────────────────
         // Build a lightweight in-line BM25 scorer from the document contents.
@@ -550,16 +601,12 @@ impl VectorStore for SochStore {
             .into_sorted_desc()
             .into_iter()
             .map(|entry| {
-                let meta: VectorMeta =
-                    serde_json::from_slice(&entry.meta_bytes).unwrap_or(VectorMeta {
-                        metadata: None,
-                        content: None,
-                    });
+                let (metadata, content) = parse_meta_bytes(&entry.meta_bytes);
                 VectorSearchResult {
                     id: entry.id,
                     score: entry.score,
-                    metadata: meta.metadata.unwrap_or(serde_json::json!({})),
-                    content: meta.content,
+                    metadata: metadata.unwrap_or(serde_json::json!({})),
+                    content,
                 }
             })
             .collect();

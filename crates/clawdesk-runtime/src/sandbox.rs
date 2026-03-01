@@ -493,8 +493,10 @@ impl SandboxExecutor {
         tokio::select! {
             status = child.wait() => {
                 let status = status.map_err(|e| SandboxError::SpawnFailed(e.to_string()))?;
-                let stdout = Self::read_output(child.stdout.take()).await;
-                let stderr = Self::read_output(child.stderr.take()).await;
+                let (stdout, stderr) = tokio::join!(
+                    Self::read_output(child.stdout.take()),
+                    Self::read_output(child.stderr.take())
+                );
                 let output_bytes = stdout.len() as u64 + stderr.len() as u64;
 
                 Ok(SandboxResult {
@@ -559,8 +561,10 @@ impl SandboxExecutor {
         tokio::select! {
             status = child.wait() => {
                 let status = status.map_err(|e| SandboxError::SpawnFailed(e.to_string()))?;
-                let stdout = Self::read_output(child.stdout.take()).await;
-                let stderr = Self::read_output(child.stderr.take()).await;
+                let (stdout, stderr) = tokio::join!(
+                    Self::read_output(child.stdout.take()),
+                    Self::read_output(child.stderr.take())
+                );
                 let output_bytes = stdout.len() as u64 + stderr.len() as u64;
 
                 Ok(SandboxResult {
@@ -770,8 +774,10 @@ impl SandboxExecutor {
         tokio::select! {
             status = child.wait() => {
                 let status = status.map_err(|e| SandboxError::SpawnFailed(e.to_string()))?;
-                let stdout = Self::read_output(child.stdout.take()).await;
-                let stderr = Self::read_output(child.stderr.take()).await;
+                let (stdout, stderr) = tokio::join!(
+                    Self::read_output(child.stdout.take()),
+                    Self::read_output(child.stderr.take())
+                );
                 let output_bytes = stdout.len() as u64 + stderr.len() as u64;
 
                 Ok(SandboxResult {

@@ -23,6 +23,7 @@
 //! Discovery latency: ~50ms to nearby STUN server.
 //! Zero overhead after discovery (direct peer-to-peer).
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -304,15 +305,9 @@ pub async fn discover_endpoint(
     local_socket: &UdpSocket,
     timeout: Duration,
 ) -> Result<DiscoveredEndpoint, NatError> {
-    // Generate random transaction ID
+    // Generate cryptographically random transaction ID
     let mut txn_id = [0u8; 12];
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    for (i, byte) in txn_id.iter_mut().enumerate() {
-        *byte = ((seed >> (i * 8)) & 0xFF) as u8;
-    }
+    rand::thread_rng().fill(&mut txn_id);
 
     let request = build_stun_request(&txn_id);
 

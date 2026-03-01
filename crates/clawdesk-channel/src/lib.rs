@@ -25,7 +25,7 @@ pub mod reply_formatter;
 use async_trait::async_trait;
 use clawdesk_types::{
     channel::{ChannelId, ChannelMeta},
-    message::{DeliveryReceipt, NormalizedMessage, OutboundMessage},
+    message::{DeliveryReceipt, MessageOrigin, NormalizedMessage, OutboundMessage},
 };
 use std::sync::Arc;
 
@@ -106,6 +106,16 @@ pub trait Channel: Send + Sync + 'static {
 
     /// Downcast to `&dyn Any` for runtime type inspection (e.g., typing indicators).
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Return a default `MessageOrigin` that can be used for cross-channel sends
+    /// when no inbound message has arrived yet on this channel.
+    ///
+    /// For example, Telegram returns a `MessageOrigin::Telegram` using the first
+    /// `allowed_chat_id` from config. Channels that cannot provide a sensible
+    /// default return `None`.
+    fn default_origin(&self) -> Option<MessageOrigin> {
+        None
+    }
 }
 
 // ===========================================================================

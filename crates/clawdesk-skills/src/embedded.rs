@@ -1,4 +1,4 @@
-//! Embedded OpenClaw SKILL.md files — compiled into the binary.
+//! Embedded SKILL.md files — compiled into the binary.
 //!
 //! ## SKILL.md Filesystem Shipping & Embedding
 //!
@@ -26,9 +26,9 @@ use tracing::{debug, info, warn};
 // Include the auto-generated embedded skills array.
 include!(concat!(env!("OUT_DIR"), "/embedded_skills.rs"));
 
-/// Load all embedded OpenClaw skills into a registry.
+/// Load all embedded legacy skills into a registry.
 ///
-/// Parses each embedded SKILL.md using the OpenClaw adapter and registers
+/// Parses each embedded SKILL.md using the legacy adapter and registers
 /// the resulting skills as `SkillSource::Builtin`.
 ///
 /// Skills that fail to parse are logged as warnings and skipped.
@@ -57,7 +57,7 @@ pub fn load_embedded_skills(registry: &mut SkillRegistry) -> (usize, Vec<String>
         loaded,
         total = skills.len(),
         errors = errors.len(),
-        "loaded embedded OpenClaw skills"
+        "loaded embedded legacy skills"
     );
 
     (loaded, errors)

@@ -35,6 +35,18 @@ pub enum ClawDeskError {
 
     #[error("security: {0}")]
     Security(#[from] SecurityError),
+
+    #[error("plugin: {0}")]
+    Plugin(#[from] PluginError),
+
+    #[error("media: {0}")]
+    Media(#[from] MediaError),
+
+    #[error("cron: {0}")]
+    Cron(#[from] CronError),
+
+    #[error("memory: {0}")]
+    Memory(#[from] MemoryError),
 }
 
 /// Storage layer errors.
@@ -59,71 +71,121 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
 }
 
-/// Provider/LLM errors — a closed union replacing regex-classified strings.
-#[derive(Debug, Error)]
-pub enum ProviderError {
-    #[error("rate limited by {provider} (retry after {retry_after:?})")]
-    RateLimit {
-        provider: String,
-        retry_after: Option<Duration>,
-    },
-
-    #[error("auth failed for {provider} profile {profile_id}")]
-    AuthFailure {
-        provider: String,
-        profile_id: String,
-    },
-
-    #[error("timeout after {after:?} calling {provider}/{model}")]
-    Timeout {
-        provider: String,
-        model: String,
-        after: Duration,
-    },
-
-    #[error("billing issue with {provider}")]
-    Billing { provider: String },
-
-    #[error("format error from {provider}: {detail}")]
-    FormatError { provider: String, detail: String },
-
-    #[error("{provider} server error (HTTP {status})")]
-    ServerError { provider: String, status: u16 },
-
-    #[error("network error calling {provider}: {detail}")]
-    NetworkError { provider: String, detail: String },
-
-    #[error("model {model} not found on {provider}")]
-    ModelNotFound { provider: String, model: String },
-
-    #[error("context length exceeded for {model}: {detail}")]
+/// The error kind — what went wrong, without repeating the provider name.
+#[derive(Debug)]
+pub enum ProviderErrorKind {
+    RateLimit { retry_after: Option<Duration> },
+    AuthFailure { profile_id: String },
+    Timeout { model: String, after: Duration },
+    Billing,
+    FormatError { detail: String },
+    ServerError { status: u16 },
+    NetworkError { detail: String },
+    ModelNotFound { model: String },
     ContextLengthExceeded { model: String, detail: String },
 }
 
+/// Provider/LLM errors — a struct wrapper lifting `provider` out of each variant.
+///
+/// Every error carries the originating provider name as a shared field.
+/// `ContextLengthExceeded` now properly reports its provider instead of "unknown".
+#[derive(Debug)]
+pub struct ProviderError {
+    pub provider: String,
+    pub kind: ProviderErrorKind,
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let p = &self.provider;
+        match &self.kind {
+            ProviderErrorKind::RateLimit { retry_after } =>
+                write!(f, "rate limited by {p} (retry after {retry_after:?})"),
+            ProviderErrorKind::AuthFailure { profile_id } =>
+                write!(f, "auth failed for {p} profile {profile_id}"),
+            ProviderErrorKind::Timeout { model, after } =>
+                write!(f, "timeout after {after:?} calling {p}/{model}"),
+            ProviderErrorKind::Billing =>
+                write!(f, "billing issue with {p}"),
+            ProviderErrorKind::FormatError { detail } =>
+                write!(f, "format error from {p}: {detail}"),
+            ProviderErrorKind::ServerError { status } =>
+                write!(f, "{p} server error (HTTP {status})"),
+            ProviderErrorKind::NetworkError { detail } =>
+                write!(f, "network error calling {p}: {detail}"),
+            ProviderErrorKind::ModelNotFound { model } =>
+                write!(f, "model {model} not found on {p}"),
+            ProviderErrorKind::ContextLengthExceeded { model, detail } =>
+                write!(f, "context length exceeded for {model} on {p}: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for ProviderError {}
+
 impl ProviderError {
+    pub fn new(provider: impl Into<String>, kind: ProviderErrorKind) -> Self {
+        Self { provider: provider.into(), kind }
+    }
+
+    // ---- Convenience constructors (one per variant) ----
+
+    pub fn rate_limit(provider: impl Into<String>, retry_after: Option<Duration>) -> Self {
+        Self::new(provider, ProviderErrorKind::RateLimit { retry_after })
+    }
+
+    pub fn auth_failure(provider: impl Into<String>, profile_id: impl Into<String>) -> Self {
+        Self::new(provider, ProviderErrorKind::AuthFailure { profile_id: profile_id.into() })
+    }
+
+    pub fn timeout(provider: impl Into<String>, model: impl Into<String>, after: Duration) -> Self {
+        Self::new(provider, ProviderErrorKind::Timeout { model: model.into(), after })
+    }
+
+    pub fn billing(provider: impl Into<String>) -> Self {
+        Self::new(provider, ProviderErrorKind::Billing)
+    }
+
+    pub fn format_error(provider: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::new(provider, ProviderErrorKind::FormatError { detail: detail.into() })
+    }
+
+    pub fn server_error(provider: impl Into<String>, status: u16) -> Self {
+        Self::new(provider, ProviderErrorKind::ServerError { status })
+    }
+
+    pub fn network_error(provider: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::new(provider, ProviderErrorKind::NetworkError { detail: detail.into() })
+    }
+
+    pub fn model_not_found(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::new(provider, ProviderErrorKind::ModelNotFound { model: model.into() })
+    }
+
+    pub fn context_length_exceeded(
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::new(provider, ProviderErrorKind::ContextLengthExceeded {
+            model: model.into(),
+            detail: detail.into(),
+        })
+    }
+
     /// Is this error retryable for fallback purposes?
     /// Pure function over the closed union — no regex needed. O(1) pattern match.
     pub fn is_retryable(&self) -> bool {
-        match self {
-            ProviderError::RateLimit { .. } | ProviderError::Timeout { .. } => true,
-            ProviderError::ServerError { status, .. } => *status >= 500,
+        match &self.kind {
+            ProviderErrorKind::RateLimit { .. } | ProviderErrorKind::Timeout { .. } => true,
+            ProviderErrorKind::ServerError { status } => *status >= 500,
             _ => false,
         }
     }
 
-    /// Provider name for this error.
+    /// Provider name for this error — now a simple field access, never "unknown".
     pub fn provider(&self) -> &str {
-        match self {
-            Self::RateLimit { provider, .. } => provider,
-            Self::AuthFailure { provider, .. } => provider,
-            Self::Timeout { provider, .. } => provider,
-            Self::Billing { provider } => provider,
-            Self::FormatError { provider, .. } => provider,
-            Self::ServerError { provider, .. } => provider,
-            Self::NetworkError { provider, .. } => provider,
-            Self::ModelNotFound { provider, .. } => provider,
-            Self::ContextLengthExceeded { .. } => "unknown",
-        }
+        &self.provider
     }
 }
 
@@ -306,6 +368,8 @@ impl ClawDeskError {
             ClawDeskError::Provider(e) => e.is_retryable(),
             ClawDeskError::Storage(StorageError::TransactionConflict { .. }) => true,
             ClawDeskError::Gateway(GatewayError::WebSocket { .. }) => true,
+            ClawDeskError::Cron(CronError::TaskTimeout { .. }) => true,
+            ClawDeskError::Memory(MemoryError::ReindexInProgress) => true,
             _ => false,
         }
     }
@@ -314,11 +378,11 @@ impl ClawDeskError {
     pub fn error_code(&self) -> &'static str {
         match self {
             ClawDeskError::Storage(_) => "STORAGE_ERROR",
-            ClawDeskError::Provider(e) => match e {
-                ProviderError::RateLimit { .. } => "RATE_LIMITED",
-                ProviderError::AuthFailure { .. } => "AUTH_FAILED",
-                ProviderError::ContextLengthExceeded { .. } => "CONTEXT_OVERFLOW",
-                ProviderError::Billing { .. } => "BILLING_ERROR",
+            ClawDeskError::Provider(e) => match &e.kind {
+                ProviderErrorKind::RateLimit { .. } => "RATE_LIMITED",
+                ProviderErrorKind::AuthFailure { .. } => "AUTH_FAILED",
+                ProviderErrorKind::ContextLengthExceeded { .. } => "CONTEXT_OVERFLOW",
+                ProviderErrorKind::Billing => "BILLING_ERROR",
                 _ => "PROVIDER_ERROR",
             },
             ClawDeskError::Channel { .. } => "CHANNEL_ERROR",
@@ -331,6 +395,10 @@ impl ClawDeskError {
             ClawDeskError::Config(_) => "CONFIG_ERROR",
             ClawDeskError::Gateway(_) => "GATEWAY_ERROR",
             ClawDeskError::Security(_) => "SECURITY_ERROR",
+            ClawDeskError::Plugin(_) => "PLUGIN_ERROR",
+            ClawDeskError::Media(_) => "MEDIA_ERROR",
+            ClawDeskError::Cron(_) => "CRON_ERROR",
+            ClawDeskError::Memory(_) => "MEMORY_ERROR",
         }
     }
 }

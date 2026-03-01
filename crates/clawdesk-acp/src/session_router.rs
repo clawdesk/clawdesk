@@ -5,7 +5,7 @@
 //! Extends the capability-based `AgentRouter` with:
 //! - **Session affinity**: a routing table maps `(agent_id, session_key)` pairs
 //!   so multi-turn conversations route to the same agent instance.
-//! - **OpenClaw gateway integration**: OC agents appear as first-class entries
+//! - **legacy gateway integration**: OC agents appear as first-class entries
 //!   in `AgentDirectory`, tagged with `AgentSource::OpenClaw`.
 //! - **Discovery protocol**: periodic crawl of `/.well-known/agent.json` to
 //!   auto-register remote agents.
@@ -44,7 +44,8 @@
 //! \end{cases}
 //! $$
 
-use crate::agent_card::{AgentCard, AgentCapability};
+use crate::agent_card::AgentCard;
+use crate::capability::CapabilityId;
 use crate::router::{AgentDirectory, AgentRouter, RoutingDecision};
 use chrono::{DateTime, Utc};
 use rustc_hash::FxHashMap;
@@ -52,7 +53,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 // Re-export the typed SessionKey from clawdesk-types.
-// Task 8 (Session Key algebra): replaces the old `type SessionKey = String`
+// replaces the old `type SessionKey = String`
 // alias with the structured `SessionKey { channel: ChannelId, identifier: CompactId }`.
 // The typed key carries routing metadata (which channel the session belongs to)
 // and uses stack-allocated `CompactId` (≤63 bytes inline, no heap alloc).
@@ -67,7 +68,7 @@ pub use clawdesk_types::session::SessionKey;
 pub enum AgentSource {
     /// Native ClawDesk agent (Rust, in-process or local).
     ClawDesk,
-    /// OpenClaw gateway agent (TypeScript, remote RPC).
+    /// legacy gateway agent (TypeScript, remote RPC).
     OpenClaw { gateway_url: String },
     /// External A2A agent discovered via well-known URL.
     External { discovery_url: String },
@@ -82,7 +83,15 @@ struct AffinityEntry {
     last_used: DateTime<Utc>,
 }
 
-/// Per-agent circuit breaker state.
+/// Per-agent circuit breaker state with Half-Open probe support.
+///
+/// State machine:
+/// ```text
+/// Closed --(failures >= threshold)--> Open
+/// Open --(recovery_timeout elapsed)--> HalfOpen
+/// HalfOpen --(probe succeeds)--> Closed
+/// HalfOpen --(probe fails)--> Open (reset timer)
+/// ```
 #[derive(Debug, Clone)]
 pub struct CircuitBreaker {
     /// Consecutive failure count.
@@ -97,7 +106,31 @@ pub struct CircuitBreaker {
     pub total_successes: u64,
     /// Total failures for health ratio computation.
     pub total_failures: u64,
+    /// Whether a half-open probe is currently in flight.
+    /// Prevents multiple concurrent probes.
+    pub probe_in_flight: bool,
+    /// Exponentially weighted moving average of success rate.
+    ///
+    /// Updated on every `record_success` / `record_failure` with
+    /// `EWMA_ALPHA` smoothing factor. Decays old history so recent
+    /// health changes dominate the score.
+    pub health_ewma: f64,
 }
+
+/// Tri-state circuit breaker status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitState {
+    /// Healthy — all requests pass through.
+    Closed,
+    /// Tripped — all requests blocked (except a single probe after timeout).
+    Open,
+    /// Recovery timeout elapsed — one probe request allowed.
+    HalfOpen,
+}
+
+/// EWMA smoothing factor for health scoring.
+/// α = 0.3 gives ~50% weight to last ~2 observations, adapting quickly.
+const EWMA_ALPHA: f64 = 0.3;
 
 impl CircuitBreaker {
     fn new(trip_threshold: u32, recovery_timeout: Duration) -> Self {
@@ -108,14 +141,40 @@ impl CircuitBreaker {
             recovery_timeout,
             total_successes: 0,
             total_failures: 0,
+            probe_in_flight: false,
+            health_ewma: 1.0, // start optimistic (fully healthy)
         }
     }
 
-    /// Is the breaker currently open (blocking requests)?
+    /// Current circuit breaker state (Closed / Open / HalfOpen).
+    pub fn state(&self) -> CircuitState {
+        match self.tripped_at {
+            None => CircuitState::Closed,
+            Some(tripped) => {
+                let elapsed = Utc::now().signed_duration_since(tripped);
+                let timeout = chrono::Duration::from_std(self.recovery_timeout)
+                    .unwrap_or(chrono::Duration::seconds(60));
+                if elapsed >= timeout {
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Open
+                }
+            }
+        }
+    }
+
+    /// Is the breaker currently blocking requests?
+    /// Returns false for Closed and for HalfOpen (one probe allowed).
     fn is_open(&self) -> bool {
-        if let Some(tripped) = self.tripped_at {
-            let elapsed = Utc::now().signed_duration_since(tripped);
-            elapsed < chrono::Duration::from_std(self.recovery_timeout).unwrap_or(chrono::Duration::seconds(60))
+        matches!(self.state(), CircuitState::Open)
+    }
+
+    /// Whether a half-open probe request should be allowed.
+    /// Returns true once per half-open window (until probe completes).
+    fn should_allow_probe(&mut self) -> bool {
+        if self.state() == CircuitState::HalfOpen && !self.probe_in_flight {
+            self.probe_in_flight = true;
+            true
         } else {
             false
         }
@@ -125,14 +184,20 @@ impl CircuitBreaker {
     fn record_success(&mut self) {
         self.failures = 0;
         self.tripped_at = None;
+        self.probe_in_flight = false;
         self.total_successes += 1;
+        self.health_ewma = self.health_ewma * (1.0 - EWMA_ALPHA) + EWMA_ALPHA;
     }
 
     /// Record a failed call. Returns true if the breaker just tripped.
     fn record_failure(&mut self) -> bool {
         self.failures += 1;
         self.total_failures += 1;
-        if self.failures >= self.trip_threshold && self.tripped_at.is_none() {
+        self.probe_in_flight = false;
+        self.health_ewma *= 1.0 - EWMA_ALPHA;
+        if self.failures >= self.trip_threshold {
+            // (Re-)trip the breaker — also handles HalfOpen probe failure
+            // by resetting the timer.
             self.tripped_at = Some(Utc::now());
             true
         } else {
@@ -140,14 +205,13 @@ impl CircuitBreaker {
         }
     }
 
-    /// Health ratio: successes / (successes + failures). NaN-safe.
+    /// Health score based on EWMA of recent success rate.
+    ///
+    /// Returns a value in `[0.0, 1.0]` where 1.0 = fully healthy.
+    /// Unlike the all-time ratio, EWMA decays stale history so recent
+    /// failures dominate the score.
     fn health_ratio(&self) -> f64 {
-        let total = self.total_successes + self.total_failures;
-        if total == 0 {
-            1.0
-        } else {
-            self.total_successes as f64 / total as f64
-        }
+        self.health_ewma
     }
 }
 
@@ -162,7 +226,7 @@ pub struct SessionRouter {
     /// Agent directory (shared with the base router).
     pub directory: AgentDirectory,
     /// Session affinity table: typed SessionKey → AffinityEntry.
-    /// Task 8: Uses `clawdesk_types::session::SessionKey` (channel + identifier)
+    /// Uses `clawdesk_types::session::SessionKey` (channel + identifier)
     /// instead of bare `String` for routing-aware affinity lookup.
     affinity: FxHashMap<SessionKey, AffinityEntry>,
     /// Agent source registry: agent_id → source.
@@ -216,7 +280,7 @@ impl SessionRouter {
         self.directory.register(card);
     }
 
-    /// Register an OpenClaw gateway agent.
+    /// Register an legacy gateway agent.
     pub fn register_openclaw(&mut self, card: AgentCard, gateway_url: &str) {
         let id = card.id.clone();
         self.sources.insert(
@@ -271,12 +335,12 @@ impl SessionRouter {
     ///    capability-based routing.
     /// 4. Establish new affinity for the selected agent.
     ///
-    /// Task 8: Accepts a typed `SessionKey` (channel + identifier). Use
+    /// Accepts a typed `SessionKey` (channel + identifier). Use
     /// `SessionKey::from(string)` for backward compatibility with bare strings.
     pub fn route_with_session(
         &mut self,
         session_key: &SessionKey,
-        required_capabilities: &[AgentCapability],
+        required_capabilities: &[CapabilityId],
         exclude_agents: &[String],
     ) -> RoutingDecision {
         // 1. Check affinity (typed SessionKey lookup)
@@ -499,7 +563,7 @@ impl SessionRouter {
         &mut self,
         thread_id: u128,
         agent_id: &str,
-        required_capabilities: &[AgentCapability],
+        required_capabilities: &[CapabilityId],
         exclude_agents: &[String],
     ) -> RoutingDecision {
         let session_key = SessionKey::from(
@@ -535,7 +599,7 @@ pub struct AgentSummary {
     pub source: AgentSource,
     pub is_healthy: bool,
     pub active_tasks: u32,
-    pub capabilities: Vec<AgentCapability>,
+    pub capabilities: Vec<CapabilityId>,
     pub health_ratio: f64,
     pub circuit_open: bool,
 }
@@ -749,9 +813,10 @@ impl PingPongSession {
 mod tests {
     use super::*;
 
-    fn make_card(id: &str, caps: Vec<AgentCapability>) -> AgentCard {
+    fn make_card(id: &str, caps: Vec<CapabilityId>) -> AgentCard {
         let mut card = AgentCard::new(id, id, format!("http://{}.local", id));
         card.capabilities = caps;
+        card.rebuild_capset();
         card
     }
 
@@ -764,23 +829,23 @@ mod tests {
         let mut sr = SessionRouter::new();
         sr.register_clawdesk(make_card(
             "agent-a",
-            vec![AgentCapability::TextGeneration],
+            vec![CapabilityId::TextGeneration],
         ));
         sr.register_clawdesk(make_card(
             "agent-b",
-            vec![AgentCapability::TextGeneration],
+            vec![CapabilityId::TextGeneration],
         ));
 
         // First route establishes affinity
         let key = sk("sess-1");
-        let d1 = sr.route_with_session(&key, &[AgentCapability::TextGeneration], &[]);
+        let d1 = sr.route_with_session(&key, &[CapabilityId::TextGeneration], &[]);
         let first_agent = match &d1 {
             RoutingDecision::Route { agent_id, .. } => agent_id.clone(),
             _ => panic!("expected route"),
         };
 
         // Second route hits affinity
-        let d2 = sr.route_with_session(&key, &[AgentCapability::TextGeneration], &[]);
+        let d2 = sr.route_with_session(&key, &[CapabilityId::TextGeneration], &[]);
         match d2 {
             RoutingDecision::Route { agent_id, reason, .. } => {
                 assert_eq!(agent_id, first_agent);
@@ -795,11 +860,11 @@ mod tests {
         let mut sr = SessionRouter::new().with_circuit_breaker(3, Duration::from_secs(60));
         sr.register_clawdesk(make_card(
             "flaky",
-            vec![AgentCapability::TextGeneration],
+            vec![CapabilityId::TextGeneration],
         ));
         sr.register_clawdesk(make_card(
             "stable",
-            vec![AgentCapability::TextGeneration],
+            vec![CapabilityId::TextGeneration],
         ));
 
         // Trip the breaker for "flaky"
@@ -808,7 +873,7 @@ mod tests {
         assert!(sr.record_failure("flaky")); // trips on 3rd failure
 
         // Now routing should exclude "flaky"
-        let decision = sr.route_with_session(&sk("sess-2"), &[AgentCapability::TextGeneration], &[]);
+        let decision = sr.route_with_session(&sk("sess-2"), &[CapabilityId::TextGeneration], &[]);
         match decision {
             RoutingDecision::Route { agent_id, .. } => {
                 assert_eq!(agent_id, "stable");
@@ -821,16 +886,16 @@ mod tests {
     fn openclaw_agents_are_routable() {
         let mut sr = SessionRouter::new();
         sr.register_openclaw(
-            make_card("oc-writer", vec![AgentCapability::TextGeneration]),
+            make_card("oc-writer", vec![CapabilityId::TextGeneration]),
             "http://openclaw:3000",
         );
         sr.register_clawdesk(make_card(
             "cd-coder",
-            vec![AgentCapability::CodeExecution],
+            vec![CapabilityId::CodeExecution],
         ));
 
         // Route to OC agent for text generation
-        let decision = sr.route_with_session(&sk("sess-3"), &[AgentCapability::TextGeneration], &[]);
+        let decision = sr.route_with_session(&sk("sess-3"), &[CapabilityId::TextGeneration], &[]);
         match &decision {
             RoutingDecision::Route { agent_id, .. } => {
                 assert_eq!(agent_id, "oc-writer");
@@ -850,12 +915,12 @@ mod tests {
         let mut sr = SessionRouter::new();
         sr.register_clawdesk(make_card(
             "agent-x",
-            vec![AgentCapability::TextGeneration],
+            vec![CapabilityId::TextGeneration],
         ));
 
         // Establish affinity
         let key = sk("sess-4");
-        sr.route_with_session(&key, &[AgentCapability::TextGeneration], &[]);
+        sr.route_with_session(&key, &[CapabilityId::TextGeneration], &[]);
         assert!(sr.session_agent(&key).is_some());
 
         // Break affinity
@@ -868,10 +933,10 @@ mod tests {
         let mut sr = SessionRouter::new().with_affinity_ttl(Duration::from_secs(0));
         sr.register_clawdesk(make_card(
             "agent-y",
-            vec![AgentCapability::TextGeneration],
+            vec![CapabilityId::TextGeneration],
         ));
         let key = sk("old-session");
-        sr.route_with_session(&key, &[AgentCapability::TextGeneration], &[]);
+        sr.route_with_session(&key, &[CapabilityId::TextGeneration], &[]);
 
         // Evict immediately (TTL = 0)
         let evicted = sr.evict_stale_affinities();
@@ -882,13 +947,13 @@ mod tests {
     #[test]
     fn agent_summary_includes_all_sources() {
         let mut sr = SessionRouter::new();
-        sr.register_clawdesk(make_card("cd-1", vec![AgentCapability::TextGeneration]));
+        sr.register_clawdesk(make_card("cd-1", vec![CapabilityId::TextGeneration]));
         sr.register_openclaw(
-            make_card("oc-1", vec![AgentCapability::WebSearch]),
+            make_card("oc-1", vec![CapabilityId::WebSearch]),
             "http://oc:3000",
         );
         sr.register_external(
-            make_card("ext-1", vec![AgentCapability::Mathematics]),
+            make_card("ext-1", vec![CapabilityId::Mathematics]),
             "http://ext.agent/.well-known/agent.json",
         );
 

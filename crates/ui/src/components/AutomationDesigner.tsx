@@ -94,6 +94,10 @@ export function AutomationDesigner({
   const [lastAddedId, setLastAddedId] = useState<string | null>(null);
   const [dragOverCanvas, setDragOverCanvas] = useState(false);
   const stepsListRef = useRef<HTMLDivElement>(null);
+  // Track pointer-down so we can distinguish click vs. drag on the
+  // palette buttons — `draggable` on macOS trackpads often intercepts
+  // tiny movements and swallows the click event entirely.
+  const pointerDown = useRef<{ kind: PipelineStep["kind"]; x: number; y: number; t: number } | null>(null);
 
   // ── Step management ───────────────────────────────────────
 
@@ -288,7 +292,20 @@ export function AutomationDesigner({
                   <button
                     key={sk.kind}
                     className="automation-step-kind-btn"
+                    type="button"
                     onClick={() => addStep(sk.kind)}
+                    onPointerDown={(e) => {
+                      pointerDown.current = { kind: sk.kind, x: e.clientX, y: e.clientY, t: Date.now() };
+                    }}
+                    onPointerUp={(e) => {
+                      const pd = pointerDown.current;
+                      if (!pd || pd.kind !== sk.kind) return;
+                      const dist = Math.hypot(e.clientX - pd.x, e.clientY - pd.y);
+                      const elapsed = Date.now() - pd.t;
+                      // Treat as click when the pointer barely moved
+                      if (dist < 8 && elapsed < 500) addStep(sk.kind);
+                      pointerDown.current = null;
+                    }}
                     draggable
                     onDragStart={(e) => {
                       e.dataTransfer.setData("application/x-step-kind", sk.kind);

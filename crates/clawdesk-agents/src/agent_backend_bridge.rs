@@ -1,4 +1,4 @@
-//! GAP-12: Pipeline ↔ Runner Bridge — concrete `AgentBackend` for `AgentRunner`.
+//! Pipeline ↔ Runner Bridge — concrete `AgentBackend` for `AgentRunner`.
 //!
 //! Bridges the pipeline executor to the agent runner by implementing
 //! `AgentBackend` (the trait that `PipelineExecutor` delegates to).
@@ -112,12 +112,14 @@ impl AgentBackend for RunnerBackend {
             .and_then(|a| a.system_prompt.clone())
             .unwrap_or_else(|| config.system_prompt.clone());
 
-        let runner = AgentRunner::new(
+        let runner = AgentRunner::builder(
             Arc::clone(&self.provider),
             Arc::clone(&self.tools),
             config,
             self.cancel.clone(),
-        );
+        )
+        .without_sandbox()
+        .build();
 
         let history = vec![ChatMessage::new(MessageRole::User, input.to_string())];
 

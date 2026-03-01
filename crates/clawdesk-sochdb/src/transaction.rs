@@ -1,19 +1,27 @@
-//! Transactional connection wrapper — ACID semantics over `ConnectionTrait`.
+//! Transactional connection wrapper — buffered writes over `ConnectionTrait`.
 //!
 //! ## SochDB Transactions (P3)
 //!
 //! `ConnectionTrait` is a flat put/get/delete/scan interface with no transaction
-//! support. But ClawDesk needs atomic multi-key writes for:
-//! - **Skill orchestration**: skill + selection record + metrics in one atomic write.
-//! - **Chat replay**: turn data + index entry + counter update atomically.
-//! - **Session coordination**: group metadata + session entries together.
-//! - **Compaction**: moving data between tiers without partial state.
+//! support. ClawDesk needs multi-key writes for:
+//! - **Skill orchestration**: skill + selection record + metrics.
+//! - **Chat replay**: turn data + index entry + counter update.
+//! - **Session coordination**: group metadata + session entries.
+//! - **Compaction**: moving data between tiers.
 //!
 //! `TransactionalConn` wraps any `ConnectionTrait` implementor and provides:
 //! - **Read-your-writes**: reads check the write buffer before falling through.
-//! - **Atomic commit**: all buffered writes applied in a single batch.
+//! - **Best-effort batch commit**: buffered writes applied sequentially.
+//!   **NOT ATOMIC** — a crash mid-commit produces partial state. Callers
+//!   requiring crash-safety must implement external idempotency.
 //! - **Rollback**: discard all buffered writes.
 //! - **Drop safety**: uncommitted transaction is auto-rolled-back on drop.
+//!
+//! ## Future work
+//!
+//! Implement a write-ahead log (WAL) in front of the connection to restore
+//! true atomicity. Alternatively, use SochDB's native batch API if one is
+//! added at a lower abstraction level.
 
 use sochdb::ConnectionTrait;
 use std::collections::BTreeMap;
@@ -36,9 +44,13 @@ pub enum TxnState {
 
 /// Transactional wrapper over any `ConnectionTrait`.
 ///
-/// Buffers writes in memory and applies them atomically on commit.
+/// Buffers writes in memory and applies them sequentially on commit.
 /// Reads check the buffer first (read-your-writes), then fall through
 /// to the underlying connection for keys not in the buffer.
+///
+/// **Note:** Commit is **not atomic**. If the process crashes mid-commit,
+/// a subset of writes will have been applied. See [`commit()`](Self::commit)
+/// for details.
 ///
 /// # Example
 ///
@@ -49,7 +61,7 @@ pub enum TxnState {
 /// let mut txn = TransactionalConn::begin(conn);
 /// txn.put(b"key1", b"val1")?;
 /// txn.put(b"key2", b"val2")?;
-/// txn.commit()?;  // atomic: both keys written together
+/// txn.commit()?;  // best-effort batch — NOT atomic
 /// ```
 pub struct TransactionalConn<C: ConnectionTrait> {
     inner: C,
@@ -139,17 +151,25 @@ impl<C: ConnectionTrait> TransactionalConn<C> {
         Ok(merged.into_iter().collect())
     }
 
-    /// Commit the transaction — apply all buffered writes atomically.
+    /// Commit the transaction — apply all buffered writes sequentially.
+    ///
+    /// **WARNING: NOT ATOMIC.** Operations are applied one-by-one via
+    /// individual `put`/`delete` calls. If the process crashes or a write
+    /// fails mid-commit, the underlying store will contain a **partially
+    /// committed** state. Callers must provide their own idempotency
+    /// guarantees if crash-safety is required.
+    ///
+    /// SochDB 0.5.0 removed `write_batch` from `ConnectionTrait`.
+    /// A future version should implement a write-ahead log (WAL) to
+    /// restore true atomicity.
     pub fn commit(mut self) -> sochdb::error::Result<CommitResult> {
         assert_eq!(self.state, TxnState::Active, "cannot commit a finished transaction");
 
         let puts = self.buffer.iter().filter(|(_, op)| matches!(op, PendingOp::Put(_))).count();
         let deletes = self.buffer.iter().filter(|(_, op)| matches!(op, PendingOp::Delete)).count();
 
-        // Apply all buffered operations.
-        // SochDB's ConnectionTrait doesn't expose a batch API, so we apply
-        // operations sequentially. For true atomicity the underlying SochDB
-        // group-commit mechanism batches these into a single WAL fsync.
+        // Apply all buffered operations via individual put/delete calls.
+        // SochDB 0.5.0 removed write_batch from ConnectionTrait.
         for (key, op) in &self.buffer {
             match op {
                 PendingOp::Put(value) => {

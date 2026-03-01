@@ -1,0 +1,17 @@
+[package]
+name = "clawdesk-simd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SIMD-accelerated vector kernels for ClawDesk (cosine similarity, dot product, Euclidean distance)"
+
+[dependencies]
+
+[dev-dependencies]
+rand = { workspace = true }
+
+[features]
+default = []
+# Enable runtime AVX2 detection on x86_64 (always available via target_feature)
+nightly = []

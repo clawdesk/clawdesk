@@ -7,7 +7,7 @@
 //! - `BeforeAgentStart` — Before agent loop begins
 //! - `AfterToolCall` — After a tool/skill completes
 //! - `BeforeCompaction` — Before context compaction
-//! - `AfterCompaction` — After context compaction  
+//! - `AfterCompaction` — After context compaction
 //! - `BeforeLlmCall` — Before sending prompt to LLM
 //! - `AfterLlmCall` — After receiving LLM response
 //! - `MessageReceive` — When an inbound message arrives
@@ -34,10 +34,18 @@ pub enum Phase {
     MessageReceive,
     BeforeLlmCall,
     AfterLlmCall,
+    /// Fires before each individual tool execution. Hooks can inspect the
+    /// tool name and arguments and set `cancelled = true` to block execution.
+    BeforeToolCall,
     AfterToolCall,
     BeforeCompaction,
     AfterCompaction,
     MessageSend,
+    /// Fires after the complete turn is finalized — response delivered,
+    /// tool calls recorded, token usage tallied. Hooks at this phase
+    /// receive the full turn summary in `data` and can perform
+    /// fire-and-forget work like proactive memory storage.
+    PostTurn,
     SessionEnd,
     Shutdown,
 }
@@ -51,10 +59,12 @@ impl fmt::Display for Phase {
             Phase::MessageReceive => write!(f, "message_receive"),
             Phase::BeforeLlmCall => write!(f, "before_llm_call"),
             Phase::AfterLlmCall => write!(f, "after_llm_call"),
+            Phase::BeforeToolCall => write!(f, "before_tool_call"),
             Phase::AfterToolCall => write!(f, "after_tool_call"),
             Phase::BeforeCompaction => write!(f, "before_compaction"),
             Phase::AfterCompaction => write!(f, "after_compaction"),
             Phase::MessageSend => write!(f, "message_send"),
+            Phase::PostTurn => write!(f, "post_turn"),
             Phase::SessionEnd => write!(f, "session_end"),
             Phase::Shutdown => write!(f, "shutdown"),
         }
@@ -159,7 +169,7 @@ pub struct HookContext {
     pub data: serde_json::Value,
     /// If set to true by a hook, the chain is short-circuited.
     pub cancelled: bool,
-    /// GAP-7: Typed overrides that hooks can set to mutate agent behavior.
+    /// Typed overrides that hooks can set to mutate agent behavior.
     /// The runner inspects this after dispatch and applies any set fields.
     /// Multiple hooks in a chain can contribute overrides — later hooks win
     /// for scalar fields, lists are concatenated.
@@ -255,6 +265,7 @@ pub trait Hook: Send + Sync {
 }
 
 /// Registration entry in the hook manager.
+#[derive(Clone)]
 struct HookEntry {
     priority: Priority,
     hook: Arc<dyn Hook>,
@@ -311,12 +322,21 @@ impl HookManager {
     /// Returns the (possibly modified) context after all hooks run.
     ///
     /// Chain of responsibility: hooks run in order until one short-circuits or all complete.
+    ///
+    /// Snapshots the hook list under the read lock then releases it
+    /// before executing hooks. This prevents holding the RwLock across async
+    /// boundaries (hook.execute().await), allowing register/unregister to
+    /// proceed concurrently with hook dispatch.
     pub async fn dispatch(&self, mut ctx: HookContext) -> HookContext {
-        let hooks = self.hooks.read().await;
-        let entries = match hooks.get(&ctx.phase) {
-            Some(e) => e,
-            None => return ctx,
+        // Snapshot under read lock — O(K) Arc clones where K = hooks at phase.
+        let entries = {
+            let hooks = self.hooks.read().await;
+            match hooks.get(&ctx.phase) {
+                Some(e) => e.clone(),
+                None => return ctx,
+            }
         };
+        // Lock released — execute hooks without holding it.
 
         for entry in entries {
             if ctx.cancelled {
@@ -700,5 +720,112 @@ mod tests {
             result.overrides.system_prompt_append.as_deref(),
             Some("Keep responses under 100 words.")
         );
+    }
+}
+
+// ─── Op4: Proactive Memory Hook ─────────────────────────────────────────────
+
+/// Hook that fires at `PostTurn` to extract and store salient facts from the
+/// completed turn into long-term memory.
+///
+/// The actual memory storage is performed by an injected callback so this hook
+/// has no dependency on `clawdesk-memory`. The callback receives the assistant
+/// response text, the session/agent IDs, and a tag list — it should call
+/// `MemoryManager::remember()` or equivalent.
+///
+/// ## Usage
+///
+/// ```ignore
+/// let memory = app_state.memory.clone(); // Arc<MemoryManager>
+/// let hook = ProactiveMemoryHook::new(Arc::new(move |content, tags| {
+///     let memory = memory.clone();
+///     Box::pin(async move {
+///         memory.remember(&content, tags).await.map(|_| ()).map_err(|e| e.to_string())
+///     })
+/// }));
+/// hook_manager.register(Arc::new(hook)).await;
+/// ```
+pub struct ProactiveMemoryHook {
+    /// `(content, tags) → Result<(), error>`
+    remember_fn: Arc<
+        dyn Fn(
+                String,
+                Vec<String>,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+            + Send
+            + Sync,
+    >,
+    /// Minimum response length to trigger memory storage.
+    /// Short responses (e.g., "ok", "done") are skipped.
+    min_content_len: usize,
+}
+
+impl ProactiveMemoryHook {
+    /// Create with default 50-char minimum.
+    pub fn new(
+        remember_fn: Arc<
+            dyn Fn(
+                    String,
+                    Vec<String>,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self {
+            remember_fn,
+            min_content_len: 50,
+        }
+    }
+
+    /// Set the minimum response length to trigger proactive storage.
+    pub fn with_min_content_len(mut self, len: usize) -> Self {
+        self.min_content_len = len;
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl Hook for ProactiveMemoryHook {
+    fn name(&self) -> &str {
+        "proactive_memory"
+    }
+
+    fn phases(&self) -> Vec<Phase> {
+        vec![Phase::PostTurn]
+    }
+
+    /// Low priority — runs after logging/analytics hooks.
+    fn priority(&self) -> Priority {
+        200
+    }
+
+    async fn execute(&self, ctx: HookContext) -> HookResult {
+        let content = ctx.data.get("response_content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        // Skip trivial responses.
+        if content.len() < self.min_content_len {
+            return HookResult::Continue(ctx);
+        }
+
+        let session_id = ctx.session_id.clone().unwrap_or_default();
+        let agent_id = ctx.agent_id.clone().unwrap_or_default();
+
+        let tags = vec![
+            "proactive".to_string(),
+            format!("session:{}", session_id),
+            format!("agent:{}", agent_id),
+        ];
+
+        let content_owned = content.to_string();
+        if let Err(e) = (self.remember_fn)(content_owned, tags).await {
+            warn!(error = %e, "proactive memory hook: remember failed");
+        }
+
+        HookResult::Continue(ctx)
     }
 }

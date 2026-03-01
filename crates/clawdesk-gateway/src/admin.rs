@@ -151,6 +151,9 @@ pub async fn create_cron_task(
         enabled: req.enabled.unwrap_or(true),
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        depends_on: vec![],
+        chain_mode: Default::default(),
+        max_retained_logs: 0,
     };
 
     let id = task.id.clone();
@@ -203,8 +206,10 @@ pub async fn metrics_snapshot(
     State(state): State<Arc<GatewayState>>,
 ) -> impl IntoResponse {
     let channels = state.channels.load();
-    let plugins = state.plugin_host.list_plugins().await;
-    let tasks = state.cron_manager.list_tasks().await;
+    let (plugins, tasks) = tokio::join!(
+        state.plugin_host.list_plugins(),
+        state.cron_manager.list_tasks()
+    );
 
     let snapshot = MetricsSnapshot {
         uptime_secs: state.uptime_secs(),

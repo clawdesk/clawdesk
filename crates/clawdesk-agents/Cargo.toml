@@ -13,10 +13,11 @@ clawdesk-storage = { workspace = true }
 clawdesk-domain = { workspace = true }
 clawdesk-providers = { workspace = true }
 clawdesk-plugin = { workspace = true }
+clawdesk-browser = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs", "process", "io-util"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
@@ -25,7 +26,10 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 toml = { workspace = true }
 aho-corasick = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true }
+sha2 = { workspace = true }
+dashmap = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1,9 +1,9 @@
-//! Memory Federation — unified query layer across SochDB and OpenClaw stores.
+//! Memory Federation — unified query layer across SochDB and legacy stores.
 //!
 //! ## Memory Federation Layer
 //!
 //! ClawDesk uses SochDB (embedded ACID KV + HNSW vector search), while
-//! OpenClaw uses separate SQLite files. This module provides a **federated
+//! The legacy system uses separate SQLite files. This module provides a **federated
 //! query interface** that transparently routes memory operations to the
 //! correct backend based on the data's source.
 //!
@@ -13,7 +13,7 @@
 //! ┌──────────────────────────────────────────────────┐
 //! │              MemoryFederation                     │
 //! │  ┌─────────────┐  ┌──────────────┐  ┌──────────┐ │
-//! │  │ SochDB      │  │ OpenClaw     │  │  Policy  │ │
+//! │  │ SochDB      │  │ Legacy       │  │  Policy  │ │
 //! │  │ (native)    │  │ (remote)     │  │  Router  │ │
 //! │  └──────┬──────┘  └──────┬───────┘  └────┬─────┘ │
 //! │         │                │               │       │
@@ -48,7 +48,7 @@ use tracing::{debug, warn};
 pub enum MemorySource {
     /// Native SochDB (ClawDesk's embedded store).
     SochDb,
-    /// OpenClaw's backend (SQLite or remote API).
+    /// the backend (SQLite or remote API).
     OpenClaw,
     /// External source (e.g., imported data).
     External(String),

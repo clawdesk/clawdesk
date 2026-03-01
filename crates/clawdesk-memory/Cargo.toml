@@ -13,7 +13,7 @@ clawdesk-storage = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }

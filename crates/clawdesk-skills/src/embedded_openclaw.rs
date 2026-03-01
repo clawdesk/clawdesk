@@ -1,4 +1,4 @@
-//! Compile-time embedded OpenClaw skills via `include_dir!`.
+//! Compile-time embedded legacy skills via `include_dir!`.
 //!
 //! Bakes all `openclaw-skills/*/SKILL.md` files (and any `references/*.md`)
 //! into the binary's `.rodata` section. At startup, iterates the embedded
@@ -34,7 +34,7 @@ pub struct EmbedLoadResult {
     pub errors: Vec<String>,
 }
 
-/// Load all embedded OpenClaw skills and register them.
+/// Load all embedded legacy skills and register them.
 ///
 /// Called once at startup from `load_bundled_skills()`.
 /// Entirely synchronous — no filesystem, no async, no I/O.
@@ -110,7 +110,7 @@ pub fn load_embedded_openclaw_skills(registry: &mut SkillRegistry) -> EmbedLoadR
                     skill = %adapted.skill.manifest.id,
                     tier = %adapted.tier,
                     tokens = adapted.skill.manifest.estimated_tokens,
-                    "embedded OpenClaw skill loaded"
+                    "embedded legacy skill loaded"
                 );
                 registry.register(adapted.skill, SkillSource::Builtin);
                 result.loaded += 1;
@@ -126,7 +126,7 @@ pub fn load_embedded_openclaw_skills(registry: &mut SkillRegistry) -> EmbedLoadR
         loaded = result.loaded,
         skipped = result.skipped,
         errors = result.errors.len(),
-        "embedded OpenClaw skills loaded"
+        "embedded legacy skills loaded"
     );
 
     result

@@ -2,7 +2,7 @@
 //!
 //! ## Design rationale
 //!
-//! OpenClaw debugging means `/context list` (text dump after the fact),
+//! Legacy debugging means `/context list` (text dump after the fact),
 //! reading session JSON files, and checking unified logs (`clawlog.sh`).
 //! There's no structured tracing across tool calls, skill activations,
 //! or context decisions.

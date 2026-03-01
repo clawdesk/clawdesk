@@ -1,15 +1,14 @@
 //! Content-addressed media cache — SHA-256 keyed, file-backed.
 
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
 
 /// Content-addressed media cache.
 pub struct MediaCache {
     root: PathBuf,
-    index: RwLock<HashMap<String, CacheEntry>>,
+    index: DashMap<String, CacheEntry>,
     max_size_bytes: u64,
 }
 
@@ -40,7 +39,7 @@ impl MediaCache {
         std::fs::create_dir_all(&root)?;
         let cache = Self {
             root,
-            index: RwLock::new(HashMap::new()),
+            index: DashMap::new(),
             max_size_bytes: max_size_mb * 1024 * 1024,
         };
         cache.load_index()?;
@@ -72,10 +71,8 @@ impl MediaCache {
         let key = Self::content_key(data);
 
         // Check if already cached
-        if let Ok(idx) = self.index.read() {
-            if idx.contains_key(&key) {
-                return Ok(key);
-            }
+        if self.index.contains_key(&key) {
+            return Ok(key);
         }
 
         // Evict if necessary
@@ -100,9 +97,7 @@ impl MediaCache {
             access_count: 0,
         };
 
-        if let Ok(mut idx) = self.index.write() {
-            idx.insert(key.clone(), entry);
-        }
+        self.index.insert(key.clone(), entry);
 
         self.save_index()?;
         Ok(key)
@@ -110,61 +105,50 @@ impl MediaCache {
 
     /// Retrieve cached data by key.
     pub fn get(&self, key: &str) -> std::io::Result<Option<Vec<u8>>> {
-        if let Ok(mut idx) = self.index.write() {
-            if let Some(entry) = idx.get_mut(key) {
-                let now = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO)
-                    .as_secs();
-                entry.last_accessed = now;
-                entry.access_count += 1;
+        if let Some(mut entry) = self.index.get_mut(key) {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_secs();
+            entry.last_accessed = now;
+            entry.access_count += 1;
 
-                let path = self.key_path(key);
-                let data = std::fs::read(&path)?;
-                return Ok(Some(data));
-            }
+            let path = self.key_path(key);
+            let data = std::fs::read(&path)?;
+            return Ok(Some(data));
         }
         Ok(None)
     }
 
     /// Check if key exists in cache.
     pub fn contains(&self, key: &str) -> bool {
-        self.index
-            .read()
-            .map(|idx| idx.contains_key(key))
-            .unwrap_or(false)
+        self.index.contains_key(key)
     }
 
     /// Remove entry by key.
     pub fn remove(&self, key: &str) -> std::io::Result<bool> {
-        if let Ok(mut idx) = self.index.write() {
-            if idx.remove(key).is_some() {
-                let path = self.key_path(key);
-                let _ = std::fs::remove_file(path);
-                self.save_index()?;
-                return Ok(true);
-            }
+        if self.index.remove(key).is_some() {
+            let path = self.key_path(key);
+            let _ = std::fs::remove_file(path);
+            let snapshot: Vec<_> = self.index.iter().map(|e| e.value().clone()).collect();
+            self.save_index_snapshot(&snapshot)?;
+            return Ok(true);
         }
         Ok(false)
     }
 
     /// Get cache statistics.
     pub fn stats(&self) -> CacheStats {
-        let idx = match self.index.read() {
-            Ok(idx) => idx,
-            Err(_) => return CacheStats::default(),
-        };
-
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
             .as_secs();
 
-        let total_bytes: u64 = idx.values().map(|e| e.size_bytes).sum();
-        let oldest = idx.values().map(|e| now.saturating_sub(e.cached_at)).max();
+        let total_bytes: u64 = self.index.iter().map(|e| e.value().size_bytes).sum();
+        let oldest = self.index.iter().map(|e| now.saturating_sub(e.value().cached_at)).max();
 
         CacheStats {
-            total_entries: idx.len(),
+            total_entries: self.index.len(),
             total_bytes,
             max_bytes: self.max_size_bytes,
             oldest_entry_secs: oldest,
@@ -173,18 +157,13 @@ impl MediaCache {
 
     /// Evict oldest entries to make room.
     fn maybe_evict(&self, needed: u64) -> std::io::Result<()> {
-        let mut idx = match self.index.write() {
-            Ok(idx) => idx,
-            Err(_) => return Ok(()),
-        };
-
-        let current: u64 = idx.values().map(|e| e.size_bytes).sum();
+        let current: u64 = self.index.iter().map(|e| e.value().size_bytes).sum();
         if current + needed <= self.max_size_bytes {
             return Ok(());
         }
 
         // Sort by last_accessed (oldest first)
-        let mut entries: Vec<_> = idx.values().cloned().collect();
+        let mut entries: Vec<_> = self.index.iter().map(|e| e.value().clone()).collect();
         entries.sort_by_key(|e| e.last_accessed);
 
         let mut freed = 0u64;
@@ -196,7 +175,7 @@ impl MediaCache {
             }
             let path = self.key_path(&entry.key);
             let _ = std::fs::remove_file(path);
-            idx.remove(&entry.key);
+            self.index.remove(&entry.key);
             freed += entry.size_bytes;
         }
 
@@ -218,25 +197,30 @@ impl MediaCache {
         }
         let data = std::fs::read_to_string(&path)?;
         if let Ok(entries) = serde_json::from_str::<Vec<CacheEntry>>(&data) {
-            if let Ok(mut idx) = self.index.write() {
-                for entry in entries {
-                    idx.insert(entry.key.clone(), entry);
-                }
+            for entry in entries {
+                self.index.insert(entry.key.clone(), entry);
             }
         }
         Ok(())
     }
 
     fn save_index(&self) -> std::io::Result<()> {
-        let idx = match self.index.read() {
-            Ok(idx) => idx,
-            Err(_) => return Ok(()),
-        };
-        let entries: Vec<_> = idx.values().cloned().collect();
+        // NOTE: This method must NOT acquire `self.index` — callers that already
+        // hold a lock must use `save_index_snapshot` instead.
+        let entries: Vec<_> = self.index.iter().map(|e| e.value().clone()).collect();
+        Self::write_index_entries(&self.index_path(), &entries)
+    }
+
+    /// Save a pre-collected snapshot — safe to call while holding the write lock.
+    fn save_index_snapshot(&self, entries: &[CacheEntry]) -> std::io::Result<()> {
+        Self::write_index_entries(&self.index_path(), entries)
+    }
+
+    fn write_index_entries(path: &std::path::Path, entries: &[CacheEntry]) -> std::io::Result<()> {
         let data = serde_json::to_string(&entries).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
         })?;
-        std::fs::write(self.index_path(), data)?;
+        std::fs::write(path, data)?;
         Ok(())
     }
 }

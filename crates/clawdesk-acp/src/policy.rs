@@ -139,10 +139,14 @@ impl Default for A2APolicy {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Sliding-window rate limit tracker.
+///
+/// Uses `VecDeque` instead of `Vec` for O(1) front eviction.
+/// Both `is_allowed()` and `record()` evict expired entries, preventing
+/// unbounded growth from denied-only check patterns.
 #[derive(Debug)]
 struct RateWindow {
-    /// Timestamps of recent task submissions.
-    timestamps: Vec<Instant>,
+    /// Timestamps of recent task submissions (sorted, oldest at front).
+    timestamps: std::collections::VecDeque<Instant>,
     /// Maximum allowed in window.
     max_tasks: u32,
     /// Window duration.
@@ -152,25 +156,38 @@ struct RateWindow {
 impl RateWindow {
     fn new(max_tasks: u32, window: Duration) -> Self {
         Self {
-            timestamps: Vec::with_capacity(max_tasks as usize),
+            timestamps: std::collections::VecDeque::with_capacity(max_tasks as usize),
             max_tasks,
             window,
         }
     }
 
-    /// Check if a new task is allowed (does not record it).
-    fn is_allowed(&self, now: Instant) -> bool {
+    /// Evict expired entries from the front of the deque.
+    /// O(E) where E = expired entries (amortized O(1) per call).
+    fn evict_expired(&mut self, now: Instant) {
         let cutoff = now - self.window;
-        let active = self.timestamps.iter().filter(|&&t| t > cutoff).count();
-        (active as u32) < self.max_tasks
+        while let Some(&front) = self.timestamps.front() {
+            if front <= cutoff {
+                self.timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Check if a new task is allowed (does not record it).
+    ///
+    /// Also evicts expired entries so denied-only patterns
+    /// don't accumulate stale timestamps.
+    fn is_allowed(&mut self, now: Instant) -> bool {
+        self.evict_expired(now);
+        (self.timestamps.len() as u32) < self.max_tasks
     }
 
     /// Record a new task submission.
     fn record(&mut self, now: Instant) {
-        // Evict expired entries (amortized cleanup)
-        let cutoff = now - self.window;
-        self.timestamps.retain(|&t| t > cutoff);
-        self.timestamps.push(now);
+        self.evict_expired(now);
+        self.timestamps.push_back(now);
     }
 }
 
@@ -335,7 +352,9 @@ impl PolicyEngine {
     }
 
     /// Check rate limit for a requester. Returns `Some(RateLimited)` if exceeded.
-    fn check_rate_limit(&self, requester_id: &str) -> Option<PolicyDecision> {
+    ///
+    /// Takes `&mut self` so `is_allowed()` can evict expired entries.
+    fn check_rate_limit(&mut self, requester_id: &str) -> Option<PolicyDecision> {
         let now = Instant::now();
 
         // Check per-agent limit first, then global
@@ -346,7 +365,7 @@ impl PolicyEngine {
             .or(self.policy.global_rate_limit.as_ref());
 
         if let Some(config) = limit {
-            if let Some(window) = self.rate_windows.get(requester_id) {
+            if let Some(window) = self.rate_windows.get_mut(requester_id) {
                 if !window.is_allowed(now) {
                     return Some(PolicyDecision::RateLimited {
                         retry_after_secs: config.window_secs,
@@ -398,14 +417,16 @@ impl PolicyEngine {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Simple glob matching for agent/skill IDs.
+/// Iterative two-pointer glob match — O(P×T) worst case, O(P+T) typical.
 ///
 /// Supports:
 /// - `*` matches any sequence of characters (including empty)
 /// - `?` matches exactly one character
 /// - All other characters match literally (case-sensitive)
 ///
-/// This is intentionally simple — no `**`, no brace expansion, no character
-/// classes. For A2A policy patterns, `*` and `?` cover all practical cases.
+/// Uses an iterative NFA approach instead of recursive backtracking,
+/// eliminating stack growth and exponential worst-case in patterns
+/// like `*a*a*a*a`.
 fn glob_match(pattern: &str, text: &str) -> bool {
     // Fast paths
     if pattern == "*" {
@@ -415,65 +436,39 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         return pattern == text;
     }
 
-    // DP glob match — O(P×T) but P and T are short agent IDs
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
-    let (plen, tlen) = (p.len(), t.len());
 
-    // dp[j] = true means pattern[0..i] matches text[0..j]
-    let mut dp = vec![false; tlen + 1];
-    dp[0] = true;
+    let mut pi = 0; // pattern index
+    let mut ti = 0; // text index
+    let mut star_pi: Option<usize> = None; // position of last `*` in pattern
+    let mut star_ti = 0; // text position when we matched last `*`
 
-    // Initialize for leading `*`s
-    for i in 0..plen {
-        if p[i] == '*' {
-            // `*` can match empty string, so dp stays true
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            // Record `*` position for backtracking
+            star_pi = Some(pi);
+            star_ti = ti;
+            pi += 1; // try matching `*` against empty first
+        } else if let Some(sp) = star_pi {
+            // Backtrack: extend last `*` by one more character
+            star_ti += 1;
+            ti = star_ti;
+            pi = sp + 1;
         } else {
-            break;
-        }
-        // After consecutive `*`s, dp[0] remains true
-    }
-
-    // Simple recursive approach with memoization is cleaner for short strings
-    glob_match_recursive(&p, &t, 0, 0)
-}
-
-fn glob_match_recursive(pattern: &[char], text: &[char], pi: usize, ti: usize) -> bool {
-    if pi == pattern.len() {
-        return ti == text.len();
-    }
-
-    match pattern[pi] {
-        '*' => {
-            // Try matching zero or more characters
-            // Skip consecutive `*`s
-            let mut pi2 = pi;
-            while pi2 < pattern.len() && pattern[pi2] == '*' {
-                pi2 += 1;
-            }
-            // Try matching `*` against 0..remaining chars
-            for ti2 in ti..=text.len() {
-                if glob_match_recursive(pattern, text, pi2, ti2) {
-                    return true;
-                }
-            }
-            false
-        }
-        '?' => {
-            if ti < text.len() {
-                glob_match_recursive(pattern, text, pi + 1, ti + 1)
-            } else {
-                false
-            }
-        }
-        c => {
-            if ti < text.len() && text[ti] == c {
-                glob_match_recursive(pattern, text, pi + 1, ti + 1)
-            } else {
-                false
-            }
+            return false;
         }
     }
+
+    // Consume trailing `*`s in pattern
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+
+    pi == p.len()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

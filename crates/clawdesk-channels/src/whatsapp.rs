@@ -138,6 +138,7 @@ impl WhatsAppChannel {
                             channel: ChannelId::WhatsApp,
                         },
                         media: vec![],
+                        artifact_refs: vec![],
                         reply_context: None,
                         origin: clawdesk_types::message::MessageOrigin::WhatsApp {
                             phone_number: from.to_string(),

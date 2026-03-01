@@ -1,0 +1,45 @@
+[package]
+name = "clawdesk-sandbox"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Multi-modal sandbox isolation for ClawDesk agent tool execution"
+
+[features]
+default = ["subprocess", "workspace"]
+sandbox-wasm = ["wasmtime"]
+sandbox-docker = []
+subprocess = []
+workspace = []
+
+[dependencies]
+# Internal
+clawdesk-types = { workspace = true }
+
+# Async
+tokio = { workspace = true, features = ["process", "fs"] }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# WASM sandbox (optional, +15MB binary)
+wasmtime = { version = "29", optional = true }
+
+# Utilities
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

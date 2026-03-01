@@ -35,8 +35,9 @@
 //! └──────────────────────────────────────────────────────┘
 //! ```
 
-use crate::agent_card::{AgentCapability, AgentCard, AgentEndpoint, AgentAuth, AgentSkill};
-use crate::task::Task;
+use crate::agent_card::{AgentCard, AgentEndpoint, AgentAuth, AgentSkill};
+use crate::capability::CapabilityId;
+use crate::task::{CleanupPolicy, SpawnMode, Task};
 use serde::{Deserialize, Serialize};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -124,33 +125,20 @@ pub fn thread_agent_card(
         .and_then(|c| c.description.clone())
         .unwrap_or_else(|| format!("Thread agent: {}", info.title));
 
-    // Map capability strings → AgentCapability enum
+    // Map capability strings → CapabilityId enum (unified type system)
     let cap_source = config
         .map(|c| &c.capabilities)
         .filter(|c| !c.is_empty())
         .unwrap_or(&info.capabilities);
 
-    let capabilities: Vec<AgentCapability> = cap_source
+    let capabilities: Vec<CapabilityId> = cap_source
         .iter()
-        .map(|s| match s.as_str() {
-            "text-generation" | "text_generation" => AgentCapability::TextGeneration,
-            "code-execution" | "code_execution" => AgentCapability::CodeExecution,
-            "web-search" | "web_search" => AgentCapability::WebSearch,
-            "file-processing" | "file_processing" => AgentCapability::FileProcessing,
-            "image-processing" | "image_processing" => AgentCapability::ImageProcessing,
-            "audio-processing" | "audio_processing" => AgentCapability::AudioProcessing,
-            "api-integration" | "api_integration" => AgentCapability::ApiIntegration,
-            "data-management" | "data_management" => AgentCapability::DataManagement,
-            "mathematics" => AgentCapability::Mathematics,
-            "scheduling" => AgentCapability::Scheduling,
-            "messaging" => AgentCapability::Messaging,
-            other => AgentCapability::Custom(other.to_string()),
-        })
+        .filter_map(|s| CapabilityId::from_str_loose(s))
         .collect();
 
     // Default: every thread-agent can at least generate text
     let capabilities = if capabilities.is_empty() {
-        vec![AgentCapability::TextGeneration]
+        vec![CapabilityId::TextGeneration]
     } else {
         capabilities
     };
@@ -158,6 +146,14 @@ pub fn thread_agent_card(
     let max_tasks = config
         .and_then(|c| c.max_concurrent_tasks)
         .unwrap_or(5);
+
+    let cap_set = {
+        let mut cs = crate::capability::CapSet::empty();
+        for cap in &capabilities {
+            cs.insert(*cap);
+        }
+        cs.close()
+    };
 
     AgentCard {
         id: agent_id,
@@ -172,6 +168,7 @@ pub fn thread_agent_card(
         },
         auth: AgentAuth::None,
         capabilities,
+        cap_set,
         skills: vec![], // Skills are wired separately via SkillWiring
         protocol_versions: vec!["1.0".to_string()],
         max_concurrent_tasks: Some(max_tasks),
@@ -196,12 +193,12 @@ pub struct SpawnRequest {
     pub title: String,
     /// The task/prompt to give the sub-agent.
     pub task_prompt: String,
-    /// Spawn mode: `"run"` (fire-and-forget) or `"session"` (persistent).
-    #[serde(default = "default_run")]
-    pub spawn_mode: String,
-    /// Cleanup policy: `"keep"` or `"delete"`.
-    #[serde(default = "default_keep")]
-    pub cleanup: String,
+    /// Spawn mode: fire-and-forget or persistent.
+    #[serde(default)]
+    pub spawn_mode: SpawnMode,
+    /// Cleanup policy after task completion.
+    #[serde(default)]
+    pub cleanup: CleanupPolicy,
     /// Model override for the child agent.
     pub model: Option<String>,
     /// Capabilities for the child agent.
@@ -211,9 +208,6 @@ pub struct SpawnRequest {
     #[serde(default)]
     pub skills: Vec<String>,
 }
-
-fn default_run() -> String { "run".to_string() }
-fn default_keep() -> String { "keep".to_string() }
 
 /// Result of a spawn operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,11 +244,11 @@ pub fn create_spawn_task(
             "spawn_mode": req.spawn_mode,
         }),
         child_thread_id,
-        &req.spawn_mode,
+        req.spawn_mode,
     );
     task.session_key = Some(child_session_key.clone());
-    task.cleanup = req.cleanup.clone();
-    task.announce_on_complete = req.spawn_mode == "run";
+    task.cleanup = req.cleanup;
+    task.announce_on_complete = req.spawn_mode.announces_on_complete();
 
     SpawnResult {
         child_thread_id,
@@ -267,8 +261,7 @@ pub fn create_spawn_task(
 // Thread agent card registry (in-memory)
 // ═══════════════════════════════════════════════════════════════════════════
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+use dashmap::DashMap;
 
 /// Registry of per-thread agent cards.
 ///
@@ -278,9 +271,12 @@ use std::sync::RwLock;
 ///
 /// Supports both `u128` numeric thread IDs (internal) and string-based
 /// thread IDs (gateway UUID convention) for lookup.
+///
+/// Uses `DashMap` for per-shard concurrent access instead of a global
+/// `RwLock<HashMap>`, reducing contention in multi-thread scenarios.
 pub struct ThreadAgentRegistry {
     /// thread_id (hex or string) → AgentCard
-    cards: RwLock<HashMap<String, AgentCard>>,
+    cards: DashMap<String, AgentCard>,
     /// Gateway base URL for endpoint generation.
     gateway_base_url: String,
 }
@@ -288,7 +284,7 @@ pub struct ThreadAgentRegistry {
 impl ThreadAgentRegistry {
     pub fn new(gateway_base_url: impl Into<String>) -> Self {
         Self {
-            cards: RwLock::new(HashMap::new()),
+            cards: DashMap::new(),
             gateway_base_url: gateway_base_url.into(),
         }
     }
@@ -301,60 +297,44 @@ impl ThreadAgentRegistry {
     ) {
         let card = thread_agent_card(info, config, &self.gateway_base_url);
         let key = format!("{:032x}", info.thread_id);
-        if let Ok(mut cards) = self.cards.write() {
-            cards.insert(key, card);
-        }
+        self.cards.insert(key, card);
     }
 
     /// Register or update a thread's agent card directly, keyed by agent_id.
     pub fn upsert_card(&self, agent_id: &str, card: AgentCard) {
-        if let Ok(mut cards) = self.cards.write() {
-            cards.insert(agent_id.to_string(), card);
-        }
+        self.cards.insert(agent_id.to_string(), card);
     }
 
     /// Remove a thread's agent card by numeric ID.
     pub fn remove(&self, thread_id: u128) {
         let key = format!("{:032x}", thread_id);
-        if let Ok(mut cards) = self.cards.write() {
-            cards.remove(&key);
-        }
+        self.cards.remove(&key);
     }
 
     /// Remove a thread's agent card by string key.
     pub fn remove_by_key(&self, key: &str) {
-        if let Ok(mut cards) = self.cards.write() {
-            cards.remove(key);
-        }
+        self.cards.remove(key);
     }
 
     /// Get a thread's agent card by numeric ID.
     pub fn get(&self, thread_id: u128) -> Option<AgentCard> {
         let key = format!("{:032x}", thread_id);
-        self.cards.read().ok()?.get(&key).cloned()
+        self.cards.get(&key).map(|r| r.value().clone())
     }
 
     /// Get a thread's agent card by string key (agent_id or thread UUID).
     pub fn get_by_key(&self, key: &str) -> Option<AgentCard> {
-        self.cards.read().ok()?.get(key).cloned()
+        self.cards.get(key).map(|r| r.value().clone())
     }
 
     /// Get all registered agent cards.
     pub fn all_cards(&self) -> Vec<AgentCard> {
-        self.cards
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .cloned()
-            .collect()
+        self.cards.iter().map(|r| r.value().clone()).collect()
     }
 
     /// Number of registered thread-agents.
     pub fn count(&self) -> usize {
-        self.cards
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.cards.len()
     }
 }
 
@@ -406,8 +386,8 @@ mod tests {
 
         assert_eq!(card.id, "thread:code-review");
         assert_eq!(card.name, "Review PR #123");
-        assert!(card.capabilities.contains(&AgentCapability::TextGeneration));
-        assert!(card.capabilities.contains(&AgentCapability::CodeExecution));
+        assert!(card.capabilities.contains(&CapabilityId::TextGeneration));
+        assert!(card.capabilities.contains(&CapabilityId::CodeExecution));
         assert!(card.endpoint.url.contains("/a2a"));
     }
 
@@ -426,8 +406,8 @@ mod tests {
         assert_eq!(card.name, "Custom Agent Name");
         assert_eq!(card.description, "Overridden desc");
         // Config capabilities override thread capabilities
-        assert!(card.capabilities.contains(&AgentCapability::WebSearch));
-        assert!(!card.capabilities.contains(&AgentCapability::CodeExecution));
+        assert!(card.capabilities.contains(&CapabilityId::WebSearch));
+        assert!(!card.capabilities.contains(&CapabilityId::CodeExecution));
         assert_eq!(card.max_concurrent_tasks, Some(20));
     }
 
@@ -437,7 +417,7 @@ mod tests {
         info.capabilities = vec![];
         let card = thread_agent_card(&info, None, "http://localhost:18789");
 
-        assert_eq!(card.capabilities, vec![AgentCapability::TextGeneration]);
+        assert_eq!(card.capabilities, vec![CapabilityId::TextGeneration]);
     }
 
     #[test]
@@ -446,8 +426,8 @@ mod tests {
             child_agent_id: "summarizer".to_string(),
             title: "Summarize docs".to_string(),
             task_prompt: "Summarize the README".to_string(),
-            spawn_mode: "run".to_string(),
-            cleanup: "keep".to_string(),
+            spawn_mode: SpawnMode::Run,
+            cleanup: CleanupPolicy::Keep,
             model: None,
             capabilities: vec![],
             skills: vec![],
@@ -459,7 +439,7 @@ mod tests {
         assert_eq!(result.task.executor_id, "summarizer");
         assert_eq!(result.task.requester_id, "parent-agent");
         assert_eq!(result.task.thread_id, Some(2));
-        assert_eq!(result.task.spawn_mode, "run");
+        assert_eq!(result.task.spawn_mode, SpawnMode::Run);
         assert!(result.task.announce_on_complete);
     }
 
@@ -469,15 +449,15 @@ mod tests {
             child_agent_id: "assistant".to_string(),
             title: "Persistent helper".to_string(),
             task_prompt: "Help with code".to_string(),
-            spawn_mode: "session".to_string(),
-            cleanup: "keep".to_string(),
+            spawn_mode: SpawnMode::Session,
+            cleanup: CleanupPolicy::Keep,
             model: None,
             capabilities: vec![],
             skills: vec![],
         };
 
         let result = create_spawn_task("parent", 1, 2, &req);
-        assert_eq!(result.task.spawn_mode, "session");
+        assert_eq!(result.task.spawn_mode, SpawnMode::Session);
         assert!(!result.task.announce_on_complete);
     }
 

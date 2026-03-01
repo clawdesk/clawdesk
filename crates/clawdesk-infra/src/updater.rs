@@ -34,7 +34,7 @@ impl Default for UpdateConfig {
         Self {
             auto_check: true,
             check_interval_secs: 86_400, // Daily.
-            registry_url: "https://registry.npmjs.org/openclaw/latest".to_string(),
+            registry_url: "https://registry.npmjs.org/legacy/latest".to_string(),
             current_version: env!("CARGO_PKG_VERSION").to_string(),
             include_prerelease: false,
         }

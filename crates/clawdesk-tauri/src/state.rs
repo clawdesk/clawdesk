@@ -101,9 +101,13 @@ pub struct DesktopAgent {
     pub token_budget: usize,
     pub tokens_used: usize,
     pub source: String,
-    /// T8: Optional template ID this agent was created from.
+    /// Optional template ID this agent was created from.
     #[serde(default)]
     pub template_id: Option<String>,
+    /// Channels this agent is assigned to (e.g. ["telegram", "discord"]).
+    /// When empty, the agent can serve any channel (default/fallback).
+    #[serde(default)]
+    pub channels: Vec<String>,
 }
 
 impl Default for DesktopAgent {
@@ -124,6 +128,7 @@ impl Default for DesktopAgent {
             tokens_used: 0,
             source: String::new(),
             template_id: None,
+            channels: Vec::new(),
         }
     }
 }
@@ -174,6 +179,8 @@ pub enum TauriAgentEvent {
     Response { content: String, finish_reason: String },
     ToolStart { name: String, args: String },
     ToolEnd { name: String, success: bool, duration_ms: u64 },
+    ToolBlocked { name: String, reason: String },
+    ToolExecutionResult { name: String, tool_call_id: String, is_error: bool, preview: String, duration_ms: u64 },
     Compaction { level: String, tokens_before: usize, tokens_after: usize },
     StreamChunk { text: String, done: bool },
     ThinkingChunk { text: String },
@@ -224,7 +231,7 @@ pub struct PipelineNodeDescriptor {
     pub condition: Option<String>,
     pub x: f64,
     pub y: f64,
-    /// T9 FIX: Step-specific configuration. Contains user-configured values:
+    /// Step-specific configuration. Contains user-configured values:
     /// - For agent steps: `prompt` (custom system prompt fragment), `max_rounds`
     /// - For gate steps: `expression` (evaluation expression)
     /// - For webhook steps: `url`, `method`, `headers`
@@ -372,6 +379,188 @@ impl Default for CompactionInfo {
     }
 }
 
+// ─── Documented Lock Ordering & Domain Aggregates ─────────────
+//
+// AppState is a large god-object holding all application-wide shared state.
+// To prevent deadlocks and reduce contention, locks MUST be acquired in the
+// following canonical order. Never acquire a higher-numbered lock while
+// holding a lower-numbered one.
+//
+// ┌─────────────────────────────────────────────────────────────────────┐
+// │ LOCK ORDERING (always acquire in ascending order)                  │
+// │                                                                    │
+// │ See also: clawdesk_types::ordered_lock::levels for numeric         │
+// │ constants that can be used with OrderedRwLock / OrderedMutex       │
+// │ to enforce this ordering at debug time.                            │
+// ├──────┬──────────────────────────────────────────────────────────────┤
+// │  L1  │ sessions (SessionCache — internal Mutex)                    │
+// │  L2  │ agents (RwLock)                                             │
+// │  L3  │ active_chat_runs (tokio::RwLock)                            │
+// │  L4  │ provider_registry (Arc<RwLock>)                             │
+// │ L4b  │ skill_registry (RwLock) — held with L2 in get_health        │
+// │  L5  │ channel_registry (Arc<RwLock>)                              │
+// │  L6  │ a2a_tasks (tokio::RwLock)                                   │
+// │ L6b  │ agent_directory (Arc<RwLock>)                                │
+// │  L7  │ model_costs / traces / pipelines (RwLock) — metrics group   │
+// │  L8  │ identities (RwLock)                                         │
+// │ L8b  │ negotiator (Arc<RwLock>)                                     │
+// │  L9  │ channel_configs / channel_provider (RwLock) — channel cfg   │
+// │ L9b  │ integration_registry (RwLock) — held in extension commands  │
+// │ L9c  │ credential_vault (RwLock) — always after L9b                │
+// │ L9d  │ health_monitor (RwLock) — always after L9b                  │
+// │ L10  │ mdns_advertiser / peer_registry / pairing_session           │
+// │ L11  │ notification_history / clipboard_history / journal_entries   │
+// │ L12  │ canvases / context_guards / prompt_manifests                │
+// │ L13  │ channel_bindings / observability_config                     │
+// │ L13b │ mcp_client (RwLock) — single-lock usage only                │
+// │ L13c │ sandbox_dispatcher (RwLock) — single-lock usage only        │
+// │ L14  │ whisper_engine (RwLock)                                     │
+// │ L14b │ audio_recorder (parking_lot::Mutex) — always last           │
+// └──────┴──────────────────────────────────────────────────────────────┘
+//
+// Domain aggregates (planned — accessor methods below provide the migration
+// path without changing call sites):
+//
+//   • StorageAggregate    — soch_store, thread_store, semantic_cache, trace_store,
+//                           checkpoint_store, knowledge_graph, temporal_graph,
+//                           policy_engine, atomic_writer, agent_registry
+//   • MemoryAggregate     — memory, embedding_provider
+//   • ProviderAggregate   — provider_registry, negotiator, turn_router
+//   • ChannelAggregate    — channel_registry, channel_factory, channel_configs,
+//                           channel_provider, channel_bindings, channel_dock,
+//                           last_channel_origins
+//   • AgentAggregate      — agents, sessions, active_chat_runs, session_lanes,
+//                           llm_concurrency, sub_mgr, durable_runner
+//   • MetricsAggregate    — total_cost_today, total_input_tokens, total_output_tokens,
+//                           model_costs, last_cost_reset_date, metrics_aggregator,
+//                           traces, started_at
+//   • SecurityAggregate   — identities, server_secret, invites, acl_manager,
+//                           skill_verifier, sandbox_engine, approval_manager
+//   • DiscoveryAggregate  — mdns_advertiser, pairing_session, peer_registry,
+//                           agent_directory
+//   • MediaAggregate      — media_pipeline, artifact_pipeline, audio_recorder,
+//                           whisper_engine, voice_wake
+//   • PluginAggregate     — plugin_host, hook_manager
+//   • UIAggregate         — canvases, notification_history, clipboard_history,
+//                           context_guards, prompt_manifests
+//
+// ──────────────────────────────────────────────────────────────────────────
+
+// ── T8 FIX: Bounded LRU session cache ──────────────────────────────────
+//
+// Replaces `RwLock<HashMap<String, ChatSession>>` with a bounded LRU cache
+// that evicts the least-recently-used sessions. Memory is bounded at
+// O(capacity × avg_session_size) regardless of total session count.
+// Hot-path latency is O(1). Cache misses are expected to trigger SochDB
+// reads (not yet wired — sessions loaded from persistence on startup).
+//
+// Using `parking_lot::Mutex<LruCache>` because `lru::LruCache::get()`
+// requires `&mut self` to update access ordering. A single Mutex is fine
+// since session operations are brief (no I/O under the lock).
+
+/// Maximum number of sessions to keep in the hot cache.
+/// Sessions beyond this are evicted (least recently used first).
+/// With average ~50KB per session, 200 sessions ≈ 10MB — bounded.
+const SESSION_CACHE_CAPACITY: usize = 200;
+
+/// Thread-safe bounded LRU session cache.
+///
+/// All operations are O(1) amortized. The cache evicts the least-recently-used
+/// sessions when capacity is exceeded. Wraps `lru::LruCache` in a `parking_lot::Mutex`
+/// because every access (including reads) must update the LRU ordering.
+pub struct SessionCache {
+    inner: parking_lot::Mutex<lru::LruCache<String, ChatSession>>,
+}
+
+impl SessionCache {
+    pub fn new() -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(SESSION_CACHE_CAPACITY).unwrap(),
+            )),
+        }
+    }
+
+    /// Get a session by ID, updating LRU ordering. Returns a clone.
+    pub fn get(&self, id: &str) -> Option<ChatSession> {
+        self.inner.lock().get(id).cloned()
+    }
+
+    /// Peek at a session without updating LRU ordering.
+    pub fn peek(&self, id: &str) -> Option<ChatSession> {
+        self.inner.lock().peek(id).cloned()
+    }
+
+    /// Insert or update a session.
+    pub fn insert(&self, id: String, session: ChatSession) {
+        self.inner.lock().put(id, session);
+    }
+
+    /// Remove a session by ID.
+    pub fn remove(&self, id: &str) -> Option<ChatSession> {
+        self.inner.lock().pop(id)
+    }
+
+    /// Check if a session exists.
+    pub fn contains(&self, id: &str) -> bool {
+        self.inner.lock().contains(id)
+    }
+
+    /// Number of cached sessions.
+    pub fn len(&self) -> usize {
+        self.inner.lock().len()
+    }
+
+    /// Remove all sessions from the cache.
+    pub fn clear(&self) {
+        self.inner.lock().clear();
+    }
+
+    /// Get all cached sessions as a Vec (for serialization/persistence).
+    /// Does NOT update LRU ordering.
+    pub fn values(&self) -> Vec<ChatSession> {
+        self.inner.lock().iter().map(|(_, v)| v.clone()).collect()
+    }
+
+    /// Get all cached sessions as (id, session) pairs.
+    /// Does NOT update LRU ordering.
+    pub fn entries(&self) -> Vec<(String, ChatSession)> {
+        self.inner.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    /// Load multiple sessions (e.g., from persistence). Oldest-first ordering
+    /// means the last item in the iterator becomes most-recently-used.
+    pub fn load_bulk(&self, sessions: impl IntoIterator<Item = (String, ChatSession)>) {
+        let mut guard = self.inner.lock();
+        for (id, session) in sessions {
+            guard.put(id, session);
+        }
+    }
+
+    /// Mutate a session in-place. Returns true if the session was found.
+    pub fn mutate<F>(&self, id: &str, f: F) -> bool
+    where
+        F: FnOnce(&mut ChatSession),
+    {
+        let mut guard = self.inner.lock();
+        if let Some(session) = guard.get_mut(id) {
+            f(session);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl std::fmt::Debug for SessionCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionCache")
+            .field("len", &self.len())
+            .field("capacity", &SESSION_CACHE_CAPACITY)
+            .finish()
+    }
+}
+
 // Application State with real backend services
 
 pub struct AppState {
@@ -403,12 +592,12 @@ pub struct AppState {
     // Uses SochMemoryBackend for full integration: atomic writes, graph nodes,
     // temporal edges, policy checks, and trace spans.
     pub memory: Arc<MemoryManager<SochMemoryBackend>>,
-    /// Shared embedding provider — used by semantic cache to pre-compute query embeddings (Task 2).
+    /// Shared embedding provider — used by semantic cache to pre-compute query embeddings.
     pub embedding_provider: Arc<dyn EmbeddingProvider>,
 
     // Real backend services
     pub skill_registry: RwLock<SkillRegistry>,
-    pub provider_registry: RwLock<ProviderRegistry>,
+    pub provider_registry: Arc<RwLock<ProviderRegistry>>,
     pub tool_registry: Arc<ToolRegistry>,
     pub channel_registry: Arc<RwLock<ChannelRegistry>>,
     /// Factory for creating channel adapters from config maps.
@@ -423,10 +612,10 @@ pub struct AppState {
     pub audit_logger: Arc<AuditLogger>,
 
     // Agent & session management (hot cache — persisted to SochDB)
-    pub agents: RwLock<HashMap<String, DesktopAgent>>,
+    pub agents: Arc<RwLock<HashMap<String, DesktopAgent>>>,
     pub identities: RwLock<HashMap<String, IdentityContract>>,
     pub server_secret: ServerSecret,
-    pub sessions: RwLock<HashMap<String, ChatSession>>,
+    pub sessions: SessionCache,
 
     // Infrastructure
     pub invites: RwLock<InviteManager>,
@@ -458,8 +647,13 @@ pub struct AppState {
     pub plugin_host: Option<Arc<PluginHost>>,
 
     // ── A2A Protocol ──
-    pub agent_directory: RwLock<AgentDirectory>,
-    pub a2a_tasks: tokio::sync::RwLock<HashMap<String, clawdesk_acp::Task>>,
+    pub agent_directory: Arc<RwLock<AgentDirectory>>,
+    pub a2a_tasks: Arc<tokio::sync::RwLock<HashMap<String, clawdesk_acp::Task>>>,
+
+    /// Last inbound message origin per channel — enables cross-channel messaging.
+    /// When `message_send` is called with `to="default"`, we use the last known
+    /// origin for the target channel so the agent doesn't need internal IDs.
+    pub last_channel_origins: Arc<RwLock<HashMap<clawdesk_types::channel::ChannelId, clawdesk_types::message::MessageOrigin>>>,
 
     // ── OAuth2 + PKCE ──
     pub oauth_flow_manager: Arc<OAuthFlowManager>,
@@ -475,7 +669,7 @@ pub struct AppState {
 
     // ── Observability ──
     pub observability_config: RwLock<ObservabilityConfig>,
-    /// T25: Metrics aggregator for latency, tokens, cost tracking.
+    /// Metrics aggregator for latency, tokens, cost tracking.
     pub metrics_aggregator: Arc<clawdesk_observability::MetricsAggregator>,
 
     // ── Notifications (hot cache — persisted to SochDB) ──
@@ -519,7 +713,7 @@ pub struct AppState {
     // ── Canvas (hot cache — persisted to SochDB) ──
     pub canvases: RwLock<HashMap<String, Canvas>>,
 
-    // ── Cron Scheduling (T5) ──
+    // ── Cron Scheduling ──
     pub cron_manager: Arc<CronManager>,
 
     // ── T8: Life OS Template Registry ──
@@ -534,24 +728,24 @@ pub struct AppState {
     // assistant messages and corrupted conversation history.
     pub session_lanes: clawdesk_agents::session_lane::SessionLaneManager,
 
-    // ── GAP-3 FIX: Global LLM concurrency bound ──
+    // ── Global LLM concurrency bound ──
     // Limits the total number of concurrent LLM calls across all sessions.
     // Without this, unbounded parallel requests can overwhelm API rate limits
     // and exhaust memory. The semaphore is acquired after the per-session lane
     // guard and before `runner.run()` / `runner.run_with_failover()`.
     pub llm_concurrency: Arc<tokio::sync::Semaphore>,
 
-    // ── GAP-4/1 FIX: Channel dock for prompt injection ──
+    // ── /1 FIX: Channel dock for prompt injection ──
     // Lightweight metadata registry of all known channels. Used to construct
     // `ChannelContext` for the agent runner without requiring a live channel.
     pub channel_dock: Arc<clawdesk_channel::channel_dock::ChannelDock>,
 
-    // ── GAP-7 FIX: Hook manager for plugin lifecycle hooks ──
+    // ── Hook manager for plugin lifecycle hooks ──
     // Dispatches lifecycle hooks (MessageReceive, BeforeAgentStart, etc.) to
     // registered plugins. Shared across all agent runs.
     pub hook_manager: Arc<clawdesk_plugin::HookManager>,
 
-    // ── GAP-4 FIX: Channel binding entries for multi-channel routing ──
+    // ── Channel binding entries for multi-channel routing ──
     // Maps channel+account combinations to specific agent IDs. When empty
     // (default for desktop), the requested agent_id is used directly.
     pub channel_bindings: RwLock<Vec<clawdesk_domain::routing::ChannelBindingEntry>>,
@@ -566,13 +760,61 @@ pub struct AppState {
     // Tools whose required level exceeds platform capability are blocked.
     pub sandbox_engine: Arc<clawdesk_security::sandbox_policy::SandboxPolicyEngine>,
 
-    // ── GAP-1 FIX: Sub-agent lifecycle manager ──
+    // ── Sub-agent lifecycle manager ──
     // Tracks all running sub-agents (static and ephemeral), enforcing global
     // depth limits (default 5), concurrency caps (default 50), and deferred GC.
     pub sub_mgr: Arc<clawdesk_gateway::subagent_manager::SubAgentManager>,
+
+    // ── GAP-G: Per-turn dynamic model routing ──
+    // Bridges TaskRouter (LinUCB bandit) with ModelCatalog (capability index)
+    // to select the optimal model on every turn. Thread-safe, shared across
+    // all agent runs. The bandit learns from reward feedback after each turn.
+    pub turn_router: Arc<clawdesk_agents::TurnRouter>,
+
+    // ── GAP-D: Reactive event bus ──
+    // Central pub/sub event bus — typed events, WFQ priority dispatch,
+    // pattern-based subscriptions mapping to pipeline triggers.
+    pub event_bus: Arc<clawdesk_bus::dispatch::EventBus>,
+
+    // ── GAP-E: Cross-channel artifact pipeline ──
+    // Content-addressed artifact store backed by MediaCache. Ingests media
+    // from any channel, ACP artifacts, and provides unified cross-channel
+    // artifact references for agent context injection.
+    pub artifact_pipeline: Arc<clawdesk_media::ArtifactPipeline>,
+
+    // ── GAP-F: Multi-agent shared state ──
+    // Scoped blackboard for multi-agent collaboration. Creates pipeline-scoped,
+    // delegation-scoped, or conversation-scoped KV stores that agents can
+    // read/write during execution.
+    pub shared_state_mgr: Arc<clawdesk_agents::SharedStateManager>,
+
+    // ── Sandbox: Multi-modal code execution isolation ──
+    // Dispatches execution requests to the best available sandbox backend
+    // (subprocess, Docker, Wasm) based on requested isolation level.
+    pub sandbox_dispatcher: tokio::sync::RwLock<clawdesk_sandbox::SandboxDispatcher>,
+
+    // ── MCP: Model Context Protocol client ──
+    // Multi-server connection manager for MCP tool servers. Manages stdio
+    // and SSE transports, tool discovery, and namespaced tool invocation.
+    pub mcp_client: tokio::sync::RwLock<clawdesk_mcp::McpClient>,
+
+    // ── Extensions: Integration registry + health monitoring ──
+    // 25+ bundled integrations (GitHub, Slack, Jira, AWS, etc.) with
+    // credential requirements, OAuth config, and health check URLs.
+    pub integration_registry: tokio::sync::RwLock<clawdesk_extensions::IntegrationRegistry>,
+
+    // ── Extensions: AES-256-GCM encrypted credential vault ──
+    // Stores API keys, tokens, and secrets encrypted at rest. Requires
+    // master password to unlock. PKCE verifiers also stored here.
+    pub credential_vault: tokio::sync::RwLock<clawdesk_extensions::CredentialVault>,
+
+    // ── Extensions: Health monitor for integration endpoints ──
+    // Tracks health state, latency, consecutive failures, and exponential
+    // backoff for all registered integration health check URLs.
+    pub health_monitor: tokio::sync::RwLock<clawdesk_extensions::HealthMonitor>,
 }
 
-// ── Cron executor glue (T5: wire CronManager to pipeline/agent execution) ──
+// ── Cron executor glue ──
 
 /// AgentExecutor implementation for CronManager.
 /// Executes cron-triggered prompts using a configured LLM provider.
@@ -580,6 +822,8 @@ struct CronAgentExecutor {
     provider: Arc<dyn Provider>,
     tool_registry: Arc<ToolRegistry>,
     cancel: tokio_util::sync::CancellationToken,
+    /// GAP-B: Memory manager for automatic recall during cron executions.
+    memory: Arc<MemoryManager<SochMemoryBackend>>,
 }
 
 #[async_trait::async_trait]
@@ -593,12 +837,42 @@ impl clawdesk_cron::executor::AgentExecutor for CronAgentExecutor {
             response_reserve: 4_096,
             ..Default::default()
         };
+
+        // GAP-B: Build memory recall callback for cron executions
+        let memory_recall_fn: clawdesk_agents::MemoryRecallFn = {
+            let mem = Arc::clone(&self.memory);
+            Arc::new(move |query: String| {
+                let mem = Arc::clone(&mem);
+                Box::pin(async move {
+                    match mem.recall(&query, Some(5)).await {
+                        Ok(results) => results.into_iter().filter_map(|r| {
+                            let text = r.content?;
+                            if text.is_empty() { return None; }
+                            Some(clawdesk_agents::MemoryRecallResult {
+                                relevance: r.score as f64,
+                                source: r.metadata.get("source")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                                content: text,
+                            })
+                        }).collect(),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Cron memory recall failed");
+                            vec![]
+                        }
+                    }
+                })
+            })
+        };
+
         let runner = AgentRunner::new(
             Arc::clone(&self.provider),
             Arc::clone(&self.tool_registry),
             config,
             self.cancel.clone(),
-        );
+        )
+        .with_memory_recall(memory_recall_fn);
+
         let history = vec![clawdesk_providers::ChatMessage::new(
             clawdesk_providers::MessageRole::User,
             prompt.to_string(),
@@ -656,14 +930,19 @@ impl clawdesk_cron::executor::AgentExecutor for NoopAgentExecutor {
 // ── Channel MessageSink — routes inbound channel messages through the agent ──
 
 /// Maximum number of messages to keep per sender in channel conversation history.
-/// Modeled after zeroclaw's MAX_CHANNEL_HISTORY. When exceeded, the oldest
+/// When exceeded, the oldest
 /// messages are dropped (FIFO compaction).
 const MAX_CHANNEL_HISTORY: usize = 50;
 
 /// Per-sender conversation history for channel messages.
-/// Key: "{channel_id}:{sender_id}" → Vec<ChatMessage>
+/// Key: "{channel_id}:{sender_id}" → VecDeque<ChatMessage>
+///
+/// Uses `DashMap` (sharded concurrent map) instead of a global `tokio::sync::Mutex`
+/// to eliminate serialization across unrelated senders. Uses `VecDeque` (ring buffer)
+/// instead of `Vec` to make FIFO compaction O(1) via `pop_front()` instead of
+/// O(n) via `Vec::remove(0)`.
 type ConversationHistoryMap =
-    Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<clawdesk_providers::ChatMessage>>>>;
+    Arc<dashmap::DashMap<String, std::collections::VecDeque<clawdesk_providers::ChatMessage>>>;
 
 /// `MessageSink` implementation that processes inbound messages from external
 /// channels (Discord, Telegram, Slack, etc.) through the agent pipeline and
@@ -679,7 +958,7 @@ type ConversationHistoryMap =
 /// stale startup snapshot — agents added/modified via the UI are visible
 /// immediately.
 ///
-/// Maintains per-sender conversation history (modeled after zeroclaw) so
+/// Maintains per-sender conversation history so
 /// multi-turn conversations work naturally in Discord, Telegram, etc.
 pub(crate) struct ChannelMessageSink {
     pub negotiator: Arc<RwLock<ProviderNegotiator>>,
@@ -689,6 +968,8 @@ pub(crate) struct ChannelMessageSink {
     pub cancel: tokio_util::sync::CancellationToken,
     /// Per-sender conversation history — keyed by "{channel}:{sender_id}".
     pub conversation_histories: ConversationHistoryMap,
+    /// Last inbound origin per channel — enables cross-channel message_send("default").
+    pub last_channel_origins: Arc<RwLock<HashMap<clawdesk_types::channel::ChannelId, clawdesk_types::message::MessageOrigin>>>,
 }
 
 impl ChannelMessageSink {
@@ -735,14 +1016,38 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             "Inbound channel message received — routing to agent"
         );
 
-        // 1. Find the default agent (first registered agent) — read LIVE from AppState
+        // Track the last origin for this channel so cross-channel message_send
+        // can resolve "default" targets without requiring internal IDs.
+        // Persist to SochDB so origins survive app restarts.
+        if let Ok(mut guard) = self.last_channel_origins.write() {
+            guard.insert(channel_id, msg.origin.clone());
+            // Persist the full map to SochDB (cheap: small JSON, infrequent writes)
+            if let Ok(bytes) = serde_json::to_vec(&*guard) {
+                let state = self.app_handle.state::<AppState>();
+                if let Err(e) = state.soch_store.put_durable("channel_origins", &bytes) {
+                    warn!(error = %e, "Failed to persist channel origins to SochDB");
+                }
+            }
+        }
+
+        // 1. Find the best agent for this channel.
+        //    Priority: agent whose `channels` list contains this channel_id,
+        //    then fallback to any agent with an empty channels list (wildcard),
+        //    then fallback to first agent.
+        let channel_str = format!("{}", channel_id);
         let agent = {
             let state = self.app_handle.state::<AppState>();
             let result = match state.agents.read() {
                 Ok(agents) => {
                     let count = agents.len();
-                    info!(agent_count = count, "Available agents for channel message");
-                    agents.values().next().cloned()
+                    info!(agent_count = count, channel = %channel_str, "Resolving agent for channel");
+                    // Best match: agent explicitly assigned to this channel
+                    let explicit = agents.values().find(|a| {
+                        a.channels.iter().any(|c| c.eq_ignore_ascii_case(&channel_str))
+                    });
+                    // Fallback: agent with no channel restrictions (wildcard)
+                    let wildcard = agents.values().find(|a| a.channels.is_empty());
+                    explicit.or(wildcard).or_else(|| agents.values().next()).cloned()
                 }
                 Err(e) => {
                     error!("Failed to read agents: {e}");
@@ -886,15 +1191,20 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             .map(|s| s.to_lowercase())
             .collect();
 
+        let channel_desc = format!("{} channel", channel_str);
+        let available_ch_names: Vec<String> = app_state.channel_registry.read()
+            .map(|reg| reg.list().iter().map(|id| format!("{}", id).to_lowercase()).collect())
+            .unwrap_or_default();
         let pipeline_result = crate::engine::build_prompt_pipeline(
             crate::engine::PromptPipelineInput {
                 user_content: &msg.body,
                 persona: &agent.persona,
                 model_name: &effective_model,
                 agent_skill_ids: &agent_skill_set,
-                channel_id: Some("discord"),
-                channel_description: "Discord channel",
+                channel_id: Some(&channel_str),
+                channel_description: &channel_desc,
                 budget: clawdesk_domain::prompt_builder::PromptBudget::default(),
+                available_channels: available_ch_names,
             },
             &app_state.memory,
             &active_skills,
@@ -913,7 +1223,7 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             ..Default::default()
         };
 
-        // Per-sender conversation history (modeled after zeroclaw).
+        // Per-sender conversation history.
         // Key: "{channel}:{sender_id}" for per-user threads.
         let history_key = format!("{channel_id}:{}", msg.sender.id);
         let user_msg = clawdesk_providers::ChatMessage::new(
@@ -922,16 +1232,14 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
         );
 
         // Build the history: existing conversation + current user message
-        let mut history = {
-            let mut histories = self.conversation_histories.lock().await;
-            let entry = histories.entry(history_key.clone()).or_default();
-            entry.push(user_msg);
-            // FIFO compaction — keep the most recent MAX_CHANNEL_HISTORY messages
-            if entry.len() > MAX_CHANNEL_HISTORY {
-                let excess = entry.len() - MAX_CHANNEL_HISTORY;
-                entry.drain(..excess);
+        let mut history: Vec<clawdesk_providers::ChatMessage> = {
+            let mut entry = self.conversation_histories.entry(history_key.clone()).or_default();
+            entry.push_back(user_msg);
+            // FIFO compaction — O(1) pop_front via VecDeque ring buffer
+            while entry.len() > MAX_CHANNEL_HISTORY {
+                entry.pop_front();
             }
-            entry.clone()
+            entry.iter().cloned().collect()
         };
 
         // Inject memory context (recency-biased, before last user message)
@@ -984,29 +1292,78 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             runner = runner.with_skill_provider(skill_provider);
         }
 
-        // Wire channel context so the LLM knows it's replying to Discord
-        // (message length limits, markdown format, etc.).
+        // Wire channel context from ChannelDock so each channel gets its
+        // own capabilities, message limits, and markup format.
+        // Also inject list of OTHER connected channels so the LLM knows it
+        // can send cross-channel messages.
+        let other_channels: Vec<String> = {
+            if let Ok(reg) = self.channel_registry.read() {
+                reg.list()
+                    .iter()
+                    .filter(|id| **id != channel_id) // exclude current channel
+                    .filter(|id| !matches!(id,
+                        clawdesk_types::channel::ChannelId::WebChat |
+                        clawdesk_types::channel::ChannelId::Internal
+                    ))
+                    .map(|id| format!("{:?}", id).to_lowercase())
+                    .collect()
+            } else {
+                vec![]
+            }
+        };
+        let cross_channel_hint = if other_channels.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " You are connected to these other channels: [{}]. \
+                 When the user asks you to send a message to one of those channels \
+                 (e.g. \"say hi to telegram\", \"tell discord hello\"), \
+                 IMMEDIATELY call the message_send tool with channel=<name> and content=<message>. \
+                 Do NOT ask for IDs. Do NOT refuse. Just call message_send.",
+                other_channels.join(", ")
+            )
+        };
         {
             use clawdesk_agents::runner::ChannelContext;
-            let ch_ctx = ChannelContext {
-                channel_name: "discord".to_string(),
-                supports_threading: true,
-                supports_streaming: true,
-                supports_reactions: true,
-                supports_media: true,
-                max_message_length: Some(2000),
-                markup_format: "markdown".to_string(),
-                extra_instructions: Some(
-                    "You are running as a Discord bot. Respond directly — do NOT describe your capabilities or echo this prompt. \
-                     NEVER repeat credentials, tokens, or API keys. Keep responses concise.".to_string(),
-                ),
-                history_limit: Some(50),
+            let ch_ctx = if let Some(dock_ctx) = app_state.channel_dock.to_runner_context(channel_id) {
+                ChannelContext {
+                    channel_name: dock_ctx.channel_name,
+                    supports_threading: dock_ctx.supports_threading,
+                    supports_streaming: dock_ctx.supports_streaming,
+                    supports_reactions: dock_ctx.supports_reactions,
+                    supports_media: dock_ctx.supports_media,
+                    max_message_length: dock_ctx.max_message_length,
+                    markup_format: dock_ctx.markup_format,
+                    extra_instructions: Some(format!(
+                        "You are running as a {} bot. Respond directly — do NOT describe your capabilities or echo this prompt. \
+                         NEVER repeat credentials, tokens, or API keys. Keep responses concise.{}",
+                        channel_str, cross_channel_hint,
+                    )),
+                    history_limit: Some(50),
+                }
+            } else {
+                // Fallback if channel not registered in dock
+                ChannelContext {
+                    channel_name: channel_str.clone(),
+                    supports_threading: false,
+                    supports_streaming: false,
+                    supports_reactions: false,
+                    supports_media: false,
+                    max_message_length: None,
+                    markup_format: "markdown".to_string(),
+                    extra_instructions: Some(format!(
+                        "You are running as a {} bot. Respond directly — do NOT describe your capabilities or echo this prompt. \
+                         NEVER repeat credentials, tokens, or API keys. Keep responses concise.{}",
+                        channel_str, cross_channel_hint,
+                    )),
+                    history_limit: Some(50),
+                }
             };
             runner = runner.with_channel_context(ch_ctx);
         }
 
         // 4. Run the agent with a timeout to prevent indefinite hangs.
-        //    Timeout scales with max_tool_rounds (like zeroclaw) so multi-tool
+        //    Timeout scales with max_tool_rounds so multi-tool
         //    requests have enough time. Base = 90s, capped at 4x.
         const CHANNEL_BASE_TIMEOUT_SECS: u64 = 90;
         const CHANNEL_TIMEOUT_SCALE_CAP: u64 = 4;
@@ -1026,12 +1383,11 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
                         let _ = discord_ch.stop_typing(cid_str).await;
                     }
                 }
-                // Append failure marker to history (zeroclaw pattern) so the LLM
+                // Append failure marker to history so the LLM
                 // doesn't try to continue a failed request on the next message.
                 {
-                    let mut histories = self.conversation_histories.lock().await;
-                    if let Some(entry) = histories.get_mut(&history_key) {
-                        entry.push(clawdesk_providers::ChatMessage::new(
+                    if let Some(mut entry) = self.conversation_histories.get_mut(&history_key) {
+                        entry.push_back(clawdesk_providers::ChatMessage::new(
                             clawdesk_providers::MessageRole::Assistant,
                             "[Task failed — not continuing this request]",
                         ));
@@ -1055,11 +1411,10 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
                         let _ = discord_ch.stop_typing(cid_str).await;
                     }
                 }
-                // Append timeout marker to history (zeroclaw pattern)
+                // Append timeout marker to history
                 {
-                    let mut histories = self.conversation_histories.lock().await;
-                    if let Some(entry) = histories.get_mut(&history_key) {
-                        entry.push(clawdesk_providers::ChatMessage::new(
+                    if let Some(mut entry) = self.conversation_histories.get_mut(&history_key) {
+                        entry.push_back(clawdesk_providers::ChatMessage::new(
                             clawdesk_providers::MessageRole::Assistant,
                             "[Task timed out — not continuing this request]",
                         ));
@@ -1081,16 +1436,14 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
 
         // Append assistant response to conversation history
         {
-            let mut histories = self.conversation_histories.lock().await;
-            if let Some(entry) = histories.get_mut(&history_key) {
-                entry.push(clawdesk_providers::ChatMessage::new(
+            if let Some(mut entry) = self.conversation_histories.get_mut(&history_key) {
+                entry.push_back(clawdesk_providers::ChatMessage::new(
                     clawdesk_providers::MessageRole::Assistant,
                     &*response.content,
                 ));
-                // Compaction after adding assistant response
-                if entry.len() > MAX_CHANNEL_HISTORY {
-                    let excess = entry.len() - MAX_CHANNEL_HISTORY;
-                    entry.drain(..excess);
+                // O(1) compaction via VecDeque ring buffer
+                while entry.len() > MAX_CHANNEL_HISTORY {
+                    entry.pop_front();
                 }
             }
         }
@@ -1178,7 +1531,8 @@ impl clawdesk_agents::runner::ApprovalGate for TauriApprovalGate {
         &self,
         tool_name: &str,
         arguments: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<clawdesk_agents::runner::ApprovalDecision, String> {
+        use clawdesk_agents::runner::ApprovalDecision;
         use clawdesk_security::RiskLevel;
         use tauri::Emitter;
 
@@ -1210,10 +1564,12 @@ impl clawdesk_agents::runner::ApprovalGate for TauriApprovalGate {
             Ok(status) => {
                 use clawdesk_security::ApprovalStatus;
                 match status {
-                    ApprovalStatus::Approved { .. } => Ok(true),
-                    ApprovalStatus::Denied { .. } => Ok(false),
-                    ApprovalStatus::TimedOut { .. } => Ok(false),
-                    ApprovalStatus::Pending => Ok(false),
+                    // TODO: When the UI supports richer approval options,
+                    // map them to AllowForSession / DenyForSession / EditAndRerun.
+                    ApprovalStatus::Approved { .. } => Ok(ApprovalDecision::Allow),
+                    ApprovalStatus::Denied { .. } => Ok(ApprovalDecision::Deny),
+                    ApprovalStatus::TimedOut { .. } => Ok(ApprovalDecision::Deny),
+                    ApprovalStatus::Pending => Ok(ApprovalDecision::Deny),
                 }
             }
             Err(e) => Err(format!("Approval error: {:?}", e)),
@@ -1299,14 +1655,14 @@ impl AppState {
         // Tiered provider: tries cloud APIs → Ollama → auto-degrades to FTS-only.
         // Memory search always works, even without any API key or Ollama install.
         let embedding: Arc<dyn EmbeddingProvider> = build_tiered_provider();
-        let embedding_for_state = embedding.clone(); // Task 2: shared with semantic cache
+        let embedding_for_state = embedding.clone(); // shared with semantic cache
         info!("Tiered embedding provider ready — memory always has FTS fallback");
 
         // ── MemoryManager<SochMemoryBackend> ─────────────────────────
         // SochMemoryBackend wraps SochStore + all SochDB advanced modules
         // (AtomicMemoryWriter, GraphOverlay, TemporalGraphOverlay, PolicyEngine, TraceStore)
-        // enabling atomic writes (Task 1), graph nodes (Task 7), temporal edges (Task 5),
-        // policy checks (Task 9), and trace spans (Task 8) in the memory pipeline.
+        // enabling atomic writes, graph nodes, temporal edges,
+        // policy checks, and trace spans in the memory pipeline.
         let soch_memory_backend = Arc::new(SochMemoryBackend::new(soch_store.clone()));
         let memory_config = MemoryConfig::default();
         let memory = Arc::new(MemoryManager::new(
@@ -1427,12 +1783,28 @@ impl AppState {
                 });
             clawdesk_agents::builtin_tools::register_memory_store_tool_async(&mut tool_registry, store_fn);
         }
+
+        // Register memory forget tool with async callback to MemoryManager::forget()
+        // Allows the LLM to delete stale/incorrect memories when the user asks.
+        {
+            let mem = Arc::clone(&memory);
+            let forget_fn: std::sync::Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> + Send + Sync> =
+                std::sync::Arc::new(move |memory_id: String| {
+                    let mem = Arc::clone(&mem);
+                    Box::pin(async move {
+                        mem.forget(&memory_id).await
+                            .map(|_| ())
+                            .map_err(|e| format!("forget failed: {}", e))
+                    })
+                });
+            clawdesk_agents::builtin_tools::register_memory_forget_tool_async(&mut tool_registry, forget_fn);
+        }
         info!(tools = tool_registry.total_count(), "Built-in tool registry initialized");
 
         // NOTE: tool_registry is NOT wrapped in Arc yet — we need to register
         // the messaging tool after channel_registry is built (see below).
 
-        // T11: Wire ChannelFactory → ChannelRegistry. Always register
+        // Wire ChannelFactory → ChannelRegistry. Always register
         // config-free channels (webchat, internal); probe env vars for the rest.
         let mut channel_registry = ChannelRegistry::new();
 
@@ -1519,7 +1891,7 @@ impl AppState {
             info!(count = channel_registry.list().len(), "Channel registry initialized");
         }
 
-        // GAP-11 FIX: Register the messaging tool with a ChannelRegistry-backed callback.
+        // Register the messaging tool with a ChannelRegistry-backed callback.
         // This gives the LLM the ability to send messages to other channels/users
         // via the `message_send` tool. The send_fn looks up the target channel in
         // the registry and delivers via Channel::send().
@@ -1528,12 +1900,54 @@ impl AppState {
         // a clone. AppState stores the same Arc.
         let channel_registry: Arc<std::sync::RwLock<ChannelRegistry>> =
             Arc::new(std::sync::RwLock::new(channel_registry));
+
+        // Cross-channel origin tracking: stores the last inbound MessageOrigin
+        // per ChannelId so the message_send tool can resolve "default" targets.
+        // Load persisted origins from SochDB first (survives restarts), then
+        // overlay with default_origin() from channel configs.
+        let persisted_origins: HashMap<clawdesk_types::channel::ChannelId, clawdesk_types::message::MessageOrigin> =
+            match soch_store.get("channel_origins") {
+                Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                    warn!(error = %e, "Failed to parse channel_origins from SochDB");
+                    HashMap::new()
+                }),
+                Ok(None) => HashMap::new(),
+                Err(e) => {
+                    warn!(error = %e, "Failed to read channel_origins from SochDB");
+                    HashMap::new()
+                }
+            };
+        if !persisted_origins.is_empty() {
+            info!(count = persisted_origins.len(), "Loaded persisted channel origins from SochDB");
+        }
+        let last_channel_origins: Arc<RwLock<HashMap<clawdesk_types::channel::ChannelId, clawdesk_types::message::MessageOrigin>>> =
+            Arc::new(RwLock::new(persisted_origins));
+
+        // Pre-seed origins from channel configs so cross-channel sends work
+        // even before any inbound message arrives (e.g., Telegram's allowed_chat_ids).
+        // Only inserts if no persisted origin exists for that channel.
         {
-            use clawdesk_channel::Channel;
+            if let Ok(reg) = channel_registry.read() {
+                if let Ok(mut origins) = last_channel_origins.write() {
+                    for (_id, channel) in reg.iter() {
+                        let ch_id = channel.id();
+                        if !origins.contains_key(&ch_id) {
+                            if let Some(origin) = channel.default_origin() {
+                                info!(%ch_id, "Pre-seeded default origin for cross-channel sends");
+                                origins.insert(ch_id, origin);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        {
             use clawdesk_types::channel::ChannelId;
-            use clawdesk_types::message::OutboundMessage;
+            use clawdesk_types::message::{OutboundMessage, MessageOrigin};
 
             let channels_for_tool = Arc::clone(&channel_registry);
+            let origins_for_tool = Arc::clone(&last_channel_origins);
 
             let send_fn: std::sync::Arc<
                 dyn Fn(String, Option<String>, String, Vec<String>)
@@ -1541,6 +1955,7 @@ impl AppState {
                     + Send + Sync,
             > = std::sync::Arc::new(move |target, channel_name, content, _media_urls| {
                 let channels = Arc::clone(&channels_for_tool);
+                let origins = Arc::clone(&origins_for_tool);
                 Box::pin(async move {
                     let channel_id = match channel_name.as_deref().unwrap_or("webchat") {
                         "telegram" => ChannelId::Telegram,
@@ -1548,6 +1963,8 @@ impl AppState {
                         "slack" => ChannelId::Slack,
                         "whatsapp" => ChannelId::WhatsApp,
                         "webchat" => ChannelId::WebChat,
+                        "email" => ChannelId::Email,
+                        "irc" => ChannelId::Irc,
                         "internal" => ChannelId::Internal,
                         other => return Err(format!("Unknown channel: {}", other)),
                     };
@@ -1555,13 +1972,110 @@ impl AppState {
                         let reg = channels.read().map_err(|e| format!("channel lock: {}", e))?;
                         Arc::clone(
                             reg.get(&channel_id)
-                                .ok_or_else(|| format!("Channel {:?} not registered", channel_id))?
+                                .ok_or_else(|| format!(
+                                    "Channel {:?} is not connected. Configure it in Settings → Channels first.",
+                                    channel_id
+                                ))?
                         )
                     }; // guard dropped here — before any .await
+
+                    // Build the proper MessageOrigin for the target channel.
+                    // If `to` is "default", empty, or the channel name itself,
+                    // use the last known inbound origin for that channel.
+                    let is_default = target.is_empty()
+                        || target.eq_ignore_ascii_case("default")
+                        || target.eq_ignore_ascii_case(channel_name.as_deref().unwrap_or(""));
+
+                    let origin = if is_default {
+                        // Use last known origin for this channel
+                        let last = origins.read()
+                            .map_err(|e| format!("origins lock: {}", e))?;
+                        match last.get(&channel_id).cloned() {
+                            Some(origin) => {
+                                tracing::info!(
+                                    channel = ?channel_id,
+                                    origin = ?origin,
+                                    "cross-channel send: using persisted origin"
+                                );
+                                origin
+                            }
+                            None => {
+                                drop(last);
+                                // Fallback: ask the channel for a default origin
+                                // (e.g. Telegram uses allowed_chat_ids[0],
+                                //  Discord uses default_channel_id or discovered channel)
+                                tracing::info!(
+                                    channel = ?channel_id,
+                                    "cross-channel send: no persisted origin, trying default_origin()"
+                                );
+                                let origin = ch.default_origin().ok_or_else(|| format!(
+                                    "Channel {:?} has no recent messages and no default target configured. \
+                                     For Telegram: set allowed_chat_ids in Settings → Channels. \
+                                     For Discord: set default_channel_id in Settings → Channels, \
+                                     or send a message in the target Discord channel first.",
+                                    channel_id
+                                ))?;
+                                // Persist this discovered origin so it survives restarts
+                                if let Ok(mut guard) = origins.write() {
+                                    guard.insert(channel_id, origin.clone());
+                                    tracing::info!(
+                                        channel = ?channel_id,
+                                        origin = ?origin,
+                                        "cross-channel send: persisted newly discovered default origin"
+                                    );
+                                }
+                                origin
+                            }
+                        }
+                    } else {
+                        // Parse `to` as a channel-specific target ID
+                        match channel_id {
+                            ChannelId::Discord => {
+                                let cid: u64 = target.parse().map_err(|_| format!(
+                                    "Discord target must be a numeric channel ID, got: {}", target
+                                ))?;
+                                MessageOrigin::Discord {
+                                    guild_id: 0, // filled from last origin if possible
+                                    channel_id: cid,
+                                    message_id: 0,
+                                    is_dm: false,
+                                    thread_id: None,
+                                }
+                            }
+                            ChannelId::Telegram => {
+                                let cid: i64 = target.parse().map_err(|_| format!(
+                                    "Telegram target must be a numeric chat ID, got: {}", target
+                                ))?;
+                                MessageOrigin::Telegram {
+                                    chat_id: cid,
+                                    message_id: 0,
+                                    thread_id: None,
+                                }
+                            }
+                            ChannelId::Slack => {
+                                MessageOrigin::Slack {
+                                    team_id: String::new(),
+                                    channel_id: target.clone(),
+                                    user_id: String::new(),
+                                    ts: String::new(),
+                                    thread_ts: None,
+                                }
+                            }
+                            ChannelId::WebChat => {
+                                MessageOrigin::WebChat {
+                                    session_id: target.clone(),
+                                }
+                            }
+                            _ => {
+                                MessageOrigin::Internal {
+                                    source: target.clone(),
+                                }
+                            }
+                        }
+                    };
+
                     let msg = OutboundMessage {
-                        origin: clawdesk_types::message::MessageOrigin::WebChat {
-                            session_id: target.clone(),
-                        },
+                        origin,
                         body: content,
                         media: vec![],
                         reply_to: None,
@@ -1571,12 +2085,291 @@ impl AppState {
                     Ok(receipt.message_id)
                 })
             });
-            clawdesk_agents::builtin_tools::register_messaging_tool(&mut tool_registry, send_fn);
-            info!("Messaging tool registered — LLM can send cross-channel messages");
+            // Build actual channel name list from the registry for the tool schema
+            let connected_channel_names: Vec<String> = {
+                let reg = channel_registry.read().unwrap_or_else(|e| e.into_inner());
+                reg.list().iter().map(|id| format!("{}", id).to_lowercase()).collect()
+            };
+            clawdesk_agents::builtin_tools::register_messaging_tool(
+                &mut tool_registry,
+                send_fn,
+                connected_channel_names.clone(),
+            );
+            info!(
+                channels = ?connected_channel_names,
+                "Messaging tool registered — LLM can send to connected channels"
+            );
+        }
+
+        // ── Register A2A tools (agents_list, sessions_send) ──────────
+        // These give the LLM visibility into available agents and the ability
+        // to delegate tasks to other agents via the A2A protocol.
+        //
+        // Create the agent_directory Arc early so we can share it with both
+        // the tool callbacks and the final AppState struct.
+        let agent_directory = Arc::new(RwLock::new(AgentDirectory::new()));
+
+        // agents_list: Returns a JSON list of all registered A2A agents.
+        {
+            let dir_for_tool = Arc::clone(&agent_directory);
+            let agents_list_fn: std::sync::Arc<
+                dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                    + Send + Sync,
+            > = std::sync::Arc::new(move || {
+                let dir = Arc::clone(&dir_for_tool);
+                Box::pin(async move {
+                    let guard = dir.read().map_err(|e| format!("directory lock: {}", e))?;
+                    let cards: Vec<serde_json::Value> = guard.list().iter().map(|card| {
+                        serde_json::json!({
+                            "id": card.id,
+                            "name": card.name,
+                            "description": card.description,
+                            "capabilities": card.capabilities.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>(),
+                        })
+                    }).collect();
+                    serde_json::to_string_pretty(&cards).map_err(|e| e.to_string())
+                })
+            });
+            clawdesk_agents::builtin_tools::register_agents_list_tool(&mut tool_registry, agents_list_fn);
+            info!("A2A agents_list tool registered — LLM can discover available agents");
+        }
+
+        // sessions_send: Delegates a task to another local DesktopAgent,
+        // running it through the full AgentRunner with tool access.
+        // This gives delegated agents the same capabilities (shell, web search,
+        // memory, file I/O) as direct channel messages.
+        let a2a_tasks_shared: Arc<tokio::sync::RwLock<HashMap<String, clawdesk_acp::Task>>> =
+            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        // Shared Arcs for agents and providers — populated after hydration below,
+        // but captured by the sessions_send callback for late binding.
+        let agents_shared: Arc<RwLock<HashMap<String, DesktopAgent>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let providers_shared: Arc<RwLock<ProviderRegistry>> =
+            Arc::new(RwLock::new(ProviderRegistry::new()));
+        // Late-binding for tool_registry (not yet Arc-wrapped at this point).
+        let tools_late: Arc<std::sync::OnceLock<Arc<ToolRegistry>>> =
+            Arc::new(std::sync::OnceLock::new());
+        {
+            let dir_for_send = Arc::clone(&agent_directory);
+            let tasks_for_send = Arc::clone(&a2a_tasks_shared);
+            let agents_for_send = Arc::clone(&agents_shared);
+            let providers_for_send = Arc::clone(&providers_shared);
+            let tools_for_send = Arc::clone(&tools_late);
+            let memory_for_send = Arc::clone(&memory);
+
+            let sessions_send_fn: std::sync::Arc<
+                dyn Fn(String, String, Option<String>)
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                    + Send + Sync,
+            > = std::sync::Arc::new(move |target_agent: String, message: String, _skill_id: Option<String>| {
+                let dir = Arc::clone(&dir_for_send);
+                let tasks = Arc::clone(&tasks_for_send);
+                let agents = Arc::clone(&agents_for_send);
+                let providers = Arc::clone(&providers_for_send);
+                let tools_cell = Arc::clone(&tools_for_send);
+                let memory = Arc::clone(&memory_for_send);
+                Box::pin(async move {
+                    use clawdesk_acp::{Task, TaskEvent};
+                    use clawdesk_agents::runner::{AgentRunner, AgentConfig};
+
+                    // Create A2A task tracking
+                    let mut task = Task::new("self", &target_agent, serde_json::json!({"message": &message}));
+                    let task_id = task.id.as_str().to_string();
+                    let _ = task.apply_event(TaskEvent::Work);
+
+                    // Look up the target agent
+                    let agent_info = {
+                        let guard = agents.read().map_err(|e| format!("agents lock: {}", e))?;
+                        guard.get(&target_agent).map(|a| (a.name.clone(), a.persona.clone(), a.model.clone()))
+                    };
+
+                    let (agent_name, persona, model_pref) = match agent_info {
+                        Some(info) => info,
+                        None => {
+                            let dir_name = {
+                                let dg = dir.read().map_err(|e| format!("directory lock: {}", e))?;
+                                dg.get(&target_agent).map(|e| e.card.name.clone())
+                            };
+                            let name = dir_name.unwrap_or_else(|| target_agent.clone());
+                            let _ = task.apply_event(TaskEvent::Fail {
+                                error: format!("Agent '{}' not found", target_agent),
+                            });
+                            tasks.write().await.insert(task_id, task);
+                            return Err(format!(
+                                "Agent '{}' ({}) is not a local agent. Cannot execute task.",
+                                name, target_agent
+                            ));
+                        }
+                    };
+
+                    // Resolve provider — extract from lock scope before any .await
+                    let resolved_provider: Option<Arc<dyn Provider>> = {
+                        let reg = providers.read().map_err(|e| format!("provider lock: {}", e))?;
+                        let prov_name = if model_pref.contains("claude") || model_pref.contains("anthropic") {
+                            "anthropic"
+                        } else if model_pref.contains("gpt") || model_pref.contains("openai") {
+                            "openai"
+                        } else if model_pref.contains("gemini") {
+                            "gemini"
+                        } else if !model_pref.is_empty() {
+                            "ollama"
+                        } else {
+                            ""
+                        };
+                        if !prov_name.is_empty() {
+                            reg.get(prov_name).cloned()
+                                .or_else(|| reg.default_provider().cloned())
+                        } else {
+                            reg.default_provider().cloned()
+                        }
+                    }; // guard dropped here — safe to .await below
+
+                    let provider = match resolved_provider {
+                        Some(p) => p,
+                        None => {
+                            let _ = task.apply_event(TaskEvent::Fail {
+                                error: "No LLM provider available".to_string(),
+                            });
+                            tasks.write().await.insert(task_id, task);
+                            return Err("No LLM provider available for A2A task".to_string());
+                        }
+                    };
+
+                    // Get tool registry (late-bound)
+                    let tool_reg = tools_cell.get()
+                        .ok_or_else(|| "Tool registry not initialized yet".to_string())?;
+
+                    // Determine model
+                    let model = if model_pref.is_empty() {
+                        if provider.name() == "anthropic" { "claude-haiku-4-20250514".to_string() }
+                        else if provider.name() == "openai" { "gpt-4o-mini".to_string() }
+                        else if provider.name() == "gemini" { "gemini-2.0-flash".to_string() }
+                        else { "llama3.2".to_string() }
+                    } else {
+                        model_pref.clone()
+                    };
+
+                    // Build system prompt with the target agent's persona
+                    let system_prompt = format!(
+                        "You are {}. {}\n\n\
+                         You are responding to a delegated request from another agent in the system. \
+                         You have full access to your tools (shell, web search, memory, file I/O). \
+                         Use them as needed to fulfill the request. Answer accurately and concisely.",
+                        agent_name, persona
+                    );
+
+                    // Build AgentConfig
+                    let config = AgentConfig {
+                        model,
+                        system_prompt: system_prompt.clone(),
+                        max_tool_rounds: 10, // Limit delegated runs
+                        ..Default::default()
+                    };
+
+                    // Construct a full AgentRunner with tool access
+                    let cancel = tokio_util::sync::CancellationToken::new();
+
+                    // GAP-B: Build memory recall callback so delegated agents
+                    // get automatic memory context even though they bypass the
+                    // engine layer's build_prompt_pipeline().
+                    let memory_recall_fn: clawdesk_agents::MemoryRecallFn = {
+                        let mem = Arc::clone(&memory);
+                        Arc::new(move |query: String| {
+                            let mem = Arc::clone(&mem);
+                            Box::pin(async move {
+                                match mem.recall(&query, Some(8)).await {
+                                    Ok(results) => results.into_iter().filter_map(|r| {
+                                        let text = r.content?;
+                                        if text.is_empty() { return None; }
+                                        Some(clawdesk_agents::MemoryRecallResult {
+                                            relevance: r.score as f64,
+                                            source: r.metadata.get("source")
+                                                .and_then(|v| v.as_str())
+                                                .map(String::from),
+                                            content: text,
+                                        })
+                                    }).collect(),
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "A2A memory recall failed");
+                                        vec![]
+                                    }
+                                }
+                            })
+                        })
+                    };
+
+                    let runner = AgentRunner::new(
+                        provider,
+                        Arc::clone(tool_reg),
+                        config,
+                        cancel,
+                    )
+                    .with_memory_recall(memory_recall_fn);
+
+                    // Recursion depth check — prevent runaway A→B→A→B... delegation.
+                    if let Err(e) = clawdesk_agents::recursion_depth::check_depth() {
+                        let err_msg = format!("A2A delegation blocked: {}", e);
+                        let _ = task.apply_event(TaskEvent::Fail { error: err_msg.clone() });
+                        tasks.write().await.insert(task_id, task);
+                        return Err(err_msg);
+                    }
+
+                    // Build the message history (single user message)
+                    let history = vec![
+                        clawdesk_providers::ChatMessage::new(
+                            clawdesk_providers::MessageRole::User,
+                            message.as_str(),
+                        ),
+                    ];
+
+                    // Run with a 120-second timeout, incrementing recursion depth
+                    let run_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(120),
+                        clawdesk_agents::recursion_depth::with_incremented_depth(
+                            runner.run(history, system_prompt),
+                        ),
+                    ).await;
+
+                    match run_result {
+                        Ok(Ok(response)) => {
+                            let reply = response.content.clone();
+                            let _ = task.apply_event(TaskEvent::Complete {
+                                output: serde_json::json!({
+                                    "agent": agent_name,
+                                    "response": &reply,
+                                    "tool_rounds": response.total_rounds,
+                                    "input_tokens": response.input_tokens,
+                                    "output_tokens": response.output_tokens,
+                                }),
+                            });
+                            tasks.write().await.insert(task_id, task);
+                            Ok(format!("[Response from {} via A2A]\n{}", agent_name, reply))
+                        }
+                        Ok(Err(e)) => {
+                            let err_msg = format!("Agent execution failed: {}", e);
+                            let _ = task.apply_event(TaskEvent::Fail { error: err_msg.clone() });
+                            tasks.write().await.insert(task_id, task);
+                            Err(err_msg)
+                        }
+                        Err(_) => {
+                            let err_msg = "A2A task timed out after 120 seconds".to_string();
+                            let _ = task.apply_event(TaskEvent::Fail { error: err_msg.clone() });
+                            tasks.write().await.insert(task_id, task);
+                            Err(err_msg)
+                        }
+                    }
+                })
+            });
+            clawdesk_agents::builtin_tools::register_sessions_send_tool(&mut tool_registry, sessions_send_fn);
+            info!("A2A sessions_send tool registered — LLM can delegate tasks to other agents");
         }
 
         // Wrap in Arc now — all mutable registration is complete.
         let tool_registry = Arc::new(tool_registry);
+
+        // Late-bind the tool_registry for the sessions_send callback.
+        let _ = tools_late.set(Arc::clone(&tool_registry));
 
         let mut provider_registry = ProviderRegistry::new();
 
@@ -1671,6 +2464,7 @@ impl AppState {
             provider: cron_provider,
             tool_registry: Arc::clone(&tool_registry),
             cancel: cancel.clone(),
+            memory: Arc::clone(&memory),
         };
         let cron_manager = Arc::new(CronManager::new(
             Arc::new(cron_executor),
@@ -1776,8 +2570,98 @@ impl AppState {
             }
         }
 
+        // ── Rebuild temporal session index ────────────────────────────
+        // The chat_index allows ordered-by-time session queries without
+        // deserializing all session blobs. Rebuilt on every startup to
+        // ensure consistency with the actual session data.
+        {
+            let entries = soch_store.scan("chats/").unwrap_or_default();
+            let mut batch: Vec<(String, Vec<u8>)> = Vec::new();
+            for (_key, bytes) in &entries {
+                if let Ok(session) = serde_json::from_slice::<ChatSession>(bytes) {
+                    let index_key = format!(
+                        "chat_index/{}/{}/{}",
+                        session.agent_id, session.updated_at, session.id
+                    );
+                    let index_value = serde_json::to_vec(&serde_json::json!({
+                        "title": session.title,
+                        "created_at": session.created_at,
+                        "updated_at": session.updated_at,
+                        "message_count": session.messages.len(),
+                    })).unwrap_or_default();
+                    batch.push((index_key, index_value));
+                }
+            }
+            if !batch.is_empty() {
+                let refs: Vec<(&str, &[u8])> = batch.iter()
+                    .map(|(k, v)| (k.as_str(), v.as_slice()))
+                    .collect();
+                if let Err(e) = soch_store.put_batch(&refs) {
+                    warn!(error = %e, "Failed to rebuild chat_index — temporal sorting may be degraded");
+                } else {
+                    info!(indexed = batch.len(), "Rebuilt chat_index (temporal session index)");
+                }
+            }
+        }
+
+        // ── Auto-register local agents in A2A directory ──────────────
+        // This makes every DesktopAgent discoverable via the agents_list tool
+        // so that LLMs can delegate tasks to named agents on specific channels.
+        {
+            let mut dir = agent_directory.write().expect("agent_directory lock");
+            for (agent_id, agent) in &agents {
+                let mut card = clawdesk_acp::AgentCard::new(
+                    agent_id.clone(),
+                    agent.name.clone(),
+                    "local://desktop",
+                );
+                card.description = agent.persona.chars().take(200).collect();
+                card = card.with_capability(clawdesk_acp::CapabilityId::TextGeneration);
+                if !agent.channels.is_empty() {
+                    card = card.with_capability(clawdesk_acp::CapabilityId::Messaging);
+                }
+                dir.register(card);
+            }
+            info!(count = agents.len(), "Registered local agents in A2A directory");
+        }
+
+        // ── Register active channels in A2A directory ────────────────
+        // Each running channel (Discord, Telegram, etc.) is registered as a
+        // discoverable entity so agents can see what channels are online and
+        // route cross-channel tasks appropriately.
+        {
+            let mut dir = agent_directory.write().expect("agent_directory lock");
+            let ch_reg = channel_registry.read().expect("channel_registry lock");
+            for ch_id in ch_reg.list() {
+                let ch_name = format!("{:?}", ch_id).to_lowercase();
+                let card_id = format!("channel:{}", ch_name);
+                let mut card = clawdesk_acp::AgentCard::new(
+                    card_id,
+                    format!("{} Channel", ch_name),
+                    "local://channel",
+                );
+                card.description = format!("Active {} messaging channel — can receive and send messages.", ch_name);
+                card = card.with_capability(clawdesk_acp::CapabilityId::Messaging);
+                dir.register(card);
+            }
+            info!(count = ch_reg.list().len(), "Registered active channels in A2A directory");
+        }
+
+        // ── Populate shared Arcs used by A2A sessions_send callback ──
+        // The callback was registered before providers/agents existed.
+        // Now that both are ready, swap in the real data.
+        {
+            let mut guard = providers_shared.write().expect("providers_shared lock");
+            *guard = provider_registry;
+        }
+        {
+            let mut guard = agents_shared.write().expect("agents_shared lock");
+            *guard = agents;
+        }
+        info!("Populated A2A shared state (agents + providers) for sessions_send callback");
+
         Self {
-            soch_store,
+            soch_store: soch_store.clone(),
             thread_store,
             semantic_cache,
             trace_store,
@@ -1791,7 +2675,7 @@ impl AppState {
             embedding_provider: embedding_for_state,
 
             skill_registry: RwLock::new(skill_registry),
-            provider_registry: RwLock::new(provider_registry),
+            provider_registry: providers_shared,
             tool_registry,
             channel_registry,
             channel_factory: Arc::new(factory),
@@ -1799,10 +2683,20 @@ impl AppState {
             scanner: Arc::new(scanner),
             scanner_pattern_count: pattern_count,
             audit_logger: Arc::new(audit_logger),
-            agents: RwLock::new(agents),
+            agents: agents_shared,
             identities: RwLock::new(HashMap::new()),
             server_secret: ServerSecret::generate(),
-            sessions: RwLock::new(sessions),
+            sessions: {
+                let cache = SessionCache::new();
+                // Sort sessions by updated_at (oldest first) before bulk-loading
+                // into the LRU cache. `load_bulk` treats the LAST inserted item as
+                // most-recently-used, so oldest-first ordering ensures the most
+                // recently active sessions survive LRU eviction on startup.
+                let mut sorted_sessions: Vec<(String, ChatSession)> = sessions.into_iter().collect();
+                sorted_sessions.sort_by(|a, b| a.1.updated_at.cmp(&b.1.updated_at));
+                cache.load_bulk(sorted_sessions);
+                cache
+            },
             invites: RwLock::new(InviteManager::new()),
             tunnel_metrics: Arc::new(TunnelMetrics::new()),
             total_cost_today: AtomicU64::new(0),
@@ -1826,8 +2720,9 @@ impl AppState {
             plugin_host: None,
 
             // ── A2A Protocol ──
-            agent_directory: RwLock::new(AgentDirectory::new()),
-            a2a_tasks: tokio::sync::RwLock::new(HashMap::new()),
+            agent_directory: Arc::clone(&agent_directory),
+            a2a_tasks: Arc::clone(&a2a_tasks_shared),
+            last_channel_origins: Arc::clone(&last_channel_origins),
 
             // ── OAuth2 + PKCE ──
             oauth_flow_manager: Arc::new(OAuthFlowManager::new()),
@@ -1922,16 +2817,16 @@ impl AppState {
             // ── T7 FIX: Per-session serialization ──
             session_lanes: clawdesk_agents::session_lane::SessionLaneManager::new(),
 
-            // ── GAP-3 FIX: Global concurrency bound (default 8 parallel LLM calls) ──
+            // ── Global concurrency bound (default 8 parallel LLM calls) ──
             llm_concurrency: Arc::new(tokio::sync::Semaphore::new(8)),
 
-            // ── GAP-4/1 FIX: Channel dock (all 23 channels pre-registered) ──
+            // ── /1 FIX: Channel dock (all 23 channels pre-registered) ──
             channel_dock: Arc::new(clawdesk_channel::channel_dock::ChannelDock::with_all_defaults()),
 
-            // ── GAP-7 FIX: Hook manager ──
+            // ── Hook manager ──
             hook_manager: Arc::new(clawdesk_plugin::HookManager::new()),
 
-            // ── GAP-4 FIX: Channel bindings (empty by default for desktop) ──
+            // ── Channel bindings (empty by default for desktop) ──
             channel_bindings: RwLock::new(Vec::new()),
 
             // ── T2 FIX: Workspace root for agent tool scoping ──
@@ -1940,9 +2835,87 @@ impl AppState {
             // ── T4 FIX: Sandbox policy engine (auto-detects platform capabilities) ──
             sandbox_engine: Arc::new(clawdesk_security::sandbox_policy::SandboxPolicyEngine::new()),
 
-            // ── GAP-1 FIX: Sub-agent lifecycle manager ──
+            // ── Sub-agent lifecycle manager ──
             sub_mgr: Arc::new(clawdesk_gateway::subagent_manager::SubAgentManager::new(
                 clawdesk_gateway::subagent_manager::SubAgentManagerConfig::default(),
+            )),
+
+            // ── GAP-G: Per-turn dynamic model routing ──
+            turn_router: Arc::new(clawdesk_agents::TurnRouter::new(
+                clawdesk_domain::model_catalog::ModelCatalog::default_catalog(),
+            )),
+
+            // ── GAP-D: Reactive event bus ──
+            event_bus: clawdesk_bus::dispatch::EventBus::new(128),
+
+            // ── GAP-E: Cross-channel artifact pipeline ──
+            artifact_pipeline: {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".to_string());
+                let cache_dir = std::path::PathBuf::from(home)
+                    .join(".clawdesk")
+                    .join("artifacts");
+                let cache = clawdesk_media::MediaCache::new(cache_dir, 512)
+                    .unwrap_or_else(|e| {
+                        tracing::error!("Failed to init artifact cache: {e}, using fallback");
+                        clawdesk_media::MediaCache::new(
+                            std::env::temp_dir().join("clawdesk-artifacts-fallback"),
+                            512,
+                        ).expect("fallback artifact cache must work")
+                    });
+                Arc::new(clawdesk_media::ArtifactPipeline::new(Arc::new(cache)))
+            },
+
+            // ── GAP-F: Multi-agent shared state ──
+            shared_state_mgr: Arc::new(clawdesk_agents::SharedStateManager::new(
+                Arc::new(clawdesk_agents::InMemorySharedState::new()),
+            )),
+
+            // ── Sandbox: Multi-modal code execution isolation ──
+            sandbox_dispatcher: {
+                let mut dispatcher = clawdesk_sandbox::SandboxDispatcher::with_defaults();
+                info!(
+                    levels = ?dispatcher.available_levels(),
+                    "Sandbox dispatcher initialized"
+                );
+                tokio::sync::RwLock::new(dispatcher)
+            },
+
+            // ── MCP: Model Context Protocol client ──
+            mcp_client: tokio::sync::RwLock::new(clawdesk_mcp::McpClient::new()),
+
+            // ── Extensions: Integration registry ──
+            integration_registry: {
+                let registry = clawdesk_extensions::IntegrationRegistry::new();
+                registry.load_bundled();
+                // Restore persisted enabled state from SochDB
+                let _restored = crate::commands_extensions::restore_enabled_state(
+                    &registry,
+                    &soch_store,
+                );
+                let enabled_count = registry.enabled().len();
+                info!(
+                    total = registry.count(),
+                    enabled = enabled_count,
+                    "Integration registry loaded (enabled state restored)"
+                );
+                tokio::sync::RwLock::new(registry)
+            },
+
+            // ── Extensions: Credential vault ──
+            credential_vault: {
+                let vault_path = sochdb_path.parent()
+                    .unwrap_or(&sochdb_path)
+                    .join("vault.enc");
+                let vault = clawdesk_extensions::CredentialVault::with_path(vault_path);
+                info!(exists = vault.exists(), "Credential vault initialized");
+                tokio::sync::RwLock::new(vault)
+            },
+
+            // ── Extensions: Health monitor ──
+            health_monitor: tokio::sync::RwLock::new(clawdesk_extensions::HealthMonitor::new(
+                std::time::Duration::from_secs(300), // 5 min check interval
             )),
         }
     }
@@ -2054,7 +3027,7 @@ impl AppState {
     /// canvases to SochDB's path API. Uses JSON serialization for each
     /// item. Best-effort — logs errors but does not fail the caller.
     pub fn persist(&self) {
-        let session_count = self.sessions.read().map(|s| s.len()).unwrap_or(0);
+        let session_count = self.sessions.len();
         let agent_count = self.agents.read().map(|a| a.len()).unwrap_or(0);
         tracing::info!(sessions = session_count, agents = agent_count, "bulk persist() starting");
 
@@ -2071,10 +3044,11 @@ impl AppState {
         }
 
         // Sessions (new multi-chat format)
-        if let Ok(sessions) = self.sessions.read() {
+        {
+            let all_sessions = self.sessions.entries();
             let mut ok_count = 0usize;
             let mut fail_count = 0usize;
-            for (id, session) in sessions.iter() {
+            for (id, session) in &all_sessions {
                 match serde_json::to_vec(session) {
                     Ok(bytes) => {
                         let key = format!("chats/{}", id);
@@ -2146,33 +3120,119 @@ impl AppState {
     }
 
     /// Persist a single chat session to SochDB (write-through, durable).
+    ///
+    /// Also maintains a temporal index at `chat_index/{agent_id}/{updated_at}/{chat_id}`
+    /// enabling ordered-by-time session listing without deserializing all sessions.
     /// Returns Ok(()) on success or Err with description on failure.
     pub fn persist_session(&self, chat_id: &str, session: &ChatSession) -> Result<(), String> {
         let bytes = serde_json::to_vec(session).map_err(|e| format!("Session serialize error: {}", e))?;
         let key = format!("chats/{}", chat_id);
         let bytes_len = bytes.len();
-        self.soch_store.put_durable(&key, &bytes)
-            .map_err(|e| {
-                tracing::error!(key = %key, error = %e, "Failed to persist session");
-                format!("Session persist failed: {}", e)
-            })?;
+
+        // Write the session blob + temporal index in a single batch for atomicity.
+        let index_key = format!(
+            "chat_index/{}/{}/{}",
+            session.agent_id, session.updated_at, chat_id
+        );
+        let index_value = serde_json::to_vec(&serde_json::json!({
+            "title": session.title,
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "message_count": session.messages.len(),
+        })).unwrap_or_default();
+
+        self.soch_store.put_batch(&[
+            (key.as_str(), &bytes),
+            (index_key.as_str(), &index_value),
+        ]).map_err(|e| {
+            tracing::error!(key = %key, error = %e, "Failed to persist session");
+            format!("Session persist failed: {}", e)
+        })?;
+
         tracing::debug!(
             key = %key,
+            index_key = %index_key,
             bytes = bytes_len,
             messages = session.messages.len(),
-            "Session persisted to SochDB (durable)"
+            "Session persisted to SochDB (durable + indexed)"
         );
         Ok(())
     }
 
-    /// GAP-1: Unified session write — append a message to both the hot
-    /// cache (in-memory `RwLock<HashMap>`) and the durable SochDB store
-    /// atomically. Uses write-ahead: the durable store is written first,
+    /// Rebuild the temporal session index (`chat_index/`) from all persisted sessions.
+    ///
+    /// Called on startup to ensure the index is consistent with the sessions.
+    /// Idempotent — safe to run multiple times.
+    pub fn rebuild_session_index(&self) -> Result<usize, String> {
+        let entries = self.soch_store.scan("chats/")
+            .map_err(|e| format!("scan failed: {}", e))?;
+
+        let mut batch: Vec<(String, Vec<u8>)> = Vec::new();
+        for (_key, bytes) in &entries {
+            if let Ok(session) = serde_json::from_slice::<ChatSession>(bytes) {
+                let index_key = format!(
+                    "chat_index/{}/{}/{}",
+                    session.agent_id, session.updated_at, session.id
+                );
+                let index_value = serde_json::to_vec(&serde_json::json!({
+                    "title": session.title,
+                    "created_at": session.created_at,
+                    "updated_at": session.updated_at,
+                    "message_count": session.messages.len(),
+                })).unwrap_or_default();
+                batch.push((index_key, index_value));
+            }
+        }
+
+        let count = batch.len();
+        if !batch.is_empty() {
+            let refs: Vec<(&str, &[u8])> = batch.iter()
+                .map(|(k, v)| (k.as_str(), v.as_slice()))
+                .collect();
+            self.soch_store.put_batch(&refs)
+                .map_err(|e| format!("index batch write failed: {}", e))?;
+        }
+
+        tracing::info!(
+            sessions = entries.len(),
+            indexed = count,
+            "Rebuilt chat_index from SochDB sessions"
+        );
+        Ok(count)
+    }
+
+    /// Read-through session loader — authoritative read from SochDB.
+    ///
+    /// If the hot cache has a stale or missing entry (e.g., after a crash or
+    /// manual SochDB repair), this method loads the session directly from the
+    /// durable store and backfills the cache.
+    ///
+    /// **Use this instead of raw `sessions.get()` when data integrity matters.**
+    pub fn read_through_session(&self, chat_id: &str) -> Option<ChatSession> {
+        // Fast path: check hot cache first.
+        if let Some(session) = self.sessions.get(chat_id) {
+            return Some(session);
+        }
+        // Slow path: load from SochDB (source of truth).
+        let key = format!("chats/{}", chat_id);
+        let bytes = self.soch_store.get(&key).ok()??;
+        let session: ChatSession = serde_json::from_slice(&bytes).ok()?;
+        // Backfill hot cache.
+        self.sessions.insert(chat_id.to_string(), session.clone());
+        Some(session)
+    }
+
+    /// Unified session write — append a message to both
+    /// the hot cache (in-memory `RwLock<HashMap>`) and the durable SochDB
+    /// store atomically. Uses write-ahead: the durable store is written first,
     /// and the hot cache rolls back on failure.
     ///
-    /// This collapses the previous dual-write pattern (manual
-    /// `sessions.write()` + `persist_session()`) into a single call site,
-    /// preventing drift between the two stores.
+    /// **SochDB is the single source of truth** for conversation state. The
+    /// in-memory `sessions` HashMap is a write-through cache: writes go to
+    /// SochDB first, hot cache second. On startup, sessions are hydrated
+    /// from SochDB (see `hydrate_map`). Use `read_through_session()` to
+    /// reconcile if the hot cache and SochDB ever diverge (e.g., crash
+    /// between cache write and SochDB persist).
     pub fn append_session_message(
         &self,
         chat_id: &str,
@@ -2181,21 +3241,27 @@ impl AppState {
         msg: ChatMessage,
         now: &chrono::DateTime<chrono::Utc>,
     ) -> Result<usize, String> {
-        let mut sessions = self.sessions.write().map_err(|e| e.to_string())?;
-        let session = sessions.entry(chat_id.to_string()).or_insert_with(|| ChatSession {
-            id: chat_id.to_string(),
-            agent_id: agent_id.to_string(),
-            title: title.to_string(),
-            messages: Vec::new(),
-            created_at: now.to_rfc3339(),
-            updated_at: now.to_rfc3339(),
+        // Ensure session exists
+        if !self.sessions.contains(chat_id) {
+            self.sessions.insert(chat_id.to_string(), ChatSession {
+                id: chat_id.to_string(),
+                agent_id: agent_id.to_string(),
+                title: title.to_string(),
+                messages: Vec::new(),
+                created_at: now.to_rfc3339(),
+                updated_at: now.to_rfc3339(),
+            });
+        }
+        // Append message in-place
+        self.sessions.mutate(chat_id, |session| {
+            session.messages.push(msg);
+            session.updated_at = chrono::Utc::now().to_rfc3339();
         });
-        session.messages.push(msg);
-        session.updated_at = chrono::Utc::now().to_rfc3339();
 
-        // Write-ahead: persist first, roll back hot cache on failure
-        if let Err(e) = self.persist_session(chat_id, session) {
-            session.messages.pop(); // rollback
+        // Write-ahead: persist, roll back hot cache on failure
+        let session = self.sessions.get(chat_id).ok_or("Session disappeared after insert")?;
+        if let Err(e) = self.persist_session(chat_id, &session) {
+            self.sessions.mutate(chat_id, |s| { s.messages.pop(); }); // rollback
             return Err(e);
         }
         Ok(session.messages.len())
@@ -2206,7 +3272,7 @@ impl AppState {
     /// (`tool_history/{chat_id}`) so they don't inflate the main session serialization.
     /// They are loaded lazily during history building for subsequent LLM calls.
     ///
-    /// GAP-12: Capped to the most recent `MAX_TOOL_HISTORY_ENTRIES` messages to
+    /// Capped to the most recent `MAX_TOOL_HISTORY_ENTRIES` messages to
     /// prevent unbounded growth on long-running sessions.
     pub fn persist_tool_history(&self, chat_id: &str, tool_msgs: &[ChatMessage]) -> Result<(), String> {
         /// Maximum tool history entries kept per session.
@@ -2224,7 +3290,7 @@ impl AppState {
             .unwrap_or_default();
         existing.extend_from_slice(tool_msgs);
 
-        // GAP-12: Trim to most recent entries to prevent unbounded growth
+        // Trim to most recent entries to prevent unbounded growth
         if existing.len() > MAX_TOOL_HISTORY_ENTRIES {
             let drain_count = existing.len() - MAX_TOOL_HISTORY_ENTRIES;
             existing.drain(..drain_count);
@@ -2303,7 +3369,7 @@ impl AppState {
         }
     }
 
-    /// T9: Persist a journal entry to SochDB (write-through).
+    /// Persist a journal entry to SochDB (write-through).
     pub fn persist_journal_entry(&self, entry: &clawdesk_skills::journal::JournalEntry) {
         if let Ok(bytes) = serde_json::to_vec(entry) {
             let key = format!("journal/{}", entry.id);
@@ -2313,7 +3379,7 @@ impl AppState {
         }
     }
 
-    /// T9: Delete a journal entry from SochDB.
+    /// Delete a journal entry from SochDB.
     pub fn delete_journal_entry_from_store(&self, id: &str) {
         let key = format!("journal/{}", id);
         if let Err(e) = self.soch_store.delete(&key) {
@@ -2438,7 +3504,7 @@ impl AppState {
     /// spawn a background thread running `Channel::start()`.
     ///
     /// Stops any existing channel with the same ID first to avoid duplicate
-    /// gateway connections (modeled after zeroclaw's supervised listener pattern).
+    /// gateway connections.
     ///
     /// Called from `update_channel` so the user doesn't need to restart the app.
     pub fn hot_start_channel(
@@ -2570,9 +3636,8 @@ impl AppState {
             app_handle: app_handle.clone(),
             channel_registry: Arc::clone(channel_registry),
             cancel: state_ref.cancel.clone(),
-            conversation_histories: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            conversation_histories: Arc::new(dashmap::DashMap::new()),
+            last_channel_origins: Arc::clone(&state_ref.last_channel_origins),
         });
 
         let ch_name = channel_id.to_string();
@@ -2599,7 +3664,7 @@ impl AppState {
         Ok(())
     }
 
-    /// T21: Post-init health verification.
+    /// Post-init health verification.
     ///
     /// Checks that critical subsystems are ready and logs warnings for degraded state.
     /// Returns a list of warnings (empty = fully healthy).
@@ -2645,7 +3710,7 @@ impl AppState {
             ));
         }
 
-        // T23: Validate effective config through ValidatedConfig
+        // Validate effective config through ValidatedConfig
         {
             use clawdesk_types::{ClawDeskConfig, ValidatedConfig};
             let raw = ClawDeskConfig::default();
@@ -2664,6 +3729,49 @@ impl AppState {
         }
 
         warnings
+    }
+
+    // ── Domain-aggregate accessor methods ──────────────────────
+    //
+    // These provide a migration path toward splitting AppState into domain
+    // aggregates. Callers can gradually adopt `state.storage_store()` instead
+    // of `state.soch_store.clone()`, etc. Once all callers are migrated for
+    // a domain, the aggregate struct can be extracted behind a single lock.
+
+    /// Storage aggregate: SochDB store and all durable sub-stores.
+    #[inline]
+    pub fn storage_store(&self) -> &Arc<SochStore> {
+        &self.soch_store
+    }
+
+    /// Thread store: namespaced chat-thread persistence.
+    #[inline]
+    pub fn threads(&self) -> &Arc<clawdesk_threads::ThreadStore> {
+        &self.thread_store
+    }
+
+    /// Memory aggregate: embedding-backed memory system.
+    #[inline]
+    pub fn memory_manager(&self) -> &Arc<MemoryManager<SochMemoryBackend>> {
+        &self.memory
+    }
+
+    /// Metrics: total cost (atomic, no lock needed).
+    #[inline]
+    pub fn cost_today_micros(&self) -> u64 {
+        self.total_cost_today.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Metrics: total input tokens (atomic, no lock needed).
+    #[inline]
+    pub fn input_tokens(&self) -> u64 {
+        self.total_input_tokens.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Metrics: total output tokens (atomic, no lock needed).
+    #[inline]
+    pub fn output_tokens(&self) -> u64 {
+        self.total_output_tokens.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -2817,7 +3925,7 @@ fn hydrate_list<T: serde::de::DeserializeOwned>(
 }
 
 // ═══════════════════════════════════════════════════════════
-// T24: E2E Smoke Tests — verify AppState construction and
+// E2E Smoke Tests — verify AppState construction and
 //      critical subsystem wiring without Tauri runtime.
 // ═══════════════════════════════════════════════════════════
 #[cfg(test)]
@@ -2875,26 +3983,20 @@ mod smoke_tests {
         let chat_id = uuid::Uuid::new_v4().to_string();
 
         // Start empty
-        let sessions = state.sessions.read().expect("lock");
-        assert!(sessions.get(&chat_id).is_none());
-        drop(sessions);
+        assert!(state.sessions.get(&chat_id).is_none());
 
         // Create a chat session
-        {
-            let mut sessions = state.sessions.write().expect("lock");
-            sessions.insert(chat_id.clone(), ChatSession {
-                id: chat_id.clone(),
-                agent_id: agent_id.clone(),
-                title: "Test chat".to_string(),
-                messages: Vec::new(),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                updated_at: chrono::Utc::now().to_rfc3339(),
-            });
-        }
+        state.sessions.insert(chat_id.clone(), ChatSession {
+            id: chat_id.clone(),
+            agent_id: agent_id.clone(),
+            title: "Test chat".to_string(),
+            messages: Vec::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        });
 
         // Verify exists
-        let sessions = state.sessions.read().expect("lock");
-        let session = sessions.get(&chat_id).expect("chat should exist");
+        let session = state.sessions.get(&chat_id).expect("chat should exist");
         assert_eq!(session.agent_id, agent_id);
         assert_eq!(session.title, "Test chat");
     }

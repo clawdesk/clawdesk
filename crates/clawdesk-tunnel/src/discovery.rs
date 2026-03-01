@@ -1,8 +1,8 @@
 //! Peer discovery — QR code invites and invite links.
 //!
-//! # Security comparison with OpenClaw
+//! # Security comparison with legacy
 //!
-//! | Property               | OpenClaw                    | ClawDesk                          |
+//! | Property               | Legacy                    | ClawDesk                          |
 //! |------------------------|-----------------------------|------------------------------------|
 //! | Token transport        | URL query param (HTTP)      | QR code / invite code (out-of-band) |
 //! | Browser history leak   | Yes                         | No (never in URL)                  |

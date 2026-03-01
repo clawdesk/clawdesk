@@ -234,10 +234,15 @@ impl Provider for RouterProvider {
             "routing request"
         );
 
-        let mut routed_request = request.clone();
-        routed_request.model = model;
-
-        provider.complete(&routed_request).await
+        // Skip the O(N) clone when the resolved model matches the
+        // request model — a common case when there's no aliasing.
+        if request.model == model {
+            provider.complete(request).await
+        } else {
+            let mut routed_request = request.clone();
+            routed_request.model = model;
+            provider.complete(&routed_request).await
+        }
     }
 
     async fn stream(
@@ -255,10 +260,14 @@ impl Provider for RouterProvider {
             "routing stream"
         );
 
-        let mut routed_request = request.clone();
-        routed_request.model = model;
-
-        provider.stream(&routed_request, chunk_tx).await
+        // same optimization — avoid O(N) clone when model matches.
+        if request.model == model {
+            provider.stream(request, chunk_tx).await
+        } else {
+            let mut routed_request = request.clone();
+            routed_request.model = model;
+            provider.stream(&routed_request, chunk_tx).await
+        }
     }
 
     async fn health_check(&self) -> Result<(), ProviderError> {
@@ -279,10 +288,7 @@ impl Provider for RouterProvider {
         if any_healthy {
             Ok(())
         } else {
-            Err(ProviderError::ServerError {
-                provider: "router".into(),
-                status: 503,
-            })
+            Err(ProviderError::server_error("router", 503))
         }
     }
 }

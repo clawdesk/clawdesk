@@ -80,6 +80,9 @@ pub struct FailoverController {
     total_attempts: usize,
     /// Last retry delay for decorrelated jitter.
     last_delay: Duration,
+    /// Consecutive transient-error retries on the same (model, profile) config.
+    /// After `MAX_TRANSIENT_RETRIES` we advance to the next model.
+    consecutive_transient_retries: usize,
 }
 
 impl FailoverController {
@@ -100,6 +103,7 @@ impl FailoverController {
             state: FailoverState::Init,
             total_attempts: 0,
             last_delay: Duration::from_millis(500),
+            consecutive_transient_retries: 0,
         }
     }
 
@@ -183,6 +187,7 @@ impl FailoverController {
         }
         self.total_attempts += 1;
         self.state = FailoverState::Success;
+        self.consecutive_transient_retries = 0;
         info!(attempts = self.total_attempts, "Failover succeeded");
     }
 
@@ -245,6 +250,7 @@ impl FailoverController {
 
         match reason {
             FailoverReason::AuthError | FailoverReason::RateLimit | FailoverReason::BillingError => {
+                self.consecutive_transient_retries = 0;
                 // Try next profile for same model
                 let max_profiles = self
                     .profiles_per_model
@@ -269,6 +275,7 @@ impl FailoverController {
                 }
             }
             FailoverReason::ContextOverflow => {
+                self.consecutive_transient_retries = 0;
                 if self.config.enable_thinking_downgrade {
                     // Try downgrading thinking level
                     let current_level = match &self.state {
@@ -294,17 +301,26 @@ impl FailoverController {
                 }
             }
             FailoverReason::ModelUnavailable => {
+                self.consecutive_transient_retries = 0;
                 // Skip directly to next model
                 self.advance_to_next_model(current_model_index);
             }
             FailoverReason::ServerError | FailoverReason::NetworkError | FailoverReason::Timeout => {
-                // Transient: retry same configuration
-                self.state = FailoverState::TryProfile {
-                    model_index: current_model_index,
-                    profile_index: current_profile,
-                };
+                // Transient: retry same configuration, but cap consecutive retries
+                // to avoid burning all attempts on a dead endpoint.
+                self.consecutive_transient_retries += 1;
+                if self.consecutive_transient_retries >= 2 {
+                    self.consecutive_transient_retries = 0;
+                    self.advance_to_next_model(current_model_index);
+                } else {
+                    self.state = FailoverState::TryProfile {
+                        model_index: current_model_index,
+                        profile_index: current_profile,
+                    };
+                }
             }
             FailoverReason::Unknown => {
+                self.consecutive_transient_retries = 0;
                 // Unknown: advance to next model as a safe fallback
                 self.advance_to_next_model(current_model_index);
             }

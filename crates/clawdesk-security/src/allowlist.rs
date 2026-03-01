@@ -1,6 +1,7 @@
 //! Allowlist management for message routing.
 
 use clawdesk_types::channel::ChannelId;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -32,22 +33,22 @@ pub struct AllowlistEntry {
 pub struct AllowlistManager {
     mode: RwLock<AllowlistMode>,
     /// Global allowlist.
-    allowlist: RwLock<HashMap<String, AllowlistEntry>>,
+    allowlist: DashMap<String, AllowlistEntry>,
     /// Global blocklist.
     blocklist: RwLock<HashSet<String>>,
     /// Per-channel overrides.
-    channel_modes: RwLock<HashMap<ChannelId, AllowlistMode>>,
-    channel_allowlists: RwLock<HashMap<ChannelId, HashMap<String, AllowlistEntry>>>,
+    channel_modes: DashMap<ChannelId, AllowlistMode>,
+    channel_allowlists: DashMap<ChannelId, HashMap<String, AllowlistEntry>>,
 }
 
 impl AllowlistManager {
     pub fn new(mode: AllowlistMode) -> Self {
         Self {
             mode: RwLock::new(mode),
-            allowlist: RwLock::new(HashMap::new()),
+            allowlist: DashMap::new(),
             blocklist: RwLock::new(HashSet::new()),
-            channel_modes: RwLock::new(HashMap::new()),
-            channel_allowlists: RwLock::new(HashMap::new()),
+            channel_modes: DashMap::new(),
+            channel_allowlists: DashMap::new(),
         }
     }
 
@@ -59,7 +60,7 @@ impl AllowlistManager {
         }
 
         // Check channel-specific mode.
-        let channel_mode = self.channel_modes.read().await.get(channel).copied();
+        let channel_mode = self.channel_modes.get(channel).map(|e| *e.value());
         let effective_mode = channel_mode.unwrap_or(*self.mode.read().await);
 
         match effective_mode {
@@ -67,13 +68,13 @@ impl AllowlistManager {
             AllowlistMode::BlocklistOnly => true, // Already checked blocklist above.
             AllowlistMode::AllowlistOnly => {
                 // Check channel-specific allowlist first.
-                if let Some(channel_list) = self.channel_allowlists.read().await.get(channel) {
-                    if channel_list.contains_key(sender_id) {
+                if let Some(channel_list) = self.channel_allowlists.get(channel) {
+                    if channel_list.value().contains_key(sender_id) {
                         return true;
                     }
                 }
                 // Check global allowlist.
-                self.allowlist.read().await.contains_key(sender_id)
+                self.allowlist.contains_key(sender_id)
             }
         }
     }
@@ -81,15 +82,13 @@ impl AllowlistManager {
     /// Add a sender to the global allowlist.
     pub async fn allow(&self, entry: AllowlistEntry) {
         let id = entry.sender_id.clone();
-        self.allowlist.write().await.insert(id, entry);
+        self.allowlist.insert(id, entry);
     }
 
     /// Add a sender to a channel-specific allowlist.
     pub async fn allow_on_channel(&self, channel: ChannelId, entry: AllowlistEntry) {
         let id = entry.sender_id.clone();
         self.channel_allowlists
-            .write()
-            .await
             .entry(channel)
             .or_default()
             .insert(id, entry);
@@ -107,7 +106,7 @@ impl AllowlistManager {
 
     /// Remove a sender from the global allowlist.
     pub async fn remove(&self, sender_id: &str) {
-        self.allowlist.write().await.remove(sender_id);
+        self.allowlist.remove(sender_id);
     }
 
     /// Set the global mode.
@@ -117,22 +116,20 @@ impl AllowlistManager {
 
     /// Set a channel-specific mode.
     pub async fn set_channel_mode(&self, channel: ChannelId, mode: AllowlistMode) {
-        self.channel_modes.write().await.insert(channel, mode);
+        self.channel_modes.insert(channel, mode);
     }
 
     /// Get the effective mode for a channel.
     pub async fn effective_mode(&self, channel: &ChannelId) -> AllowlistMode {
         self.channel_modes
-            .read()
-            .await
             .get(channel)
-            .copied()
+            .map(|e| *e.value())
             .unwrap_or(*self.mode.read().await)
     }
 
     /// List all global allowlist entries.
     pub async fn list_allowed(&self) -> Vec<AllowlistEntry> {
-        self.allowlist.read().await.values().cloned().collect()
+        self.allowlist.iter().map(|e| e.value().clone()).collect()
     }
 
     /// List blocked senders.

@@ -22,7 +22,7 @@
 //! Supports ~20+ providers through a single configurable type.
 
 use async_trait::async_trait;
-use clawdesk_types::error::ProviderError;
+use clawdesk_types::error::{ProviderError, ProviderErrorKind};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -500,42 +500,27 @@ impl OpenAiCompatibleProvider {
         let provider = self.config.name.clone();
 
         if status == 429 {
-            return ProviderError::RateLimit {
-                provider,
-                retry_after: None,
-            };
+            return ProviderError::rate_limit(provider, None);
         }
         if status == 401 || status == 403 {
-            return ProviderError::AuthFailure {
-                provider,
-                profile_id: String::new(),
-            };
+            return ProviderError::auth_failure(provider, String::new());
         }
         if status == 404 {
-            return ProviderError::ModelNotFound {
-                provider,
-                model: String::new(),
-            };
+            return ProviderError::model_not_found(provider, String::new());
         }
 
         let lower = body.to_lowercase();
         if lower.contains("billing") || lower.contains("quota") || lower.contains("insufficient") {
-            return ProviderError::Billing { provider };
+            return ProviderError::billing(provider);
         }
         if lower.contains("context") && (lower.contains("length") || lower.contains("window")) {
-            return ProviderError::ContextLengthExceeded {
-                model: String::new(),
-                detail: body.to_string(),
-            };
+            return ProviderError::context_length_exceeded(provider, String::new(), body.to_string());
         }
 
         if status >= 500 {
-            ProviderError::ServerError { provider, status }
+            ProviderError::server_error(provider, status)
         } else {
-            ProviderError::FormatError {
-                provider,
-                detail: format!("HTTP {status}: {body}"),
-            }
+            ProviderError::format_error(provider, format!("HTTP {status}: {body}"))
         }
     }
 
@@ -625,16 +610,9 @@ impl Provider for OpenAiCompatibleProvider {
         let builder = self.apply_auth(builder);
         let resp = builder.send().await.map_err(|e| {
             if e.is_timeout() {
-                ProviderError::Timeout {
-                    provider: self.config.name.clone(),
-                    model: model.to_string(),
-                    after: std::time::Duration::from_secs(120),
-                }
+                ProviderError::timeout(self.config.name.clone(), model.to_string(), std::time::Duration::from_secs(120))
             } else {
-                ProviderError::NetworkError {
-                    provider: self.config.name.clone(),
-                    detail: e.to_string(),
-                }
+                ProviderError::network_error(self.config.name.clone(), e.to_string())
             }
         })?;
 
@@ -645,20 +623,14 @@ impl Provider for OpenAiCompatibleProvider {
         }
 
         let resp_body: CompletionResponse = resp.json().await.map_err(|e| {
-            ProviderError::FormatError {
-                provider: self.config.name.clone(),
-                detail: format!("JSON parse error: {e}"),
-            }
+            ProviderError::format_error(self.config.name.clone(), format!("JSON parse error: {e}"))
         })?;
 
         let choice = resp_body
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| ProviderError::FormatError {
-                provider: self.config.name.clone(),
-                detail: "no choices in response".into(),
-            })?;
+            .ok_or_else(|| ProviderError::format_error(self.config.name.clone(), "no choices in response"))?;
 
         let content = Self::effective_content(&choice.message);
         let finish_reason = Self::parse_finish_reason(choice.finish_reason.as_deref());
@@ -734,16 +706,9 @@ impl Provider for OpenAiCompatibleProvider {
         let builder = self.apply_auth(builder);
         let resp = builder.send().await.map_err(|e| {
             if e.is_timeout() {
-                ProviderError::Timeout {
-                    provider: self.config.name.clone(),
-                    model: model.to_string(),
-                    after: std::time::Duration::from_secs(120),
-                }
+                ProviderError::timeout(self.config.name.clone(), model.to_string(), std::time::Duration::from_secs(120))
             } else {
-                ProviderError::NetworkError {
-                    provider: self.config.name.clone(),
-                    detail: e.to_string(),
-                }
+                ProviderError::network_error(self.config.name.clone(), e.to_string())
             }
         })?;
 
@@ -761,10 +726,7 @@ impl Provider for OpenAiCompatibleProvider {
         let mut last_usage: Option<TokenUsage> = None;
 
         while let Some(chunk_result) = stream.next().await {
-            let bytes = chunk_result.map_err(|e| ProviderError::NetworkError {
-                provider: self.config.name.clone(),
-                detail: e.to_string(),
-            })?;
+            let bytes = chunk_result.map_err(|e| ProviderError::network_error(self.config.name.clone(), e.to_string()))?;
 
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -903,17 +865,11 @@ impl Provider for OpenAiCompatibleProvider {
 
         let builder = self.client.get(&url);
         let builder = self.apply_auth(builder);
-        let resp = builder.send().await.map_err(|e| ProviderError::NetworkError {
-            provider: self.config.name.clone(),
-            detail: e.to_string(),
-        })?;
+        let resp = builder.send().await.map_err(|e| ProviderError::network_error(self.config.name.clone(), e.to_string()))?;
 
         let status = resp.status().as_u16();
         if status == 401 || status == 403 {
-            return Err(ProviderError::AuthFailure {
-                provider: self.config.name.clone(),
-                profile_id: String::new(),
-            });
+            return Err(ProviderError::auth_failure(self.config.name.clone(), String::new()));
         }
 
         debug!(provider = %self.config.name, "health check passed");
@@ -1165,19 +1121,19 @@ mod tests {
             CompatibleConfig::new("test", "https://api.test.com", "key"),
         );
 
-        match provider.classify_error(429, "rate limited") {
-            ProviderError::RateLimit { .. } => {}
-            other => panic!("expected RateLimit, got {other:?}"),
+        match provider.classify_error(429, "rate limited").kind {
+            ProviderErrorKind::RateLimit { .. } => {}
+            ref other => panic!("expected RateLimit, got {other:?}"),
         }
 
-        match provider.classify_error(401, "unauthorized") {
-            ProviderError::AuthFailure { .. } => {}
-            other => panic!("expected AuthFailure, got {other:?}"),
+        match provider.classify_error(401, "unauthorized").kind {
+            ProviderErrorKind::AuthFailure { .. } => {}
+            ref other => panic!("expected AuthFailure, got {other:?}"),
         }
 
-        match provider.classify_error(500, "internal error") {
-            ProviderError::ServerError { status: 500, .. } => {}
-            other => panic!("expected ServerError(500), got {other:?}"),
+        match provider.classify_error(500, "internal error").kind {
+            ProviderErrorKind::ServerError { status: 500 } => {}
+            ref other => panic!("expected ServerError(500), got {other:?}"),
         }
     }
 }

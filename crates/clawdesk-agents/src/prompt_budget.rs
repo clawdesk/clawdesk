@@ -2,7 +2,7 @@
 //!
 //! Bridges the `PromptBudget` (domain) and `SkillSelector` (skills) with
 //! the runner's event emission, providing fine-grained budget telemetry
-//! that OpenClaw exposes but ClawDesk previously lacked.
+//! that the legacy system exposes but ClawDesk previously lacked.
 //!
 //! ## Architecture
 //!
@@ -204,8 +204,8 @@ impl PromptBudgetTracker {
     pub fn consume_history(&mut self, tokens: usize) -> usize {
         let remaining = self.global_remaining();
         let actual = if remaining < self.history_floor {
-            // History floor takes precedence — may exceed remaining
-            let floor_adjusted = tokens.min(self.history_floor);
+            // History floor takes precedence — but never exceed total budget.
+            let floor_adjusted = tokens.min(self.history_floor).min(remaining);
             self.history_compressed = tokens > floor_adjusted;
             floor_adjusted
         } else {
@@ -364,9 +364,10 @@ mod tests {
         t.consume_memory(2_000);
         t.skills_consumed = 2_000;
 
-        // Only 1000 remaining, but history_floor is 1500
+        // Only 1000 remaining, but history_floor is 1500.
+        // The corrected behaviour caps at remaining to prevent budget overflow.
         let actual = t.consume_history(5_000);
-        assert_eq!(actual, 1_500); // floor enforced
+        assert_eq!(actual, 1_000); // capped to remaining (budget invariant)
         assert!(t.report().history_compressed);
     }
 

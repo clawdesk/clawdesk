@@ -314,7 +314,7 @@ bundled = true
     )
 }
 
-/// T10: Convert all design skills into the core `Skill` type for unified registry loading.
+/// Convert all design skills into the core `Skill` type for unified registry loading.
 pub fn design_skills_as_core() -> Vec<crate::Skill> {
     use crate::definition::{SkillId, SkillManifest, SkillToolBinding, SkillTrigger};
 

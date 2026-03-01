@@ -19,10 +19,13 @@
 //! ```
 
 mod agent_compose;
+mod cli_approval;
 mod completions;
 mod doctor;
 mod gateway_rpc;
+mod local_agent;
 mod onboard;
+mod permission_modes;
 mod pipeline_run;
 mod policy_audit;
 mod security_audit;
@@ -223,6 +226,28 @@ enum AgentAction {
         #[arg(long)]
         model: Option<String>,
     },
+    /// Run an interactive local agent session (Claude Code equivalent)
+    #[command(name = "run")]
+    Run {
+        /// Model to use (e.g. claude-sonnet-4-20250514)
+        #[arg(long)]
+        model: Option<String>,
+        /// Auto-approve all tool calls (use with caution)
+        #[arg(long)]
+        allow_all_tools: bool,
+        /// Workspace / project root directory
+        #[arg(long)]
+        workspace: Option<String>,
+        /// System prompt override
+        #[arg(long)]
+        system_prompt: Option<String>,
+        /// Permission mode: interactive, allowlist, unattended
+        #[arg(long, default_value = "interactive")]
+        permission_mode: String,
+        /// Maximum tool rounds per turn
+        #[arg(long, default_value = "25")]
+        max_tool_rounds: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -390,6 +415,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Agent { action } => match action {
             AgentAction::Message { text, thinking, model } => {
                 cmd_agent_message(&cli.gateway_url, &text, &thinking, model).await?;
+            }
+            AgentAction::Run {
+                model,
+                allow_all_tools,
+                workspace,
+                system_prompt,
+                permission_mode,
+                max_tool_rounds,
+            } => {
+                let perm_mode = match permission_mode.as_str() {
+                    "allowlist" => permission_modes::PermissionMode::Allowlist,
+                    "unattended" => permission_modes::PermissionMode::Unattended,
+                    _ => permission_modes::PermissionMode::Interactive,
+                };
+                let perm_config = permission_modes::PermissionConfig {
+                    mode: perm_mode,
+                    ..Default::default()
+                };
+                let config = local_agent::LocalAgentConfig {
+                    model,
+                    allow_all_tools,
+                    workspace: workspace.map(std::path::PathBuf::from),
+                    system_prompt,
+                    max_tool_rounds,
+                    context_limit: 200_000,
+                    permission_config: perm_config,
+                };
+                local_agent::run_local_agent(config, cancel).await?;
             }
         },
         Commands::Login => {

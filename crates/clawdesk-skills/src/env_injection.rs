@@ -2,13 +2,13 @@
 //!
 //! ## Env Injection (P1)
 //!
-//! Bridges ClawDesk's config system to OpenClaw's env-var-based skill
+//! Bridges ClawDesk's config system to the env-var-based skill
 //! configuration. When a skill declares `primaryEnv: "OPENAI_API_KEY"` and
 //! the user has `skills.entries.openai-image-gen.apiKey` in their config,
 //! this module maps the config value to the environment variable before
 //! skill execution.
 //!
-//! This enables ~20% of OpenClaw skills (the "ContextPatch" tier) that
+//! This enables ~20% of legacy skills (the "ContextPatch" tier) that
 //! require API keys or config values to function.
 //!
 //! ## Security

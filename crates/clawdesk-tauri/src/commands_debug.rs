@@ -171,10 +171,7 @@ pub async fn debug_storage_snapshot(
     let storage_path = state.soch_store.store_path().display().to_string();
 
     // ── Read in-memory sessions ──
-    let memory_sessions: Vec<(String, crate::state::ChatSession)> = {
-        let sessions = state.sessions.read().map_err(|e| e.to_string())?;
-        sessions.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-    };
+    let memory_sessions: Vec<(String, crate::state::ChatSession)> = state.sessions.entries();
     let memory_session_count = memory_sessions.len();
 
     // ── Read agents from memory ──
@@ -451,10 +448,7 @@ pub async fn debug_force_persist(
     state.persist();
 
     // Verify by reading back
-    let mem_count = {
-        let sessions = state.sessions.read().map_err(|e| e.to_string())?;
-        sessions.len()
-    };
+    let mem_count = state.sessions.len();
     let sochdb_count = state.soch_store.scan("chats/").map(|e| e.len()).unwrap_or(0);
 
     let result = format!(
@@ -484,10 +478,8 @@ pub async fn debug_rehydrate(
         crate::state::hydrate_map(&state.soch_store, "chats/");
 
     let count = new_sessions.len();
-    {
-        let mut sessions = state.sessions.write().map_err(|e| e.to_string())?;
-        *sessions = new_sessions;
-    }
+    state.sessions.clear();
+    state.sessions.load_bulk(new_sessions);
 
     let result = format!("Re-hydrated {} sessions from SochDB.", count);
     emit_debug(

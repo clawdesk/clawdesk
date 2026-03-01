@@ -77,13 +77,19 @@ impl PluginSandbox {
     }
 
     /// Check if the plugin can access a network host.
+    ///
+    /// Matches exact host OR proper subdomain (e.g. a grant for
+    /// `"example.com"` matches `"sub.example.com"` but NOT
+    /// `"evil-example.com"`).
     pub fn can_access_network(&self, host: &str) -> bool {
         if self.grants.contains(&PluginCapabilityGrant::Full) {
             return true;
         }
         for grant in &self.grants {
             if let PluginCapabilityGrant::Network(hosts) = grant {
-                if hosts.iter().any(|h| host.ends_with(h)) {
+                if hosts.iter().any(|h| {
+                    host == h.as_str() || host.ends_with(&format!(".{}", h))
+                }) {
                     return true;
                 }
             }
@@ -136,9 +142,23 @@ impl PluginSandbox {
     }
 
     /// Release previously allocated memory.
+    ///
+    /// Uses a CAS loop to atomically clamp the subtraction,
+    /// preventing underflow when concurrent releases race.
     pub fn release_memory(&self, bytes: u64) {
-        self.memory_used
-            .fetch_sub(bytes.min(self.memory_used.load(Ordering::Relaxed)), Ordering::Relaxed);
+        loop {
+            let current = self.memory_used.load(Ordering::Acquire);
+            let new_val = current.saturating_sub(bytes);
+            match self.memory_used.compare_exchange_weak(
+                current,
+                new_val,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(_) => continue,
+            }
+        }
     }
 
     /// Try to spawn a new task. The returned `TaskGuard` decrements the
@@ -286,5 +306,55 @@ mod tests {
         assert!(sb.try_allocate_memory(64 * 1024 * 1024).is_ok());
         assert!(sb.try_allocate_memory(64 * 1024 * 1024).is_ok());
         assert!(sb.try_allocate_memory(1).is_err()); // Should exceed limit.
+    }
+
+    #[test]
+    fn test_network_grant_rejects_suffix_attack() {
+        // A grant for "example.com" must NOT match "evil-example.com"
+        let mut grants = HashSet::new();
+        grants.insert(PluginCapabilityGrant::Network(vec!["example.com".to_string()]));
+        let sb = sandbox(grants);
+        // Exact match — allowed
+        assert!(sb.can_access_network("example.com"));
+        // Proper subdomain — allowed
+        assert!(sb.can_access_network("sub.example.com"));
+        assert!(sb.can_access_network("deep.sub.example.com"));
+        // Suffix attack — REJECTED
+        assert!(!sb.can_access_network("evil-example.com"));
+        assert!(!sb.can_access_network("notexample.com"));
+    }
+
+    #[test]
+    fn test_release_memory_no_underflow() {
+        let sb = sandbox(HashSet::new());
+        sb.try_allocate_memory(100).unwrap();
+        // Release more than allocated — should clamp to 0, not underflow
+        sb.release_memory(200);
+        assert_eq!(sb.memory_used.load(Ordering::Relaxed), 0);
+        // Memory should still be allocatable after release
+        assert!(sb.try_allocate_memory(100).is_ok());
+    }
+
+    #[test]
+    fn test_release_memory_concurrent_safety() {
+        let sb = Arc::new(sandbox(HashSet::new()));
+        sb.try_allocate_memory(1000).unwrap();
+
+        // Spawn multiple concurrent releases
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let sb = Arc::clone(&sb);
+                std::thread::spawn(move || {
+                    sb.release_memory(200);
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Final value should be 0 (1000 - 10*200 = -1000, clamped to 0)
+        assert_eq!(sb.memory_used.load(Ordering::Relaxed), 0);
     }
 }

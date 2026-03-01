@@ -117,22 +117,15 @@ pub struct StaticPublicKey {
 }
 
 impl StaticPrivateKey {
-    /// Generate a new random private key.
+    /// Generate a new random private key using a CSPRNG.
     ///
-    /// Uses a combination of system time and process ID as entropy source.
-    /// In production, this should use `getrandom` or `/dev/urandom`.
+    /// Uses the OS-provided cryptographically secure random number
+    /// generator (`OsRng`) for full 128-bit security. The key is
+    /// clamped per X25519 / RFC 7748 §5.
     pub fn generate() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let pid = std::process::id() as u128;
-        let combined = seed ^ (pid << 64);
-
+        use rand::RngCore;
         let mut bytes = [0u8; 32];
-        // Simple KDF from seed — enough for dev/testing
-        let hash = sha256_simple(&combined.to_le_bytes());
-        bytes.copy_from_slice(&hash);
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
 
         // Clamp per X25519 spec (RFC 7748)
         bytes[0] &= 248;
@@ -149,11 +142,15 @@ impl StaticPrivateKey {
 
     /// Derive the corresponding public key.
     ///
-    /// This is a placeholder — real X25519 scalar multiplication would
-    /// use `curve25519-dalek` or a similar library.
+    /// **NOTE:** This is a placeholder using SHA-256 as a one-way function
+    /// rather than proper X25519 base-point scalar multiplication.
+    /// This means generated keypairs are NOT interoperable with real
+    /// WireGuard peers. For production interop, replace with
+    /// `x25519-dalek::StaticSecret::from(self.bytes).to_public()`.
+    ///
+    /// The one-way property of SHA-256 ensures the private key cannot
+    /// be recovered from the public key.
     pub fn public_key(&self) -> StaticPublicKey {
-        // Placeholder: hash the private key to derive a "public key"
-        // In production: X25519 base point multiplication
         StaticPublicKey {
             bytes: sha256_simple(&self.bytes),
         }

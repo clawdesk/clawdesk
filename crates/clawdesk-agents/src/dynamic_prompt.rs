@@ -1,4 +1,4 @@
-//! Task-derived system prompt assembly for ephemeral sub-agents (GAP-1).
+//! Task-derived system prompt assembly for ephemeral sub-agents.
 //!
 //! Generates focused, role-specific system prompts from runtime parameters.
 //! The prompt structure follows a hierarchical information architecture:

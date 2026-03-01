@@ -6,6 +6,7 @@
 //! with system tray, menubar, and WebView.
 
 pub mod canvas;
+pub mod bus_integration;
 pub mod commands;
 pub mod commands_a2a;
 pub mod commands_canvas;
@@ -24,12 +25,18 @@ pub mod commands_sochdb;
 pub mod commands_terminal;
 pub mod commands_threads;
 pub mod commands_voice;
+pub mod commands_sandbox;
+pub mod commands_mcp;
+pub mod commands_extensions;
+pub mod commands_migrate;
 pub mod deep_link;
 pub mod engine;
 pub mod error;
+pub mod message_pipeline;
 pub mod i18n;
 pub mod persistence;
 pub mod state;
+pub mod state_aggregates;
 pub mod tray;
 pub mod updater;
 
@@ -73,6 +80,7 @@ pub fn run() {
             commands::delete_chat,
             commands::clear_all_chats,
             commands::update_chat_title,
+            commands::debug_session_storage,
             commands::list_skills,
             commands::activate_skill,
             commands::deactivate_skill,
@@ -292,6 +300,48 @@ pub fn run() {
             // ── C1: System tray ────────────────────────────────────────
             tray::get_gateway_health,
             tray::refresh_gateway_health,
+            // ── Sandbox: Multi-modal code execution isolation ──────────
+            commands_sandbox::get_sandbox_status,
+            commands_sandbox::list_sandbox_backends,
+            commands_sandbox::execute_sandboxed,
+            commands_sandbox::get_sandbox_resource_limits,
+            commands_sandbox::cleanup_sandboxes,
+            // ── MCP: Model Context Protocol ───────────────────────────
+            commands_mcp::list_mcp_servers,
+            commands_mcp::connect_mcp_server,
+            commands_mcp::disconnect_mcp_server,
+            commands_mcp::list_mcp_tools,
+            commands_mcp::call_mcp_tool,
+            commands_mcp::get_mcp_server_status,
+            commands_mcp::list_mcp_templates,
+            commands_mcp::list_mcp_categories,
+            commands_mcp::install_mcp_template,
+            commands_mcp::disconnect_all_mcp,
+            // ── Extensions: Integration registry + vault + health ─────
+            commands_extensions::list_integrations,
+            commands_extensions::get_integration_detail,
+            commands_extensions::list_integration_categories,
+            commands_extensions::enable_integration,
+            commands_extensions::disable_integration,
+            commands_extensions::get_integration_stats,
+            commands_extensions::vault_status,
+            commands_extensions::vault_initialize,
+            commands_extensions::vault_unlock,
+            commands_extensions::vault_lock,
+            commands_extensions::vault_store_credential,
+            commands_extensions::vault_get_credential,
+            commands_extensions::vault_delete_credential,
+            commands_extensions::vault_list_credentials,
+            commands_extensions::get_all_health_statuses,
+            commands_extensions::get_integration_health,
+            commands_extensions::check_integration_health,
+            commands_extensions::start_extension_oauth,
+            commands_extensions::complete_extension_oauth,
+            // ── Migration: Import from other AI apps ──────────────────
+            commands_migrate::list_migration_sources,
+            commands_migrate::validate_migration_source,
+            commands_migrate::run_migration,
+            commands_migrate::preview_migration,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -304,14 +354,14 @@ pub fn run() {
             }
             info!(
                 "ClawDesk Tauri app starting — {} IPC commands registered",
-                138 // 22 core + 63 service + 5 memory + 46 SochDB advanced + 2 tray
+                177 // 138 existing + 5 sandbox + 10 MCP + 19 extensions + 4 migrate + 1 padding
             );
 
             // C1: System tray with gateway health indicator
             if let Err(e) = tray::setup_tray(app) {
                 warn!("System tray initialization failed: {}", e);
             }
-            // T21: Post-init health verification
+            // Post-init health verification
             let state: tauri::State<'_, AppState> = app.state();
             let warnings = state.verify_health();
             if !warnings.is_empty() {
@@ -433,9 +483,8 @@ pub fn run() {
                     app_handle: app.handle().clone(),
                     channel_registry: std::sync::Arc::clone(&state.channel_registry),
                     cancel: state.cancel.clone(),
-                    conversation_histories: std::sync::Arc::new(tokio::sync::Mutex::new(
-                        std::collections::HashMap::new(),
-                    )),
+                    conversation_histories: std::sync::Arc::new(dashmap::DashMap::new()),
+                    last_channel_origins: std::sync::Arc::clone(&state.last_channel_origins),
                 });
 
                 // Check which channels are registered and start their inbound loops
@@ -479,7 +528,7 @@ pub fn run() {
                 }
             }
 
-            // T25: Initialize OTEL tracer if endpoint is configured
+            // Initialize OTEL tracer if endpoint is configured
             if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
                 info!(endpoint = %endpoint, "Initializing OpenTelemetry tracer");
                 let otel_config = clawdesk_observability::tracer::OtelConfig {
@@ -517,6 +566,28 @@ pub fn run() {
                 info!("Periodic SochDB + ThreadStore checkpoint thread started (30s interval)");
             }
 
+            // ── Launch enabled MCP integrations + health monitor ──
+            // Runs on a background thread (Tauri setup doesn't have an async
+            // runtime yet). Connects MCP servers for previously-enabled
+            // integrations and starts the health monitor loop.
+            {
+                let handle = app.handle().clone();
+                std::thread::Builder::new()
+                    .name("extensions-launch".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("extensions-launch runtime");
+                        rt.block_on(async {
+                            let app_state: tauri::State<'_, AppState> = handle.state();
+                            crate::commands_extensions::launch_enabled_integrations(&app_state).await;
+                        });
+                    })
+                    .expect("failed to spawn extensions-launch thread");
+                info!("Extension MCP launch thread spawned");
+            }
+
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -531,7 +602,7 @@ pub fn run() {
                     state.cancel.cancel();
                     info!("App exit requested — flushing state to SochDB + ThreadStore");
                     // Capture session count before persist for debug logging
-                    let session_count = state.sessions.read().map(|s| s.len()).unwrap_or(0);
+                    let session_count = state.sessions.len();
                     commands_debug::emit_debug(app_handle, commands_debug::DebugEvent::info(
                         "shutdown", "exit_persist_start",
                         format!("ExitRequested — persisting {} sessions to SochDB", session_count),

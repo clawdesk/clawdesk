@@ -5,10 +5,10 @@
 //! that converts events into pipeline executions.
 
 use crate::event::{Event, EventKind, Priority};
-use crate::priority::WfqScheduler;
+use crate::priority::ShardedWfqScheduler;
 use crate::subscription::Subscription;
 use crate::topic::{Topic, TopicConfig};
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -16,35 +16,63 @@ use tracing::{debug, info, warn};
 /// Central event bus dispatcher.
 ///
 /// Manages topics, subscriptions, and the WFQ priority dispatch loop.
+///
+/// Subscriptions are indexed by topic for O(1) lookup. Subscriptions
+/// with exact topic patterns go into `topic_subs`; those with glob wildcards
+/// go into `glob_subs` (typically < 5, scanned on every publish).
+///
+/// Integrated WFQ scheduler for priority-weighted dispatch ordering.
+/// Events enqueued via `publish()` are available for weighted-fair dequeue
+/// through `drain_prioritized()`.
 pub struct EventBus {
     /// Topic name → Topic ring buffer
-    topics: RwLock<HashMap<String, Arc<Topic>>>,
-    /// Active subscriptions
-    subscriptions: RwLock<Vec<Subscription>>,
+    topics: DashMap<String, Arc<Topic>>,
+    /// Topic-indexed subscriptions: topic_name → Vec<Subscription>
+    /// Only subscriptions with exact (non-glob) topic patterns.
+    topic_subs: DashMap<String, Vec<Subscription>>,
+    /// Subscriptions with glob patterns (e.g., "email.*") — scanned on every publish.
+    glob_subs: RwLock<Vec<Subscription>>,
+    /// Sharded WFQ scheduler for priority-ordered dispatch.
+    /// K=3 independent heaps (one per priority class) to reduce enqueue contention.
+    wfq: ShardedWfqScheduler<DispatchItem>,
+    /// Monotonic virtual clock for WFQ arrival timestamps.
+    wfq_clock: std::sync::atomic::AtomicU64,
     /// Default topic capacity
     default_capacity: usize,
+}
+
+/// Item enqueued into the WFQ scheduler for priority dispatch.
+#[derive(Debug, Clone)]
+pub struct DispatchItem {
+    /// Topic the event was published to.
+    pub topic: String,
+    /// Offset within the topic ring buffer.
+    pub offset: u64,
+    /// Pipeline IDs that matched the event.
+    pub pipeline_ids: Vec<String>,
+    /// Original event priority.
+    pub priority: Priority,
 }
 
 impl EventBus {
     /// Create a new event bus.
     pub fn new(default_capacity: usize) -> Arc<Self> {
         Arc::new(Self {
-            topics: RwLock::new(HashMap::new()),
-            subscriptions: RwLock::new(Vec::new()),
+            topics: DashMap::new(),
+            topic_subs: DashMap::new(),
+            glob_subs: RwLock::new(Vec::new()),
+            wfq: ShardedWfqScheduler::new(),
+            wfq_clock: std::sync::atomic::AtomicU64::new(0),
             default_capacity,
         })
     }
 
     /// Create or retrieve a topic by name.
     pub async fn topic(&self, name: &str) -> Arc<Topic> {
-        {
-            let topics = self.topics.read().await;
-            if let Some(t) = topics.get(name) {
-                return t.clone();
-            }
+        if let Some(t) = self.topics.get(name) {
+            return t.clone();
         }
-        let mut topics = self.topics.write().await;
-        topics
+        self.topics
             .entry(name.to_string())
             .or_insert_with(|| {
                 info!(topic = name, "Creating new event bus topic");
@@ -59,9 +87,8 @@ impl EventBus {
 
     /// Publish an event to its topic and return matching subscription IDs.
     ///
-    /// The event is written to the topic ring buffer, then all subscriptions
-    /// are evaluated. Matching subscription pipeline IDs are returned for
-    /// the caller (typically the gateway) to trigger pipeline execution.
+    /// O(1) topic-indexed lookup for exact subscriptions + O(G) scan
+    /// for glob subscriptions where G ≪ S. Total: O(K + G) instead of O(S).
     pub async fn publish(&self, event: Event) -> Vec<String> {
         let topic_name = event.topic.clone();
         let kind = event.kind.clone();
@@ -72,16 +99,39 @@ impl EventBus {
         let offset = topic.publish(event).await;
         debug!(topic = %topic_name, offset, "Event published");
 
-        // Find matching subscriptions
-        let subs = self.subscriptions.read().await;
-        let matches: Vec<String> = subs
-            .iter()
-            .filter(|s| s.matches(&topic_name, &kind, priority))
-            .map(|s| s.pipeline_id.clone())
-            .collect();
+        let mut matches: Vec<String> = Vec::new();
+
+        // O(1) lookup: exact topic subscriptions
+        if let Some(subs) = self.topic_subs.get(&topic_name) {
+            for s in subs.value() {
+                if s.matches(&topic_name, &kind, priority) {
+                    matches.push(s.pipeline_id.clone());
+                }
+            }
+        }
+
+        // O(G) scan: glob subscriptions (typically < 5)
+        {
+            let gsubs = self.glob_subs.read().await;
+            for s in gsubs.iter() {
+                if s.matches(&topic_name, &kind, priority) {
+                    matches.push(s.pipeline_id.clone());
+                }
+            }
+        }
 
         if !matches.is_empty() {
             debug!(topic = %topic_name, matched = matches.len(), "Subscriptions triggered");
+
+            // Enqueue into WFQ for priority-weighted dispatch ordering.
+            let arrival = self.wfq_clock.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as f64;
+            let item = DispatchItem {
+                topic: topic_name.clone(),
+                offset,
+                pipeline_ids: matches.clone(),
+                priority,
+            };
+            self.wfq.enqueue(item, priority, arrival).await;
         }
 
         matches
@@ -102,45 +152,104 @@ impl EventBus {
     }
 
     /// Register a subscription.
+    ///
+    /// Routes to topic_subs (indexed) or glob_subs based on pattern.
     pub async fn subscribe(&self, sub: Subscription) {
         info!(id = %sub.id, name = %sub.name, "Registering event subscription");
-        let mut subs = self.subscriptions.write().await;
-        subs.push(sub);
+        let has_glob = sub.topic_patterns.iter().any(|p| p.contains('*'));
+        if has_glob {
+            let mut gsubs = self.glob_subs.write().await;
+            gsubs.push(sub);
+        } else {
+            for pat in &sub.topic_patterns {
+                self.topic_subs.entry(pat.clone()).or_default().push(sub.clone());
+            }
+        }
     }
 
     /// Remove a subscription by ID.
     pub async fn unsubscribe(&self, sub_id: &str) {
-        let mut subs = self.subscriptions.write().await;
-        subs.retain(|s| s.id != sub_id);
+        for mut entry in self.topic_subs.iter_mut() {
+            entry.value_mut().retain(|s| s.id != sub_id);
+        }
+        {
+            let mut gsubs = self.glob_subs.write().await;
+            gsubs.retain(|s| s.id != sub_id);
+        }
     }
 
     /// List all registered topics.
     pub async fn list_topics(&self) -> Vec<String> {
-        self.topics.read().await.keys().cloned().collect()
+        self.topics.iter().map(|e| e.key().clone()).collect()
     }
 
     /// List all subscriptions.
     pub async fn list_subscriptions(&self) -> Vec<Subscription> {
-        self.subscriptions.read().await.clone()
+        let mut all = Vec::new();
+        // Collect topic-indexed subs (dedup by id since a sub with multiple patterns appears multiple times)
+        {
+            let mut seen = std::collections::HashSet::new();
+            for entry in self.topic_subs.iter() {
+                for s in entry.value() {
+                    if seen.insert(s.id.clone()) {
+                        all.push(s.clone());
+                    }
+                }
+            }
+        }
+        {
+            let gsubs = self.glob_subs.read().await;
+            all.extend(gsubs.iter().cloned());
+        }
+        all
     }
 
     /// Get aggregate stats for monitoring.
     pub async fn stats(&self) -> BusStats {
-        let topics = self.topics.read().await;
         let mut topic_stats = Vec::new();
-        for (name, topic) in topics.iter() {
+        for entry in self.topics.iter() {
             topic_stats.push(TopicStats {
-                name: name.clone(),
-                head_offset: topic.head_offset(),
-                buffered: topic.buffered_count().await,
+                name: entry.key().clone(),
+                head_offset: entry.value().head_offset(),
+                buffered: entry.value().buffered_count().await,
             });
         }
-        let subs = self.subscriptions.read().await;
+        let sub_count = {
+            let mut seen = std::collections::HashSet::new();
+            for entry in self.topic_subs.iter() {
+                for s in entry.value() {
+                    seen.insert(s.id.clone());
+                }
+            }
+            let gsubs = self.glob_subs.read().await;
+            seen.len() + gsubs.len()
+        };
         BusStats {
             topic_count: topic_stats.len(),
-            subscription_count: subs.len(),
+            subscription_count: sub_count,
             topics: topic_stats,
         }
+    }
+
+    /// Drain up to `max` items in weighted-fair priority order.
+    ///
+    /// Returns dispatch items ordered by WFQ virtual finish time, giving
+    /// Urgent events ~8× the throughput of Batch events. Callers should
+    /// process the returned items sequentially to honour the WFQ schedule.
+    ///
+    /// O(max × log K) where K = 3 priority classes.
+    pub async fn drain_prioritized(&self, max: usize) -> Vec<DispatchItem> {
+        self.wfq
+            .drain(max)
+            .await
+            .into_iter()
+            .map(|pi| pi.item)
+            .collect()
+    }
+
+    /// Number of events pending in the WFQ dispatch queue.
+    pub async fn pending_dispatch_count(&self) -> usize {
+        self.wfq.len().await
     }
 }
 

@@ -3,9 +3,8 @@
 //! Default-deny: all access is denied unless explicitly permitted.
 
 use clawdesk_types::security::FsAcl;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use tokio::sync::RwLock;
 
 /// Who is requesting access.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -83,20 +82,20 @@ type PermKey = (Principal, Resource, Action);
 pub struct AclManager {
     /// Indexed permissions: (principal, resource, action) → Vec<Permission>.
     /// Multiple permissions for the same key are supported (e.g., allow + deny).
-    index: RwLock<HashMap<PermKey, Vec<Permission>>>,
+    index: DashMap<PermKey, Vec<Permission>>,
 }
 
 impl AclManager {
     pub fn new() -> Self {
         Self {
-            index: RwLock::new(HashMap::new()),
+            index: DashMap::new(),
         }
     }
 
     /// Add a permission rule. O(1) amortized insert.
     pub async fn add_permission(&self, perm: Permission) {
         let key = (perm.principal.clone(), perm.resource.clone(), perm.action);
-        self.index.write().await.entry(key).or_default().push(perm);
+        self.index.entry(key).or_default().push(perm);
     }
 
     /// Check access for a principal performing an action on a resource.
@@ -109,12 +108,10 @@ impl AclManager {
         resource: &Resource,
         action: Action,
     ) -> AccessDecision {
-        let index = self.index.read().await;
-
         let key = (principal.clone(), resource.clone(), action);
-        if let Some(perms) = index.get(&key) {
+        if let Some(perms) = self.index.get(&key) {
             // Check for explicit denies first (deny wins).
-            for perm in perms {
+            for perm in perms.value() {
                 if perm.effect == Effect::Deny {
                     return AccessDecision::Deny {
                         reason: "explicitly denied".to_string(),
@@ -123,7 +120,7 @@ impl AclManager {
             }
 
             // Check for allows.
-            for perm in perms {
+            for perm in perms.value() {
                 if perm.effect == Effect::Allow {
                     if perm.conditions.is_empty() {
                         return AccessDecision::Allow;
@@ -189,8 +186,7 @@ impl AclManager {
 
     /// Remove all permissions for a principal.
     pub async fn revoke_all(&self, principal: &Principal) {
-        let mut index = self.index.write().await;
-        index.retain(|key, _| key.0 != *principal);
+        self.index.retain(|key, _| key.0 != *principal);
     }
 }
 

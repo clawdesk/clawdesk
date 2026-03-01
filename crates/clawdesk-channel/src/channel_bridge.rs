@@ -61,6 +61,11 @@ impl ChannelBridge {
             ChannelId::IMessage => "imessage",
             ChannelId::Irc => "irc",
             ChannelId::Internal => "internal",
+            ChannelId::Teams => "teams",
+            ChannelId::Matrix => "matrix",
+            ChannelId::Signal => "signal",
+            ChannelId::Webhook => "webhook",
+            ChannelId::Mastodon => "mastodon",
         }
     }
 

@@ -1,6 +1,6 @@
-//! Integration test — batch-load actual OpenClaw skills and generate triage report.
+//! Integration test — batch-load actual legacy skills and generate triage report.
 //!
-//! This test exercises the OpenClaw adapter against the real skill files
+//! This test exercises the legacy adapter against the real skill files
 //! in the repository to verify compatibility and produce a triage report.
 
 use clawdesk_skills::openclaw_adapter::{
@@ -9,23 +9,23 @@ use clawdesk_skills::openclaw_adapter::{
 };
 use std::path::Path;
 
-/// Known OpenClaw skills directory in the workspace.
+/// Known legacy skills directory in the workspace.
 const OPENCLAW_SKILLS_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 fn workspace_openclaw_skills_dir() -> std::path::PathBuf {
-    // Navigate from clawdesk/crates/clawdesk-skills/ up to llamabot/openclaw/skills/
+    // Navigate from clawdesk/crates/clawdesk-skills/ up to llamabot/legacy/skills/
     Path::new(OPENCLAW_SKILLS_DIR)
         .join("../../..")
-        .join("openclaw/skills")
+        .join("legacy/skills")
         .canonicalize()
-        .expect("openclaw/skills directory should exist in workspace")
+        .expect("legacy/skills directory should exist in workspace")
 }
 
 #[tokio::test]
 async fn batch_load_all_openclaw_skills() {
     let skills_dir = workspace_openclaw_skills_dir();
     if !skills_dir.exists() {
-        eprintln!("Skipping: OpenClaw skills dir not found at {}", skills_dir.display());
+        eprintln!("Skipping: legacy skills dir not found at {}", skills_dir.display());
         return;
     }
 

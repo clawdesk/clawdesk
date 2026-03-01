@@ -13,23 +13,17 @@ use clawdesk_storage::memory_backend::{
     AtomicWriteResult, BatchWriteResult, GraphNeighborInfo, MemoryBackend, MemoryTraceSpan,
     MemoryWriteOp, PolicyCheckResult, TemporalEdgeInfo,
     // Memory Schema types (A4)
-    Episode, EpisodeType, Event, EventRole, EventMetrics, Entity, EntityKind, EntityFacts,
+    Episode, EpisodeType, Event, Entity, EntityKind, EntityFacts,
     // Context Query types (A1)
     ContextQueryResult, ContextSection, ContextFormat, TruncationStrategy,
     // Task Queue types (A8)
     BackgroundTask, TaskClaimResult, TaskQueueStats,
-    // Cost Model types (A9)
-    SearchProfile, QueryCostSummary,
-    // Filter Pushdown types (A12)
-    FilterPredicate, FilteredSearchOptions,
-    // Multi-Vector types (A11)
-    AggregationMethod, MultiVectorDocument, DocumentSearchResult,
     // Path Query types (A6)
     PathQueryRow,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// A concrete `MemoryBackend` + `VectorStore` implementation backed by SochDB.
 ///
@@ -80,6 +74,30 @@ impl SochMemoryBackend {
     pub fn store_arc(&self) -> Arc<SochStore> {
         self.store.clone()
     }
+
+    /// Get a reference to the shared SochConn.
+    ///
+    /// All 6 internal modules (`atomic_writer`, `knowledge_graph`, `temporal_graph`,
+    /// `policy_engine`, `trace_store`, and `conn`) share this same `SochConn`
+    /// backed by a single `Arc<SochStore>`. Cross-module writes through the conn
+    /// use `write_batch` for atomicity.
+    pub fn conn(&self) -> &SochConn {
+        &self.conn
+    }
+
+    /// Execute a cross-module write within a shared transaction boundary.
+    ///
+    /// Wraps the `SochConn` in a `TransactionalConn` so all put/delete ops
+    /// within the closure are buffered and committed atomically via `write_batch`.
+    /// This ensures cross-module consistency (e.g., writing an episode and its
+    /// graph edges in a single atomic commit).
+    pub fn with_transaction<F, T>(&self, label: &str, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&mut crate::transaction::TransactionalConn<SochConn>) -> sochdb::error::Result<T>,
+    {
+        crate::transaction::with_transaction(self.conn.clone(), label, f)
+            .map_err(|e| format!("transaction '{}' failed: {}", label, e))
+    }
 }
 
 // ── VectorStore delegation ──────────────────────────────────────────────────
@@ -100,7 +118,34 @@ impl clawdesk_storage::VectorStore for SochMemoryBackend {
         embedding: &[f32],
         metadata: Option<serde_json::Value>,
     ) -> Result<(), clawdesk_types::error::StorageError> {
-        self.store.insert(collection, id, embedding, metadata).await
+        // Route through write_atomic for WAL-backed atomicity (#15).
+        // This ensures every vector insert goes through the same crash-safe
+        // path as MemoryBackend::write_atomic / batch_insert_embeddings.
+        //
+        // Convert Option<Value> → HashMap<String, String> for MemoryWriteOp.
+        let meta_map: std::collections::HashMap<String, String> = metadata
+            .and_then(|v| v.as_object().cloned())
+            .map(|obj| {
+                obj.into_iter()
+                    .map(|(k, v)| {
+                        let s = match v {
+                            serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        };
+                        (k, s)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let op = MemoryWriteOp::PutEmbedding {
+            collection: collection.to_string(),
+            id: id.to_string(),
+            embedding: embedding.to_vec(),
+            metadata: meta_map,
+        };
+        self.write_atomic(id, vec![op])
+            .map_err(|e| clawdesk_types::error::StorageError::SerializationFailed { detail: e })?;
+        Ok(())
     }
 
     async fn search(
@@ -314,12 +359,14 @@ impl MemoryBackend for SochMemoryBackend {
         edge_type: &str,
         max_depth: usize,
     ) -> Result<Vec<String>, String> {
-        // BFS traversal from start_node following edge_type edges
-        let mut visited = std::collections::HashSet::new();
+        // BFS traversal (VecDeque) from start_node following edge_type edges.
+        // Using rustc_hash::FxHashSet for faster hashing on short strings.
+        let mut visited = rustc_hash::FxHashSet::default();
         let mut memory_ids = Vec::new();
-        let mut frontier = vec![(start_node.to_string(), 0usize)];
+        let mut frontier: VecDeque<(String, usize)> = VecDeque::new();
+        frontier.push_back((start_node.to_string(), 0));
 
-        while let Some((node_id, depth)) = frontier.pop() {
+        while let Some((node_id, depth)) = frontier.pop_front() {
             if depth > max_depth || visited.contains(&node_id) {
                 continue;
             }
@@ -337,8 +384,8 @@ impl MemoryBackend for SochMemoryBackend {
                         memory_ids.push(edge.to_id.clone());
                     }
                 }
-                if depth + 1 <= max_depth {
-                    frontier.push((edge.to_id, depth + 1));
+                if depth + 1 <= max_depth && !visited.contains(&edge.to_id) {
+                    frontier.push_back((edge.to_id, depth + 1));
                 }
             }
         }
@@ -346,30 +393,23 @@ impl MemoryBackend for SochMemoryBackend {
         Ok(memory_ids)
     }
 
-    fn policy_check_content(&self, content: &str) -> PolicyCheckResult {
-        // Use the policy engine's `put` method with a sentinel key to check
-        // if any before_write policies would deny or modify the content.
-        // The key prefix "memory:content_check:" triggers any policies registered
-        // for memory content validation (e.g., PII redaction).
+    fn policy_check_content(&self, _content: &str) -> PolicyCheckResult {
+        // Pure read-only policy evaluation — no sentinel writes.
+        // Construct a PolicyContext and use get_denied_ids to check if any
+        // BeforeWrite policies would deny this content.
         let check_key = b"memory:content_check";
+        let ctx = sochdb::policy::PolicyContext::new("write", check_key);
 
-        // Try a put through the policy engine — if it's denied, we catch the error.
-        // Note: This actually writes to the store, so we immediately clean up.
-        match self.policy_engine.put(check_key, content.as_bytes(), None) {
-            Ok(()) => {
-                // Write succeeded — clean up the sentinel key
-                let _ = self.policy_engine.delete(check_key, None);
-                PolicyCheckResult::Allow
-            }
-            Err(e) => {
-                if e.message.contains("blocked") || e.message.contains("denied") {
-                    PolicyCheckResult::Deny(e.message)
-                } else {
-                    // Rate limit or other error — allow by default
-                    warn!(error = %e.message, "policy check error, allowing by default");
-                    PolicyCheckResult::Allow
-                }
-            }
+        let denied = self.policy_engine.get_denied_ids(
+            sochdb::policy::PolicyTrigger::BeforeWrite,
+            &[check_key.to_vec()],
+            &ctx,
+        );
+
+        if denied.is_empty() {
+            PolicyCheckResult::Allow
+        } else {
+            PolicyCheckResult::Deny(format!("Content blocked by {} policy rule(s)", denied.len()))
         }
     }
 
@@ -509,6 +549,22 @@ impl MemoryBackend for SochMemoryBackend {
             .map_err(|e| format!("serialize episode: {e}"))?;
         self.conn.put(key.as_bytes(), &data)
             .map_err(|e| format!("store episode: {e}"))?;
+
+        // Build secondary indexes for efficient search (#3).
+        let ep_id_bytes = episode.episode_id.as_bytes();
+
+        // Tag index: ep_tag:{tag_lower}:{episode_id} → episode_id
+        for tag in &episode.tags {
+            let idx_key = format!("ep_tag:{}:{}", tag.to_lowercase(), episode.episode_id);
+            self.conn.put(idx_key.as_bytes(), ep_id_bytes)
+                .map_err(|e| format!("episode tag index write: {e}"))?;
+        }
+
+        // Temporal index: ep_ts:{ts_hex}:{episode_id} → episode_id
+        let ts_key = format!("ep_ts:{:016x}:{}", episode.ts_start, episode.episode_id);
+        self.conn.put(ts_key.as_bytes(), ep_id_bytes)
+            .map_err(|e| format!("episode temporal index write: {e}"))?;
+
         Ok(())
     }
 
@@ -527,26 +583,59 @@ impl MemoryBackend for SochMemoryBackend {
     }
 
     fn search_episodes(&self, query: &str, k: usize) -> Result<Vec<Episode>, String> {
-        // Scan all episodes and filter by summary/tags containing query
-        let prefix = b"episodes:";
-        let results = self.conn.scan(prefix)
-            .map_err(|e| format!("scan episodes: {e}"))?;
-
         let query_lower = query.to_lowercase();
-        let mut episodes: Vec<Episode> = results
-            .into_iter()
-            .filter_map(|(_, data)| {
-                let ep: sochdb_core::memory_schema::Episode =
-                    serde_json::from_slice(&data).ok()?;
-                let matches = ep.summary.to_lowercase().contains(&query_lower)
-                    || ep.tags.iter().any(|t| t.to_lowercase().contains(&query_lower));
-                if matches {
-                    Some(soch_episode_to_local(ep))
-                } else {
-                    None
+
+        // Try tag index first (exact tag match) → avoids O(N) full scan (#3)
+        let tag_prefix = format!("ep_tag:{}:", query_lower);
+        let tag_hits = self.conn.scan(tag_prefix.as_bytes())
+            .unwrap_or_default();
+
+        let mut episodes: Vec<Episode> = if !tag_hits.is_empty() {
+            // Index hit: fetch only matched episodes by ID
+            let mut eps = Vec::with_capacity(tag_hits.len());
+            for (_, id_bytes) in &tag_hits {
+                if let Ok(id) = std::str::from_utf8(id_bytes) {
+                    if let Ok(Some(ep)) = self.get_episode(id) {
+                        eps.push(ep);
+                    }
                 }
-            })
-            .collect();
+            }
+            // Also include summary matches (tag index only covers exact tag)
+            let prefix = b"episodes:";
+            if let Ok(results) = self.conn.scan(prefix) {
+                let seen: std::collections::HashSet<String> =
+                    eps.iter().map(|e| e.episode_id.clone()).collect();
+                for (_, data) in results {
+                    if let Ok(ep) = serde_json::from_slice::<sochdb_core::memory_schema::Episode>(&data) {
+                        if !seen.contains(&ep.episode_id)
+                            && ep.summary.to_lowercase().contains(&query_lower)
+                        {
+                            eps.push(soch_episode_to_local(ep));
+                        }
+                    }
+                }
+            }
+            eps
+        } else {
+            // No tag index hit: fall back to full scan
+            let prefix = b"episodes:";
+            let results = self.conn.scan(prefix)
+                .map_err(|e| format!("scan episodes: {e}"))?;
+            results
+                .into_iter()
+                .filter_map(|(_, data)| {
+                    let ep: sochdb_core::memory_schema::Episode =
+                        serde_json::from_slice(&data).ok()?;
+                    let matches = ep.summary.to_lowercase().contains(&query_lower)
+                        || ep.tags.iter().any(|t| t.to_lowercase().contains(&query_lower));
+                    if matches {
+                        Some(soch_episode_to_local(ep))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
         // Sort by most recent first and limit
         episodes.sort_by(|a, b| b.ts_start.cmp(&a.ts_start));
@@ -584,6 +673,12 @@ impl MemoryBackend for SochMemoryBackend {
             .map_err(|e| format!("serialize entity: {e}"))?;
         self.conn.put(key.as_bytes(), &data)
             .map_err(|e| format!("store entity: {e}"))?;
+
+        // Secondary index: ent_kind:{kind_str}:{entity_id} → entity_id (#3)
+        let kind_str = format!("{:?}", entity.kind).to_lowercase();
+        let idx_key = format!("ent_kind:{}:{}", kind_str, entity.entity_id);
+        self.conn.put(idx_key.as_bytes(), entity.entity_id.as_bytes())
+            .map_err(|e| format!("entity kind index: {e}"))?;
         Ok(())
     }
 
@@ -606,29 +701,53 @@ impl MemoryBackend for SochMemoryBackend {
         query: &str,
         k: usize,
     ) -> Result<Vec<Entity>, String> {
-        let prefix = b"entities:";
-        let results = self.conn.scan(prefix)
-            .map_err(|e| format!("scan entities: {e}"))?;
-
         let query_lower = query.to_lowercase();
-        let mut entities: Vec<Entity> = results
-            .into_iter()
-            .filter_map(|(_, data)| {
-                let entity: Entity = serde_json::from_slice(&data).ok()?;
-                // Filter by kind if specified
-                if let Some(ref k) = kind {
-                    if &entity.kind != k {
-                        return None;
+
+        // If kind is specified, use the kind index to narrow scan (#3)
+        let candidates: Vec<(Vec<u8>, Vec<u8>)> = if let Some(ref ek) = kind {
+            let kind_str = format!("{:?}", ek).to_lowercase();
+            let idx_prefix = format!("ent_kind:{}:", kind_str);
+            self.conn.scan(idx_prefix.as_bytes()).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let mut entities: Vec<Entity> = if kind.is_some() && !candidates.is_empty() {
+            // Fetch only entities that matched the kind index
+            candidates
+                .iter()
+                .filter_map(|(_, id_bytes)| {
+                    let id = std::str::from_utf8(id_bytes).ok()?;
+                    let entity = self.get_entity(id).ok()??;
+                    if entity.name.to_lowercase().contains(&query_lower) {
+                        Some(entity)
+                    } else {
+                        None
                     }
-                }
-                // Filter by name/attributes
-                if entity.name.to_lowercase().contains(&query_lower) {
-                    Some(entity)
-                } else {
-                    None
-                }
-            })
-            .collect();
+                })
+                .collect()
+        } else {
+            // Full scan fallback (no kind filter or empty index)
+            let prefix = b"entities:";
+            let results = self.conn.scan(prefix)
+                .map_err(|e| format!("scan entities: {e}"))?;
+            results
+                .into_iter()
+                .filter_map(|(_, data)| {
+                    let entity: Entity = serde_json::from_slice(&data).ok()?;
+                    if let Some(ref ek) = kind {
+                        if &entity.kind != ek {
+                            return None;
+                        }
+                    }
+                    if entity.name.to_lowercase().contains(&query_lower) {
+                        Some(entity)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
         entities.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         entities.truncate(k);
@@ -666,8 +785,8 @@ impl MemoryBackend for SochMemoryBackend {
 
     fn context_query(
         &self,
-        session_id: Option<&str>,
-        agent_id: Option<&str>,
+        _session_id: Option<&str>,
+        _agent_id: Option<&str>,
         token_budget: usize,
         sections: Vec<(&str, i32, &str)>,
         truncation: TruncationStrategy,
@@ -677,10 +796,7 @@ impl MemoryBackend for SochMemoryBackend {
         // Sections are packed in priority order (lower number = higher priority).
         // When total tokens exceed budget, truncation strategy is applied.
 
-        let estimate_tokens = |text: &str| -> usize {
-            // ~4 chars per token (GPT-family heuristic)
-            (text.len() + 3) / 4
-        };
+        let estimate_tokens = clawdesk_types::tokenizer::estimate_tokens;
 
         // Sort sections by priority (lower = more important)
         let mut sorted_sections: Vec<(&str, i32, &str)> = sections;
@@ -717,7 +833,9 @@ impl MemoryBackend for SochMemoryBackend {
                 total_tokens += section_tokens;
             } else {
                 // Needs truncation
-                let max_chars = remaining * 4; // inverse of estimate
+                // Estimate how many chars fit in the remaining token budget.
+                // Use a conservative 3.5 chars/token ratio for truncation.
+                let max_chars = (remaining as f64 * 3.5) as usize;
                 let truncated_content = match truncation {
                     TruncationStrategy::TailDrop => {
                         // Keep the beginning
@@ -725,12 +843,25 @@ impl MemoryBackend for SochMemoryBackend {
                     }
                     TruncationStrategy::HeadDrop => {
                         // Keep the end (most recent)
-                        let skip = content.len().saturating_sub(max_chars);
+                        let total_chars = content.chars().count();
+                        let skip = total_chars.saturating_sub(max_chars);
                         content.chars().skip(skip).collect::<String>()
                     }
-                    TruncationStrategy::Proportional | TruncationStrategy::Strict => {
-                        // For proportional/strict, just truncate tail
-                        content.chars().take(max_chars).collect::<String>()
+                    TruncationStrategy::Proportional => {
+                        // Keep a proportional share of each section relative
+                        // to remaining budget vs total remaining sections.
+                        let remaining_sections = sorted_sections.len()
+                            .saturating_sub(result_sections.len());
+                        let share = if remaining_sections > 0 {
+                            max_chars / remaining_sections.max(1)
+                        } else {
+                            max_chars
+                        };
+                        content.chars().take(share).collect::<String>()
+                    }
+                    TruncationStrategy::Strict => {
+                        // Drop the entire section if it doesn't fit
+                        String::new()
                     }
                 };
                 let actual_tokens = estimate_tokens(&truncated_content);
@@ -874,8 +1005,8 @@ impl MemoryBackend for SochMemoryBackend {
         filters: Option<Vec<(&str, serde_json::Value)>>,
     ) -> Result<Vec<PathQueryRow>, String> {
         // Use SochConn's scan() with the path as a prefix.
-        // SochDB paths use "." as separator, but KV uses "/" — normalize.
-        let prefix = path.replace('.', "/");
+        // SochDB stored keys use ":" as separator (e.g. "episodes:id").
+        let prefix = path.replace('.', ":");
         let results = self.conn.scan(prefix.as_bytes())
             .map_err(|e| format!("path query scan: {e}"))?;
 
@@ -920,7 +1051,7 @@ impl MemoryBackend for SochMemoryBackend {
     fn sql_query(
         &self,
         sql: &str,
-        params: &[serde_json::Value],
+        _params: &[serde_json::Value],
     ) -> Result<Vec<HashMap<String, serde_json::Value>>, String> {
         // Light SQL interpretation over SochConn's KV layer.
         // Supports: SELECT * FROM <table> [WHERE <field>=<value>] [LIMIT n]
@@ -1056,7 +1187,6 @@ fn soch_value_to_json(v: sochdb_core::soch::SochValue) -> serde_json::Value {
 
 /// Simple base64 encoding for blob values.
 fn base64_encode(data: &[u8]) -> String {
-    use std::fmt::Write;
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {

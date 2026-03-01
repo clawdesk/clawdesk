@@ -14,7 +14,7 @@ use clawdesk_security::IdentityContract;
 use clawdesk_skills::definition::{SkillId, SkillSource, SkillState};
 use clawdesk_tunnel::metrics::TunnelMetricsSnapshot;
 use clawdesk_types::security::{AuditActor, AuditCategory, AuditOutcome};
-// GAP-8: ClawDeskError/AgentError no longer needed — failover is handled inside runner
+// ClawDeskError/AgentError no longer needed — failover is handled inside runner
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-fn safe_prefix(input: &str, max_bytes: usize) -> &str {
+pub(crate) fn safe_prefix(input: &str, max_bytes: usize) -> &str {
     if input.len() <= max_bytes {
         return input;
     }
@@ -39,15 +39,15 @@ fn safe_prefix(input: &str, max_bytes: usize) -> &str {
 }
 
 // ═══════════════════════════════════════════════════════════
-// T4 FIX: SandboxGate adapter — bridges SandboxPolicyEngine → SandboxGate trait
+// SandboxGate adapter — bridges SandboxPolicyEngine → SandboxGate trait
 // ═══════════════════════════════════════════════════════════
 
 /// Adapter implementing the runner's `SandboxGate` trait by delegating to
 /// `SandboxPolicyEngine::decide()`. Lives in the Tauri layer because it
 /// bridges `clawdesk-security` (concrete) → `clawdesk-agents` (trait),
 /// respecting the dependency inversion between crates.
-struct SandboxGateAdapter {
-    engine: Arc<clawdesk_security::sandbox_policy::SandboxPolicyEngine>,
+pub(crate) struct SandboxGateAdapter {
+    pub(crate) engine: Arc<clawdesk_security::sandbox_policy::SandboxPolicyEngine>,
 }
 
 #[async_trait::async_trait]
@@ -105,9 +105,13 @@ pub struct CreateAgentRequest {
     pub skills: Vec<String>,
     pub model: String,
     pub source: Option<String>,
-    /// T8: Optional template ID — if set, persona/skills/model derive from template defaults.
+    /// Optional template ID — if set, persona/skills/model derive from template defaults.
     #[serde(default)]
     pub template_id: Option<String>,
+    /// Channels this agent should handle (e.g. ["telegram", "discord"]).
+    /// Empty means the agent is a wildcard and handles any channel.
+    #[serde(default)]
+    pub channels: Vec<String>,
 }
 
 /// Create a new agent with an IdentityContract.
@@ -139,7 +143,7 @@ pub async fn create_agent(
     let identity = IdentityContract::new(request.persona.clone(), IdentitySource::UserConfig);
     let persona_hash = identity.persona_hash_hex();
 
-    // T8: If a template_id is provided, merge template defaults into the agent.
+    // If a template_id is provided, merge template defaults into the agent.
     // User-supplied values take priority; template fills in blanks.
     let (effective_persona, effective_skills, effective_model, template_id) =
         if let Some(ref tmpl_id) = request.template_id {
@@ -183,6 +187,7 @@ pub async fn create_agent(
         tokens_used: 0,
         source: request.source.unwrap_or_else(|| "clawdesk".to_string()),
         template_id,
+        channels: request.channels,
     };
 
     {
@@ -217,6 +222,21 @@ pub async fn create_agent(
     state.persist_agent(&result.id, &result);
     emit_security_changed(&app, &state).await;
 
+    // Register in A2A directory so other agents can discover this one.
+    if let Ok(mut dir) = state.agent_directory.write() {
+        let mut card = clawdesk_acp::AgentCard::new(
+            result.id.clone(),
+            result.name.clone(),
+            "local://desktop",
+        );
+        card.description = result.persona.chars().take(200).collect();
+        card = card.with_capability(clawdesk_acp::CapabilityId::TextGeneration);
+        if !result.channels.is_empty() {
+            card = card.with_capability(clawdesk_acp::CapabilityId::Messaging);
+        }
+        dir.register(card);
+    }
+
     Ok(result)
 }
 
@@ -239,9 +259,7 @@ pub async fn delete_agent(agent_id: String, state: State<'_, AppState>, app: App
             if let Ok(mut identities) = state.identities.write() {
                 identities.remove(&agent_id);
             }
-            if let Ok(mut sessions) = state.sessions.write() {
-                sessions.remove(&agent_id);
-            }
+            state.sessions.remove(&agent_id);
         }
         removed
     };
@@ -249,6 +267,10 @@ pub async fn delete_agent(agent_id: String, state: State<'_, AppState>, app: App
     if removed {
         // Delete from SochDB
         state.delete_agent_from_store(&agent_id);
+        // Remove from A2A directory
+        if let Ok(mut dir) = state.agent_directory.write() {
+            dir.deregister(&agent_id);
+        }
         state
             .audit_logger
             .log(
@@ -266,7 +288,7 @@ pub async fn delete_agent(agent_id: String, state: State<'_, AppState>, app: App
 }
 
 // ═══════════════════════════════════════════════════════════
-// OpenClaw Import
+// Legacy Import
 // ═══════════════════════════════════════════════════════════
 
 #[tauri::command]
@@ -401,6 +423,7 @@ pub async fn import_openclaw_config(
                 tokens_used: 0,
                 source: "openclaw-import".to_string(),
                 template_id: None,
+                channels: Vec::new(),
             };
 
             if let Ok(mut identities) = state.identities.write() {
@@ -435,6 +458,7 @@ pub async fn import_openclaw_config(
             tokens_used: 0,
             source: "openclaw-import".to_string(),
             template_id: None,
+            channels: Vec::new(),
         };
         if let Ok(mut identities) = state.identities.write() {
             identities.insert(agent.id.clone(), identity);
@@ -556,7 +580,7 @@ pub struct SendMessageResponse {
 // decides which builtin tool to call.
 //
 // This eliminates the SkillBridgeTool stub architecture and aligns with
-// OpenClaw's working model where skills are SKILL.md markdown files.
+// the working model where skills are SKILL.md markdown files.
 
 /// Clone the base tool registry for per-request use.
 ///
@@ -564,7 +588,7 @@ pub struct SendMessageResponse {
 /// `provided_tools` — dead handlers that returned placeholder strings.
 /// Now skills teach the LLM *how to use* existing builtin tools via their
 /// prompt_fragment. No skill-defined tools are registered.
-fn build_skill_tool_registry(
+pub(crate) fn build_skill_tool_registry(
     _skills: &[clawdesk_skills::definition::Skill],
     base_registry: &clawdesk_agents::tools::ToolRegistry,
 ) -> clawdesk_agents::tools::ToolRegistry {
@@ -660,7 +684,7 @@ pub async fn send_message(
     let mut agent = {
         let agents = state.agents.read().map_err(|e| e.to_string())?;
 
-        // GAP-4 FIX: Check channel bindings before falling back to request.agent_id.
+        // Check channel bindings before falling back to request.agent_id.
         // If bindings are configured, a more-specific match (channel + account +
         // group + thread) may override the requested agent_id. This enables
         // multi-channel deployments where different agents handle different channels.
@@ -701,8 +725,7 @@ pub async fn send_message(
         let provided = request.chat_id.as_deref().unwrap_or("").to_string();
         if !provided.is_empty() {
             // Validate it exists
-            let sessions = state.sessions.read().map_err(|e| e.to_string())?;
-            if sessions.contains_key(&provided) {
+            if state.sessions.contains(&provided) {
                 (provided, false)
             } else {
                 // Frontend sent a stale chat_id — create a new one
@@ -713,7 +736,7 @@ pub async fn send_message(
         }
     };
 
-    // GAP-5 FIX: Construct a proper SessionKey for SochDB ConversationStore
+    // Construct a proper SessionKey for SochDB ConversationStore
     // operations. Tauri desktop sessions use "webchat" channel with the UUID
     // as identifier. This key is used for durable `ConversationStore::append_message`
     // calls that write to the SochDB conversation log alongside the in-memory HashMap.
@@ -736,7 +759,7 @@ pub async fn send_message(
         String::new()
     };
 
-    // Store user message in session (GAP-1: unified write via append_session_message)
+    // Store user message in session
     let user_msg = ChatMessage {
         id: Uuid::new_v4().to_string(),
         role: "user".to_string(),
@@ -760,7 +783,7 @@ pub async fn send_message(
         ));
     }
 
-    // GAP-5 FIX: Also write the user message to the ConversationStore under the
+    // Also write the user message to the ConversationStore under the
     // structured SessionKey. This dual-write ensures the SochDB conversation log
     // stays in sync with the in-memory HashMap while we migrate to SessionKey-primary.
     {
@@ -821,7 +844,32 @@ pub async fn send_message(
     // 1. provider_override from user settings (creates a one-shot provider)
     // 2. ProviderNegotiator (registered from env vars at startup)
     // 3. Legacy resolve_provider fallback
-    let model_full_id = AppState::resolve_model_id(&agent.model);
+    //
+    // GAP-G: Per-turn dynamic model routing — when the agent uses a default
+    // model, the TurnRouter (LinUCB bandit + ModelCatalog) may suggest a
+    // better model based on the user message features. The routed model
+    // overrides the default but respects explicitly pinned models.
+    let base_model_id = AppState::resolve_model_id(&agent.model);
+    let (model_full_id, routing_decision) = {
+        let is_default_model = agent.model.is_empty()
+            || agent.model == "default"
+            || agent.model == "auto";
+        if is_default_model {
+            if let Some(routed) = state.turn_router.route_turn(&request.content, None) {
+                tracing::info!(
+                    from = %base_model_id,
+                    to = %routed.model_id,
+                    score = routed.score,
+                    "GAP-G: Turn router overriding model"
+                );
+                (routed.model_id.clone(), Some(routed))
+            } else {
+                (base_model_id, None)
+            }
+        } else {
+            (base_model_id, None)
+        }
+    };
     let provider: Arc<dyn clawdesk_providers::Provider> = if let Some(ref prov_name) = request.provider_override {
         // Create a one-shot provider from the user's saved settings
         use clawdesk_providers::anthropic::AnthropicProvider;
@@ -889,7 +937,7 @@ pub async fn send_message(
     // in-memory HashMap fallback for legacy sessions that pre-date dual-write.
     //
     // SochDB is the durable source of truth. The per-message records under
-    // `sessions/{key}/messages/{ts}` are written by GAP-5 dual-write for every
+    // `sessions/{key}/messages/{ts}` are written by dual-write for every
     // user and assistant message. `load_history()` does a reverse prefix scan
     // (O(log N + k)) and returns messages in chronological order.
     //
@@ -908,13 +956,10 @@ pub async fn send_message(
             .await
             .unwrap_or_default();
 
-        // Also load from in-memory HashMap (hydrated from chats/{chat_id} blob)
-        let hashmap_messages = {
-            let sessions = state.sessions.read().map_err(|e| e.to_string())?;
-            sessions.get(&chat_id)
-                .map(|s| s.messages.clone())
-                .unwrap_or_default()
-        };
+        // Also load from in-memory LRU cache (hydrated from chats/{chat_id} blob)
+        let hashmap_messages = state.sessions.get(&chat_id)
+            .map(|s| s.messages)
+            .unwrap_or_default();
 
         let (history_source, history_vec) = if !soch_messages.is_empty() && soch_messages.len() >= hashmap_messages.len() {
             // ── Primary path: SochDB ConversationStore (more complete) ──
@@ -998,7 +1043,7 @@ pub async fn send_message(
         history_vec
     };
 
-    // GAP-6 FIX: Media pipeline — enrich context with URL metadata.
+    // Media pipeline — enrich context with URL metadata.
     // Uses LinkUnderstanding::extract_urls() to detect URLs in the user message.
     // If URLs are found, prepend a context note so the LLM is aware of linked content.
     // Full content fetching requires an HttpFetcher implementation (future work).
@@ -1020,7 +1065,7 @@ pub async fn send_message(
     }
 
     // Context Guard — check if history exceeds αC and APPLY compaction
-    // T7: After compaction, the guard clone is passed to the runner to prevent
+    // After compaction, the guard clone is passed to the runner to prevent
     // duplicate compaction (runner uses shared state instead of a fresh guard).
     let compacted_guard = {
         use clawdesk_domain::context_guard::{ContextGuard, ContextGuardConfig, GuardAction, CompactionLevel, CompactionResult};
@@ -1081,7 +1126,7 @@ pub async fn send_message(
                                 }
                                 transcript.push('\n');
                             }
-                            // GAP-2: LLM-based summarization (async, guard released above)
+                            // LLM-based summarization (async, guard released above)
                             let summary = clawdesk_agents::compaction::summarize_transcript_via_llm(
                                 &provider,
                                 &model_full_id,
@@ -1127,7 +1172,7 @@ pub async fn send_message(
                 }));
             }
             GuardAction::ForceTruncate { retain_tokens } => {
-                // T12: Budget-based truncation — keep newest messages within budget
+                // Budget-based truncation — keep newest messages within budget
                 let mut running = 0usize;
                 let mut keep_from = history.len();
                 for i in (0..history.len()).rev() {
@@ -1156,7 +1201,7 @@ pub async fn send_message(
                 }));
             }
             GuardAction::CircuitBroken { retain_tokens } => {
-                // T12: Circuit breaker open — budget-based fallback truncation
+                // Circuit breaker open — budget-based fallback truncation
                 let mut running = 0usize;
                 let mut keep_from = history.len();
                 for i in (0..history.len()).rev() {
@@ -1212,6 +1257,10 @@ pub async fn send_message(
         .collect();
     let active_skills = crate::engine::load_active_skills(&state.skill_registry);
 
+    let available_ch_names: Vec<String> = state.channel_registry.read()
+        .map(|reg| reg.list().iter().map(|id| format!("{}", id).to_lowercase()).collect())
+        .unwrap_or_default();
+
     let pipeline_result = crate::engine::build_prompt_pipeline(
         crate::engine::PromptPipelineInput {
             user_content: &request.content,
@@ -1230,6 +1279,7 @@ pub async fn send_message(
                 runtime_cap: 512,
                 safety_cap: 1_024,
             },
+            available_channels: available_ch_names,
         },
         &state.memory,
         &active_skills,
@@ -1266,7 +1316,7 @@ pub async fn send_message(
         hasher.finish()
     };
 
-    // Task 2: Pre-compute query embedding for semantic cache lookup.
+    // Pre-compute query embedding for semantic cache lookup.
     // This embedding is reused for both cache lookup and cache store,
     // eliminating duplicate embedding API calls and enabling ANN-based
     // semantic cache matching instead of exact-only matching.
@@ -1278,14 +1328,14 @@ pub async fn send_message(
         }
     };
 
-    // T13: Include model name in cache namespace — prevents cross-model cache hits
+    // Include model name in cache namespace — prevents cross-model cache hits
     // (same query + same persona but different model would otherwise collide).
     let cache_namespace = format!("agent:{}:{}:{:x}", agent.id, agent.model, prompt_hash);
     let cache_hit = state.semantic_cache.lookup(
         &request.content,
         &cache_namespace,
         0, // no allowed-set filtering
-        query_embedding.as_deref(), // Task 2: pass pre-computed embedding for ANN lookup
+        query_embedding.as_deref(), // pass pre-computed embedding for ANN lookup
     ).ok().and_then(|result| {
         if let Some(entry) = result.entry {
             match result.match_type {
@@ -1323,7 +1373,7 @@ pub async fn send_message(
                 compaction: None,
             }),
         };
-        // Store the cached response in session (GAP-1: unified write)
+        // Store the cached response in session
         {
             state.append_session_message(
                 &chat_id, &agent.id, &auto_title, assistant_msg.clone(), &now,
@@ -1377,7 +1427,7 @@ pub async fn send_message(
         context_limit: agent.token_budget,
         response_reserve: 8_192,
         failover: Some(clawdesk_types::failover::FailoverConfig::default()),
-        // T2 FIX: Wire workspace path so bootstrap context, tool scoping,
+        // Wire workspace path so bootstrap context, tool scoping,
         // and skill file discovery all activate. Without this, ShellTool
         // runs unconfined and bootstrap files (CLAUDE.md, README.md) are
         // never discovered.
@@ -1392,7 +1442,7 @@ pub async fn send_message(
     let app_for_events = app.clone();
     let agent_id_for_events = agent.id.clone();
 
-    // T7 FIX: Acquire per-session serialization lane before running the agent.
+    // Acquire per-session serialization lane before running the agent.
     // This ensures only one agent run per session at a time. If another run is
     // active for this agent, this await blocks until it completes. The guard is
     // held for the duration of the agent run and released on drop.
@@ -1413,7 +1463,7 @@ pub async fn send_message(
         &state.tool_registry,
     );
 
-    // GAP-7 FIX: Register the sub-agent spawn tool per-request so the callback
+    // Register the sub-agent spawn tool per-request so the callback
     // has access to AppState (agents, negotiator, cancel token). The LLM can call
     // `spawn_subagent` to delegate a task to another agent and get the result.
     {
@@ -1425,6 +1475,7 @@ pub async fn send_message(
         let cancel_ref = run_cancel.clone();
         let base_tools = Arc::clone(&state.tool_registry);
         let sandbox_engine_ref = Arc::clone(&state.sandbox_engine);
+        let memory_ref = Arc::clone(&state.memory);
 
         let spawn_fn: Arc<
             dyn Fn(String, String, u64)
@@ -1436,6 +1487,7 @@ pub async fn send_message(
             let cancel = cancel_ref.clone();
             let tools = Arc::clone(&base_tools);
             let sandbox_eng = Arc::clone(&sandbox_engine_ref);
+            let memory = Arc::clone(&memory_ref);
             Box::pin(async move {
                 let agent = agents.get(&agent_id)
                     .ok_or_else(|| format!("Sub-agent '{}' not found", agent_id))?;
@@ -1455,10 +1507,33 @@ pub async fn send_message(
                     ..Default::default()
                 };
                 let runner = clawdesk_agents::AgentRunner::new(provider, tools, config, cancel)
-                    // T4 FIX: Wire sandbox gate into sub-agent runner
+                    // Wire sandbox gate into sub-agent runner
                     .with_sandbox_gate(Arc::new(crate::commands::SandboxGateAdapter {
                         engine: sandbox_eng,
-                    }));
+                    }))
+                    // GAP-B: Wire memory recall so sub-agents get memory context
+                    .with_memory_recall({
+                        let mem = memory;
+                        Arc::new(move |query: String| {
+                            let mem = Arc::clone(&mem);
+                            Box::pin(async move {
+                                match mem.recall(&query, Some(5)).await {
+                                    Ok(results) => results.into_iter().filter_map(|r| {
+                                        let text = r.content?;
+                                        if text.is_empty() { return None; }
+                                        Some(clawdesk_agents::MemoryRecallResult {
+                                            relevance: r.score as f64,
+                                            source: r.metadata.get("source")
+                                                .and_then(|v| v.as_str())
+                                                .map(String::from),
+                                            content: text,
+                                        })
+                                    }).collect(),
+                                    Err(_) => vec![],
+                                }
+                            })
+                        })
+                    });
                 let history = vec![
                     clawdesk_providers::ChatMessage::new(clawdesk_providers::MessageRole::User, task.as_str()),
                 ];
@@ -1473,7 +1548,7 @@ pub async fn send_message(
         clawdesk_agents::builtin_tools::register_subagent_tool(&mut request_tool_registry, spawn_fn);
     }
 
-    // GAP-1 FIX: Register the dynamic agent spawn tool per-request.
+    // Register the dynamic agent spawn tool per-request.
     // The LLM can call `dynamic_spawn` to create ephemeral specialist agents
     // without needing a pre-registered agent ID. The factory function
     // `build_dynamic_spawn_fn` returns a closure with the correct depth baked
@@ -1497,10 +1572,39 @@ pub async fn send_message(
 
     let request_tool_registry = Arc::new(request_tool_registry);
 
-    // GAP-4/1 FIX: Look up channel metadata from the dock and build a
+    // /1 FIX: Look up channel metadata from the dock and build a
     // ChannelContext for the runner. For Tauri desktop, this is always WebChat.
+    // Include cross-channel messaging hint so the LLM knows it can send
+    // messages to Telegram/Discord/etc. via message_send tool.
     let channel_context = {
         use clawdesk_types::channel::ChannelId;
+
+        // Build cross-channel hint listing all connected external channels
+        let other_channels: Vec<String> = state.channel_registry.read()
+            .map(|reg| {
+                reg.list()
+                    .iter()
+                    .filter(|id| !matches!(id,
+                        ChannelId::WebChat | ChannelId::Internal
+                    ))
+                    .map(|id| format!("{:?}", id).to_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let cross_channel_hint = if other_channels.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "You are connected to these other channels: [{}]. \
+                 When the user asks you to send a message to one of those channels \
+                 (e.g. \"say hi to telegram\", \"tell discord hello\"), \
+                 IMMEDIATELY call the message_send tool with channel=<name> and content=<message>. \
+                 Do NOT ask for IDs or configuration. Do NOT refuse. Just call message_send.",
+                other_channels.join(", ")
+            ))
+        };
+
         state.channel_dock.to_runner_context(ChannelId::WebChat).map(|rcc| {
             clawdesk_agents::runner::ChannelContext {
                 channel_name: rcc.channel_name,
@@ -1510,7 +1614,7 @@ pub async fn send_message(
                 supports_media: rcc.supports_media,
                 max_message_length: rcc.max_message_length,
                 markup_format: rcc.markup_format,
-                extra_instructions: None,
+                extra_instructions: cross_channel_hint,
                 history_limit: Some(200),
             }
         })
@@ -1534,12 +1638,11 @@ pub async fn send_message(
             clawdesk_providers::profile_rotation::RotationConfig::default(),
         ),
     ))
-    // GAP-1/5 FIX: Inject channel context so runner can adapt prompts and
+    // /5 FIX: Inject channel context so runner can adapt prompts and
     // chunk responses for the target channel. Gap 5 (multi-payload segments)
     // auto-activates once channel_context is Some.
-    .with_hook_manager(Arc::clone(&state.hook_manager))      // GAP-7 FIX
-    .with_session_context(chat_id.clone(), agent.id.clone()) // GAP-7: session+agent for hook context
-    // T4 FIX: Wire sandbox policy gate — tools whose required isolation level
+    .with_hook_manager(Arc::clone(&state.hook_manager))      //    .with_session_context(chat_id.clone(), agent.id.clone()) // session+agent for hook context
+    // Wire sandbox policy gate — tools whose required isolation level
     // exceeds platform capability are blocked before execution.
     .with_sandbox_gate(Arc::new(crate::commands::SandboxGateAdapter {
         engine: Arc::clone(&state.sandbox_engine),
@@ -1549,7 +1652,7 @@ pub async fn send_message(
         runner = runner.with_channel_context(ch_ctx);
     }
 
-    // GAP-2 FIX: Wire the runner-level SkillProvider for per-turn dynamic
+    // Wire the runner-level SkillProvider for per-turn dynamic
     // skill selection during multi-round tool-use conversations (unified engine).
     if let Some(skill_provider) = crate::engine::build_skill_provider(active_skills) {
         runner = runner.with_skill_provider(skill_provider);
@@ -1576,7 +1679,7 @@ pub async fn send_message(
         }
     });
 
-    // Run the agent pipeline with full failover support (GAP-8 fix).
+    // Run the agent pipeline with full failover support (fix).
     //
     // `run_with_failover()` replaces the manual retry loop with the
     // FailoverController DFA — multi-stage recovery:
@@ -1587,7 +1690,7 @@ pub async fn send_message(
     //
     // When FailoverConfig is `None`, it falls through to a single `run()` call.
     //
-    // GAP-3 FIX: Acquire global concurrency permit before the LLM call.
+    // Acquire global concurrency permit before the LLM call.
     // This bounds total parallel LLM calls across all sessions, preventing
     // API rate-limit exhaustion and memory pressure from unbounded concurrency.
     let _llm_permit = state.llm_concurrency.acquire().await
@@ -1630,7 +1733,7 @@ pub async fn send_message(
                     "message": msg.clone(),
                 }),
             );
-            
+
             // Construct a fake AgentResponse to represent the error message so it gets persisted
             let err_resp = clawdesk_agents::runner::AgentResponse {
                 content: msg.clone(),
@@ -1654,7 +1757,7 @@ pub async fn send_message(
     }
 
     // ── SochDB SemanticCache: store the LLM response for future cache hits ──
-    // Task 2: Pass the pre-computed query embedding so SemanticCache stores it
+    // Pass the pre-computed query embedding so SemanticCache stores it
     // alongside the response. Future lookups with similar embeddings will hit
     // ANN-based semantic matching, not just exact string matching.
     if execution_err.is_none() {
@@ -1663,7 +1766,7 @@ pub async fn send_message(
             &cache_namespace,
             0,
             agent_response.content.as_bytes(),
-            query_embedding.clone(), // Task 2: store the query embedding
+            query_embedding.clone(), // store the query embedding
             vec![],
             None,
         );
@@ -1818,6 +1921,21 @@ pub async fn send_message(
     };
     state.record_usage(&agent.model, input_tokens, output_tokens);
 
+    // GAP-G: Record reward feedback for the turn router's online learning.
+    // Reward signal: 1.0 for successful + fast, degraded for errors/slow.
+    if let Some(ref rd) = routing_decision {
+        let reward = if execution_err.is_some() {
+            0.1 // Execution failed
+        } else if elapsed_ms > 30_000 {
+            0.3 // Very slow
+        } else if elapsed_ms > 10_000 {
+            0.5 // Slow
+        } else {
+            0.8 // Good
+        };
+        state.turn_router.record_feedback(&rd.selected_key, &rd.features, reward);
+    }
+
     // ── SochDB TraceStore: record token metrics and finalize run ──
     if let Some(tid) = &soch_trace_id {
         let cost_millicents = (cost_usd * 100_000.0) as u64; // USD → millicents
@@ -1900,7 +2018,7 @@ pub async fn send_message(
         }
     });
 
-    // Save content before moving into ChatMessage so GAP-5 block can reference it.
+    // Save content before moving into ChatMessage so block can reference it.
     let response_content = agent_response.content.clone();
     let assistant_msg = ChatMessage {
         id: Uuid::new_v4().to_string(),
@@ -1951,7 +2069,7 @@ pub async fn send_message(
             }
         }
 
-        // GAP-1: Unified write via append_session_message
+        // Unified write via append_session_message
         let msg_count = state.append_session_message(
             &chat_id, &agent.id, &auto_title, assistant_msg.clone(), &now,
         ).map_err(|e| {
@@ -1966,7 +2084,7 @@ pub async fn send_message(
             format!("Assistant message persisted. chat_id={}, msgs_in_session={}", chat_id, msg_count),
         ));
 
-        // GAP-5 FIX: Write assistant response to ConversationStore under SessionKey.
+        // Write assistant response to ConversationStore under SessionKey.
         // BUG FIX: Use Utc::now() instead of `now` (which is the request-start
         // timestamp). Using the same `now` for both user and assistant messages
         // causes them to share the same millisecond key in ConversationStore
@@ -1992,12 +2110,11 @@ pub async fn send_message(
             }
         }
 
-        // GAP-9: Periodically index the session into semantic memory.
+        // Periodically index the session into semantic memory.
         // Every 10 turns, chunk the conversation and store in MemoryManager
         // so it can be recalled in future conversations.
         if msg_count % 10 == 0 && msg_count >= 4 {
-            let sessions = state.sessions.read().map_err(|e| e.to_string())?;
-            if let Some(session) = sessions.get(&chat_id) {
+            if let Some(session) = state.sessions.get(&chat_id) {
                 let session_msgs: Vec<clawdesk_memory::SessionMessage> = session
                     .messages
                     .iter()
@@ -2006,7 +2123,6 @@ pub async fn send_message(
                         content: m.content.clone(),
                     })
                     .collect();
-                drop(sessions);
                 let memory = Arc::clone(&state.memory);
                 let chat_id_owned = chat_id.clone();
                 // Spawn indexing as a background task — don't block the response
@@ -2120,15 +2236,14 @@ pub async fn send_message(
 /// Get message history for a chat by chat_id.
 #[tauri::command]
 pub async fn get_session_messages(agent_id: String, state: State<'_, AppState>) -> Result<Vec<ChatMessage>, String> {
-    let sessions = state.sessions.read().map_err(|e| e.to_string())?;
     // Support both chat_id and agent_id lookups for backward compat
-    if let Some(session) = sessions.get(&agent_id) {
-        return Ok(session.messages.clone());
+    if let Some(session) = state.sessions.get(&agent_id) {
+        return Ok(session.messages);
     }
     // Fallback: search by agent_id (return first matching chat)
-    for session in sessions.values() {
+    for session in state.sessions.values() {
         if session.agent_id == agent_id {
-            return Ok(session.messages.clone());
+            return Ok(session.messages);
         }
     }
     Ok(vec![])
@@ -2163,10 +2278,12 @@ pub async fn cancel_active_run(
 /// Get message history for a specific chat by chat_id.
 /// Filters out intermediate tool messages — only returns user, system,
 /// and final assistant messages (those with metadata).
+///
+/// Uses `read_through_session()` so that sessions evicted from the LRU
+/// hot cache are transparently recovered from SochDB (source of truth).
 #[tauri::command]
 pub async fn get_chat_messages(chat_id: String, state: State<'_, AppState>) -> Result<Vec<ChatMessage>, String> {
-    let sessions = state.sessions.read().map_err(|e| e.to_string())?;
-    Ok(sessions.get(&chat_id)
+    Ok(state.read_through_session(&chat_id)
         .map(|s| {
             s.messages.iter()
                 .filter(|m| {
@@ -2186,19 +2303,33 @@ pub struct SessionSummary {
     pub chat_id: String,
     pub agent_id: String,
     pub title: String,
+    pub created_at: String,
     pub last_activity: String,
     pub message_count: usize,
     pub pending_approvals: usize,
     pub routine_generated: bool,
     pub has_proof_outputs: bool,
+    /// Preview of the first user message (for identification in the sidebar).
+    pub first_message_preview: Option<String>,
 }
 
 #[tauri::command]
 pub async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
-    let sessions = state.sessions.read().map_err(|e| e.to_string())?;
+    // Read directly from SochDB (source of truth) instead of the LRU hot cache.
+    // The LRU cache only holds the 200 most-recently-accessed sessions, so
+    // `state.sessions.values()` can silently drop older conversations.
+    // SochDB scan returns ALL persisted sessions regardless of cache state.
+    let all_sessions: Vec<ChatSession> = {
+        let entries = state.soch_store.scan("chats/")
+            .map_err(|e| format!("Failed to scan sessions from SochDB: {}", e))?;
+        entries
+            .into_iter()
+            .filter_map(|(_key, bytes)| serde_json::from_slice::<ChatSession>(&bytes).ok())
+            .collect()
+    };
 
-    let mut summaries: Vec<SessionSummary> = sessions
-        .values()
+    let mut summaries: Vec<SessionSummary> = all_sessions
+        .iter()
         .map(|session| {
             // Count only user messages and final assistant messages (with metadata).
             // Skip intermediate tool messages and tool_use messages without metadata.
@@ -2208,20 +2339,50 @@ pub async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSumm
                 if m.role == "system" { return true; }
                 false
             }).count();
+            // First user message preview (truncated to 80 chars) for identification
+            let first_preview = session.messages.iter()
+                .find(|m| m.role == "user")
+                .map(|m| {
+                    let s: String = m.content.chars().take(80).collect();
+                    if m.content.chars().count() > 80 { format!("{s}…") } else { s }
+                });
             SessionSummary {
                 chat_id: session.id.clone(),
                 agent_id: session.agent_id.clone(),
                 title: session.title.clone(),
+                created_at: session.created_at.clone(),
                 last_activity: session.updated_at.clone(),
                 message_count: visible_count,
                 pending_approvals: 0,
                 routine_generated: false,
                 has_proof_outputs: session.messages.iter().any(|m| m.role == "assistant" && m.metadata.is_some()),
+                first_message_preview: first_preview,
             }
         })
         .collect();
 
-    summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    // Deterministic sort: primary by last_activity DESC, secondary by created_at DESC,
+    // tertiary by chat_id (absolute stability across restarts).
+    summaries.sort_by(|a, b| {
+        b.last_activity.cmp(&a.last_activity)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| a.chat_id.cmp(&b.chat_id))
+    });
+
+    tracing::info!(
+        total = summaries.len(),
+        "list_sessions: scanned SochDB directly — returning all persisted sessions"
+    );
+    if !summaries.is_empty() {
+        tracing::debug!(
+            first_chat = %summaries[0].chat_id,
+            first_title = %summaries[0].title,
+            first_activity = %summaries[0].last_activity,
+            last_chat = %summaries.last().unwrap().chat_id,
+            last_activity = %summaries.last().unwrap().last_activity,
+            "list_sessions: ordering envelope"
+        );
+    }
     Ok(summaries)
 }
 
@@ -2243,31 +2404,90 @@ pub async fn create_chat(agent_id: String, state: State<'_, AppState>) -> Result
         updated_at: now.clone(),
     };
 
-    {
-        let mut sessions = state.sessions.write().map_err(|e| e.to_string())?;
-        sessions.insert(chat_id.clone(), session.clone());
-    }
+    state.sessions.insert(chat_id.clone(), session.clone());
     state.persist_session(&chat_id, &session)?;
 
     Ok(SessionSummary {
         chat_id,
         agent_id,
         title: session.title,
+        created_at: session.created_at,
         last_activity: session.updated_at,
         message_count: 0,
         pending_approvals: 0,
         routine_generated: false,
         has_proof_outputs: false,
+        first_message_preview: None,
     })
 }
 
+/// Diagnostic: dump all session metadata from SochDB for debugging.
+/// Returns a JSON-serializable list of session metadata WITHOUT full message content.
+#[tauri::command]
+pub async fn debug_session_storage(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let entries = state.soch_store.scan("chats/")
+        .map_err(|e| format!("SochDB scan failed: {}", e))?;
+
+    let mut results = Vec::new();
+    for (key, bytes) in &entries {
+        match serde_json::from_slice::<ChatSession>(bytes) {
+            Ok(session) => {
+                results.push(serde_json::json!({
+                    "sochdb_key": key,
+                    "chat_id": session.id,
+                    "agent_id": session.agent_id,
+                    "title": session.title,
+                    "created_at": session.created_at,
+                    "updated_at": session.updated_at,
+                    "message_count": session.messages.len(),
+                    "first_msg_time": session.messages.first().map(|m| m.timestamp.clone()),
+                    "last_msg_time": session.messages.last().map(|m| m.timestamp.clone()),
+                    "first_msg_role": session.messages.first().map(|m| m.role.clone()),
+                    "last_msg_role": session.messages.last().map(|m| m.role.clone()),
+                    "bytes": bytes.len(),
+                    "in_lru_cache": state.sessions.contains(&session.id),
+                }));
+            }
+            Err(e) => {
+                results.push(serde_json::json!({
+                    "sochdb_key": key,
+                    "error": e.to_string(),
+                    "bytes": bytes.len(),
+                    "preview": String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).to_string(),
+                }));
+            }
+        }
+    }
+
+    // Sort by updated_at desc for readability
+    results.sort_by(|a, b| {
+        let a_time = a.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        let b_time = b.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        b_time.cmp(a_time)
+    });
+
+    tracing::info!(
+        total_entries = entries.len(),
+        deserialized = results.iter().filter(|r| r.get("chat_id").is_some()).count(),
+        errors = results.iter().filter(|r| r.get("error").is_some()).count(),
+        lru_cache_size = state.sessions.len(),
+        "debug_session_storage: full SochDB session diagnostic"
+    );
+
+    Ok(results)
+}
+
 /// Delete a chat session.
+///
+/// Note: Individual deletes use SochDB tombstones which may not survive
+/// restart due to WAL recovery limitations. The `clear_all_chats` command
+/// uses WAL truncation for guaranteed persistence. If this becomes an issue
+/// for individual deletes, a canary-based approach should be added.
 #[tauri::command]
 pub async fn delete_chat(chat_id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    {
-        let mut sessions = state.sessions.write().map_err(|e| e.to_string())?;
-        sessions.remove(&chat_id);
-    }
+    // Grab agent_id before removing from cache (needed for chat_index cleanup)
+    let agent_id = state.sessions.get(&chat_id).map(|s| s.agent_id.clone());
+    state.sessions.remove(&chat_id);
     // Atomic delete + commit under a single lock guard so an interleaving
     // `put_durable` cannot re-write the session between delete and commit.
     let key = format!("chats/{}", chat_id);
@@ -2279,72 +2499,75 @@ pub async fn delete_chat(chat_id: String, state: State<'_, AppState>) -> Result<
     if let Err(e) = state.soch_store.delete_durable(&tool_key) {
         tracing::warn!(chat_id = %chat_id, error = %e, "delete_chat: failed to delete tool history from SochDB");
     }
+    // Clean up temporal index entry (chat_index/{agent_id}/{updated_at}/{chat_id})
+    if let Some(aid) = agent_id {
+        let prefix = format!("chat_index/{}/", aid);
+        if let Ok(entries) = state.soch_store.scan(&prefix) {
+            for (idx_key, _) in entries {
+                if idx_key.ends_with(&format!("/{}", chat_id)) {
+                    let _ = state.soch_store.delete_durable(&idx_key);
+                }
+            }
+        }
+    }
     Ok(true)
 }
 
 /// Clear all chat history — delete every session from SochDB and the in-memory cache.
 /// Used by the "Full Reset" UI action.
+///
+/// Uses `SochStore::clear_all_chat_data()` which truncates the WAL after
+/// deleting to work around SochDB's WAL recovery not preserving tombstones.
+/// Without this, deleted sessions re-appear after restart because the WAL
+/// replay turns tombstones into empty-value writes.
 #[tauri::command]
 pub async fn clear_all_chats(state: State<'_, AppState>) -> Result<u32, String> {
     // 1. Clear the in-memory session cache
-    let count = {
-        let mut sessions = state.sessions.write().map_err(|e| e.to_string())?;
-        let count = sessions.len() as u32;
-        sessions.clear();
-        count
-    };
-    // 2. Delete all chat sessions from SochDB (atomic scan + batch delete + commit)
-    if let Err(e) = state.soch_store.delete_prefix("chats/") {
-        tracing::error!(error = %e, "clear_all_chats: failed to delete chat prefix");
-        return Err(format!("Failed to clear chats: {e}"));
+    let count = state.sessions.len() as u32;
+    state.sessions.clear();
+
+    // 2. Atomically clear all chat data from SochDB (delete + WAL truncate + re-persist non-chat data)
+    match state.soch_store.clear_all_chat_data() {
+        Ok(deleted) => {
+            tracing::info!(
+                cached = count,
+                sochdb = deleted,
+                "All chat history cleared (WAL truncated, non-chat data preserved)"
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "clear_all_chats: clear_all_chat_data failed");
+            return Err(format!("Failed to clear chats: {e}"));
+        }
     }
-    // 3. Delete all tool history
-    if let Err(e) = state.soch_store.delete_prefix("tool_history/") {
-        tracing::warn!(error = %e, "clear_all_chats: failed to delete tool_history prefix");
-    }
-    // 4. Delete old-format chat_sessions/ to prevent migration ghost on restart.
-    //    Without this, hydrate code sees empty chats/ and re-imports from chat_sessions/.
-    if let Err(e) = state.soch_store.delete_prefix("chat_sessions/") {
-        tracing::warn!(error = %e, "clear_all_chats: failed to delete old chat_sessions prefix");
-    }
-    // 5. Delete ConversationStore per-message records (sessions/{key}/messages/{ts}).
-    //    These are written by the GAP-5 dual-write and would otherwise be orphaned.
-    if let Err(e) = state.soch_store.delete_prefix("sessions/") {
-        tracing::warn!(error = %e, "clear_all_chats: failed to delete sessions prefix");
-    }
-    // 6. Checkpoint the WAL so tombstones are flushed and the WAL is truncated.
-    //    Without this, a crash/restart could replay old Data records from the WAL
-    //    and resurrect deleted entries.
-    if let Err(e) = state.soch_store.checkpoint() {
-        tracing::warn!(error = %e, "clear_all_chats: checkpoint after clear failed");
-    }
-    tracing::info!(deleted = count, "All chat history cleared (chats/ + tool_history/ + chat_sessions/ + sessions/)");
+
     Ok(count)
 }
 
 /// Rename a chat session.
 #[tauri::command]
 pub async fn update_chat_title(chat_id: String, title: String, state: State<'_, AppState>) -> Result<bool, String> {
-    let mut sessions = state.sessions.write().map_err(|e| e.to_string())?;
-    if let Some(session) = sessions.get_mut(&chat_id) {
+    let found = state.sessions.mutate(&chat_id, |session| {
         session.title = title;
-        state.persist_session(&chat_id, session)?;
+    });
+    if found {
+        let session = state.sessions.get(&chat_id).ok_or_else(|| format!("Chat '{}' disappeared", chat_id))?;
+        state.persist_session(&chat_id, &session)?;
         Ok(true)
     } else {
         Err(format!("Chat '{}' not found", chat_id))
     }
 }
 
-/// T15: Export a session as Markdown.
+/// Export a session as Markdown.
 #[tauri::command]
 pub async fn export_session_markdown(
     agent_id: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let sessions = state.sessions.read().map_err(|e| e.to_string())?;
     // Find by chat_id first, then by agent_id
-    let session = sessions.get(&agent_id)
-        .or_else(|| sessions.values().find(|s| s.agent_id == agent_id))
+    let session = state.sessions.get(&agent_id)
+        .or_else(|| state.sessions.values().into_iter().find(|s| s.agent_id == agent_id))
         .ok_or("Session not found")?;
 
     let agent_name = state
@@ -2371,22 +2594,21 @@ pub async fn export_session_markdown(
     Ok(md)
 }
 
-/// T15: Export a session as JSON.
+/// Export a session as JSON.
 #[tauri::command]
 pub async fn export_session_json(
     agent_id: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let sessions = state.sessions.read().map_err(|e| e.to_string())?;
     // Find by chat_id first, then by agent_id
-    let messages = sessions.get(&agent_id)
-        .or_else(|| sessions.values().find(|s| s.agent_id == agent_id))
-        .map(|s| s.messages.clone())
+    let messages = state.sessions.get(&agent_id)
+        .or_else(|| state.sessions.values().into_iter().find(|s| s.agent_id == agent_id))
+        .map(|s| s.messages)
         .unwrap_or_default();
     serde_json::to_value(&messages).map_err(|e| e.to_string())
 }
 
-/// T16: Clone an agent (deep copy with new ID).
+/// Clone an agent (deep copy with new ID).
 #[tauri::command]
 pub async fn clone_agent(
     agent_id: String,
@@ -2884,7 +3106,7 @@ pub async fn create_pipeline(request: CreatePipelineRequest, state: State<'_, Ap
         )
         .await;
 
-    // T5: Sync cron schedule — register/remove CronTask for this pipeline
+    // Sync cron schedule — register/remove CronTask for this pipeline
     sync_pipeline_cron_schedule(&state, &result).await;
 
     Ok(result)
@@ -2926,7 +3148,7 @@ pub async fn run_pipeline(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<serde_json::Value, String> {
-    // GAP-3: Session lane serialization — prevent concurrent pipeline runs
+    // Session lane serialization — prevent concurrent pipeline runs
     // for the same pipeline from racing. Use "pipeline:{id}" as the session key
     // to keep pipeline lanes separate from chat session lanes.
     let lane_key = format!("pipeline:{}", pipeline_id);
@@ -2944,7 +3166,7 @@ pub async fn run_pipeline(
     let mut step_results: Vec<serde_json::Value> = Vec::new();
     let mut step_outputs: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
 
-    // GAP-12 NOTE: Pipeline ↔ Runner Bridge
+    // NOTE: Pipeline ↔ Runner Bridge
     //
     // A `RunnerBackend` + `PipelineExecutor` abstraction exists in
     // `clawdesk_agents::agent_backend_bridge` and `pipeline_executor`.
@@ -3095,7 +3317,7 @@ pub async fn run_pipeline(
                 let model_lower = model.to_lowercase();
                 let model_full = AppState::resolve_model_id(&model_lower);
 
-                // T12: Provider resolution via negotiator (short name pre-resolved)
+                // Provider resolution via negotiator (short name pre-resolved)
                 let provider_result = {
                     use clawdesk_providers::capability::ProviderCaps;
                     let negotiator = state.negotiator.read().map_err(|e| e.to_string())?;
@@ -3110,7 +3332,7 @@ pub async fn run_pipeline(
                     }
                 };
 
-                // T18: Build skill-aware tool registry for agent steps.
+                // Build skill-aware tool registry for agent steps.
                 // All active skills are available to every agent.
                 let tool_reg = {
                     let all_active: Vec<clawdesk_skills::definition::Skill> = {
@@ -3187,7 +3409,7 @@ pub async fn run_pipeline(
                         if let Some((agent_result, provider, model_lower, tool_reg)) = agent_prep {
                             let model_id = AppState::resolve_model_id(&model_lower);
 
-                            // T9 FIX: Read step config for custom prompts and settings.
+                            // Read step config for custom prompts and settings.
                             // User-configured prompt text and max_rounds from the
                             // pipeline step UI config override defaults.
                             let custom_prompt = step.config.get("prompt").cloned();
@@ -3200,7 +3422,7 @@ pub async fn run_pipeline(
                                 .map(|a| a.persona.clone())
                                 .unwrap_or_else(|| format!("You are a {} agent.", step.label));
 
-                            // T9/T10: If the step has a custom prompt, append it to the
+                            // If the step has a custom prompt, append it to the
                             // agent's base persona. This allows pipeline designers to
                             // specialize agent behavior per-step.
                             let system_prompt = if let Some(ref custom) = custom_prompt {
@@ -3224,12 +3446,35 @@ pub async fn run_pipeline(
                                 config,
                                 state_ref.cancel.clone(),
                             )
-                            // T4 FIX: Wire sandbox gate into pipeline runner too
+                            // Wire sandbox gate into pipeline runner too
                             .with_sandbox_gate(Arc::new(crate::commands::SandboxGateAdapter {
                                 engine: Arc::clone(&state_ref.sandbox_engine),
-                            }));
+                            }))
+                            // GAP-B: Wire memory recall for pipeline step agents
+                            .with_memory_recall({
+                                let mem = Arc::clone(&state_ref.memory);
+                                Arc::new(move |query: String| {
+                                    let mem = Arc::clone(&mem);
+                                    Box::pin(async move {
+                                        match mem.recall(&query, Some(5)).await {
+                                            Ok(results) => results.into_iter().filter_map(|r| {
+                                                let text = r.content?;
+                                                if text.is_empty() { return None; }
+                                                Some(clawdesk_agents::MemoryRecallResult {
+                                                    relevance: r.score as f64,
+                                                    source: r.metadata.get("source")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(String::from),
+                                                    content: text,
+                                                })
+                                            }).collect(),
+                                            Err(_) => vec![],
+                                        }
+                                    })
+                                })
+                            });
 
-                            // T9 FIX: Use step config prompt as instruction context
+                            // Use step config prompt as instruction context
                             // rather than generic "Process this as the X step" text.
                             let user_message = if let Some(ref custom) = custom_prompt {
                                 format!(
@@ -3317,9 +3562,10 @@ pub async fn run_pipeline(
                                 "step_index": i,
                                 "label": step.label,
                                 "node_type": "gate",
-                                "success": gate_passed,
+                                "success": true, // Gate evaluating correctly is always a success
+                                "gate_passed": gate_passed,
                                 "duration_ms": step_start.elapsed().as_millis() as u64,
-                                "output": if gate_passed { "Gate passed." } else { "Gate blocked." },
+                                "output": if gate_passed { "Gate passed." } else { "Gate blocked — downstream steps skipped." },
                             }),
                             !gate_passed,
                         )
@@ -3383,8 +3629,31 @@ pub async fn run_pipeline(
         }
     }
 
+    // Emit "skipped" results for blocked downstream nodes so the frontend
+    // can display their status instead of leaving them stuck on "started".
+    for &node_idx in &blocked {
+        if node_idx < pipeline.steps.len() {
+            let step = &pipeline.steps[node_idx];
+            step_results.push(serde_json::json!({
+                "step_index": node_idx,
+                "label": step.label,
+                "node_type": step.node_type,
+                "success": true,
+                "skipped": true,
+                "duration_ms": 0,
+                "output": "Skipped — upstream gate blocked this branch.",
+            }));
+        }
+    }
+
     let total_ms = start.elapsed().as_millis() as u64;
-    let all_success = step_results.iter().all(|s| s.get("success").and_then(|v| v.as_bool()).unwrap_or(false));
+    // A pipeline succeeds if no step had a real error. Gate-blocked and
+    // skipped steps are NOT failures — they are valid branching outcomes.
+    let all_success = step_results.iter().all(|s| {
+        let success = s.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let skipped = s.get("skipped").and_then(|v| v.as_bool()).unwrap_or(false);
+        success || skipped
+    });
 
     state
         .audit_logger
@@ -3436,7 +3705,7 @@ pub async fn run_pipeline(
 }
 
 // ═══════════════════════════════════════════════════════════
-// Cron Scheduling (T5)
+// Cron Scheduling
 // ═══════════════════════════════════════════════════════════
 
 /// Sync a pipeline's schedule field with the CronManager.
@@ -3462,6 +3731,9 @@ async fn sync_pipeline_cron_schedule(state: &AppState, pipeline: &PipelineDescri
             enabled: true,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            depends_on: Vec::new(),
+            chain_mode: Default::default(),
+            max_retained_logs: 0,
         };
         if let Err(e) = state.cron_manager.upsert_task(task).await {
             tracing::warn!(error = %e, pipeline_id = %pipeline.id, "Failed to register cron schedule for pipeline");
@@ -3533,7 +3805,7 @@ pub async fn get_cron_logs(
 }
 
 // ═══════════════════════════════════════════════════════════
-// T8: Template Commands — persona + Life OS pipeline templates
+// Template Commands — persona + Life OS pipeline templates
 // ═══════════════════════════════════════════════════════════
 
 /// List all bundled persona templates for agent creation.
@@ -3928,6 +4200,21 @@ pub async fn update_channel(
         &app,
     ) {
         tracing::warn!(channel = %channel_id, error = %e, "Hot-start failed — channel will start on next app restart");
+    } else {
+        // Register the newly started channel in the A2A directory
+        // so other agents can discover it for cross-channel communication.
+        if let Ok(mut dir) = state.agent_directory.write() {
+            let card_id = format!("channel:{}", channel_id);
+            let mut card = clawdesk_acp::AgentCard::new(
+                card_id,
+                format!("{} Channel", channel_id),
+                "local://channel",
+            );
+            card.description = format!("Active {} messaging channel.", channel_id);
+            card = card.with_capability(clawdesk_acp::CapabilityId::Messaging);
+            dir.register(card);
+            tracing::info!(channel = %channel_id, "Registered channel in A2A directory");
+        }
     }
 
     Ok(true)
@@ -3942,7 +4229,12 @@ pub async fn disconnect_channel(
     let mut configs = state.channel_configs.write().map_err(|e| e.to_string())?;
     configs.remove(&channel_id);
     AppState::save_channel_configs(&configs);
-    tracing::info!(channel = %channel_id, "Channel disconnected");
+    // Remove from A2A directory
+    if let Ok(mut dir) = state.agent_directory.write() {
+        let card_id = format!("channel:{}", channel_id);
+        dir.deregister(&card_id);
+    }
+    tracing::info!(channel = %channel_id, "Channel disconnected + removed from A2A directory");
     Ok(true)
 }
 
@@ -4041,6 +4333,17 @@ fn emit_agent_event(app: &AppHandle, agent_id: &str, event: &AgentEvent) -> Resu
             reason: reason.clone(),
         },
         AgentEvent::SkillDecision { .. } => return Ok(()),
+        AgentEvent::ToolBlocked { name, reason } => TauriAgentEvent::ToolBlocked {
+            name: name.clone(),
+            reason: reason.clone(),
+        },
+        AgentEvent::ToolExecutionResult { name, tool_call_id, is_error, preview, duration_ms } => TauriAgentEvent::ToolExecutionResult {
+            name: name.clone(),
+            tool_call_id: tool_call_id.clone(),
+            is_error: *is_error,
+            preview: preview.clone(),
+            duration_ms: *duration_ms,
+        },
     };
 
     app.emit(
@@ -4052,7 +4355,7 @@ fn emit_agent_event(app: &AppHandle, agent_id: &str, event: &AgentEvent) -> Resu
     )
 }
 
-fn emit_metrics_updated(app: &AppHandle, state: &AppState) {
+pub(crate) fn emit_metrics_updated(app: &AppHandle, state: &AppState) {
     let model_costs = match state.model_costs.read() {
         Ok(v) => v,
         Err(_) => return,
@@ -4075,7 +4378,7 @@ fn emit_metrics_updated(app: &AppHandle, state: &AppState) {
     let _ = app.emit("metrics:updated", payload);
 }
 
-async fn emit_security_changed(app: &AppHandle, state: &AppState) {
+pub(crate) async fn emit_security_changed(app: &AppHandle, state: &AppState) {
     let identity_contracts = match state.identities.read() {
         Ok(v) => v.len(),
         Err(_) => return,
@@ -4194,7 +4497,7 @@ pub async fn test_llm_connection(
 }
 
 // ═══════════════════════════════════════════════════════════
-// GAP-1: Dynamic Agent Spawning — closure factory
+// Dynamic Agent Spawning — closure factory
 // ═══════════════════════════════════════════════════════════
 
 /// Build a `dynamic_spawn` callback closure with the given `parent_depth`.
@@ -4408,7 +4711,7 @@ fn build_dynamic_spawn_fn(
                 }
             };
 
-            // ── Phase 6: Deferred GC (Task 7) ───────────────────────
+            // ── Phase 6: Deferred GC ───────────────────────
             let gc_mgr = Arc::clone(&mgr);
             tokio::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;

@@ -63,6 +63,8 @@ pub(crate) struct PromptPipelineInput<'a> {
     pub channel_description: &'a str,
     /// Token budget for prompt assembly.
     pub budget: PromptBudget,
+    /// Actually-connected channel names from ChannelRegistry (e.g. ["telegram", "discord", "webchat"]).
+    pub available_channels: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,30 +81,60 @@ pub(crate) async fn recall_memories(
     max_results: usize,
 ) -> Vec<MemoryFragment> {
     match memory.recall(query, Some(max_results)).await {
-        Ok(results) => results
-            .into_iter()
-            .filter_map(|r| {
-                let text = r.content?;
-                if text.is_empty() {
-                    return None;
-                }
-                Some(MemoryFragment {
-                    token_cost: estimate_tokens(&text),
-                    relevance: r.score as f64,
-                    source: r
-                        .metadata
-                        .get("source")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    content: text,
+        Ok(results) => {
+            let raw_count = results.len();
+            let fragments: Vec<MemoryFragment> = results
+                .into_iter()
+                .filter_map(|r| {
+                    let text = r.content?;
+                    if text.is_empty() {
+                        return None;
+                    }
+                    Some(MemoryFragment {
+                        token_cost: estimate_tokens(&text),
+                        relevance: r.score as f64,
+                        source: r
+                            .metadata
+                            .get("source")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        content: text,
+                    })
                 })
-            })
-            .collect(),
+                .collect();
+            let dropped = raw_count - fragments.len();
+            if dropped > 0 {
+                warn!(
+                    raw_results = raw_count,
+                    kept = fragments.len(),
+                    dropped,
+                    query = %safe_log_prefix(query, 80),
+                    "Memory recall: {} results dropped (content was None or empty)",
+                    dropped,
+                );
+            } else if !fragments.is_empty() {
+                debug!(
+                    results = fragments.len(),
+                    query = %safe_log_prefix(query, 80),
+                    "Memory recall returned {} fragments",
+                    fragments.len(),
+                );
+            }
+            fragments
+        }
         Err(e) => {
             warn!(error = %e, "Memory recall failed — continuing without memories");
             vec![]
         }
     }
+}
+
+/// Truncate a string for safe logging (no panics on char boundaries).
+fn safe_log_prefix(s: &str, max: usize) -> &str {
+    if s.len() <= max { return s; }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    &s[..end]
 }
 
 /// Extract memory-signal keywords from fragments for skill trigger boosting.
@@ -209,6 +241,7 @@ pub(crate) async fn build_prompt_pipeline(
         channel_description: Some(input.channel_description.to_string()),
         model_name: Some(input.model_name.to_string()),
         metadata: vec![],
+        available_channels: input.available_channels,
     };
 
     match PromptBuilder::new(input.budget) {
@@ -303,8 +336,56 @@ pub(crate) fn load_active_skills(
 // 6. Post-Run Memory Storage
 // ---------------------------------------------------------------------------
 
+/// Minimum content length to consider a turn worth storing.
+/// Short turns like "hi", "ok", "thanks" are ephemeral and dilute recall quality.
+const MIN_CONTENT_LEN_FOR_MEMORY: usize = 15;
+
+/// Maximum truncation length per turn. Increased from 500 to 2000 to preserve
+/// important context from longer assistant responses (decisions, explanations).
+const MAX_MEMORY_TURN_CHARS: usize = 2000;
+
+/// Patterns that indicate a user turn contains memorable information.
+/// If a user turn is short BUT matches one of these, store it anyway.
+const MEMORY_TRIGGER_PATTERNS: &[&str] = &[
+    "my name is",
+    "i am ",
+    "i'm ",
+    "i prefer",
+    "i like",
+    "i don't like",
+    "i hate",
+    "i love",
+    "i work at",
+    "i work for",
+    "i live in",
+    "remember ",
+    "don't forget",
+    "my email",
+    "my phone",
+    "my address",
+    "call me ",
+    "i decided",
+    "we decided",
+    "the plan is",
+    "deadline is",
+    "due date",
+    "birthday",
+    "anniversary",
+];
+
+/// Check if content is important enough to store in memory.
+fn is_memorable(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.len() >= MIN_CONTENT_LEN_FOR_MEMORY {
+        return true;
+    }
+    let lower = trimmed.to_lowercase();
+    MEMORY_TRIGGER_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 /// Store a conversation turn (user + assistant) in memory for future recall.
 ///
+/// - Importance gate: trivial turns ("hi", "ok") are skipped
 /// - UTF-8 safe truncation (never panics on multi-byte characters)
 /// - Content-hash dedup via SHA-256
 /// - Batch embedding for efficiency
@@ -319,14 +400,25 @@ pub(crate) async fn store_conversation_memory(
     source_name: &str,
     temporal_graph: Option<&SochTemporalGraph>,
 ) {
-    let user_summary = clawdesk_memory::safe_truncate_with_ellipsis(user_content, 500);
-    let asst_summary = clawdesk_memory::safe_truncate_with_ellipsis(assistant_content, 500);
+    // Importance gate: skip trivial turns that dilute memory quality.
+    let user_memorable = is_memorable(user_content);
+    let asst_memorable = is_memorable(assistant_content);
 
-    let user_hash = clawdesk_memory::sha256_hex(&user_summary);
-    let asst_hash = clawdesk_memory::sha256_hex(&asst_summary);
+    if !user_memorable && !asst_memorable {
+        debug!(
+            user_len = user_content.len(),
+            asst_len = assistant_content.len(),
+            "Skipping trivial turn — not memorable enough to store"
+        );
+        return;
+    }
 
-    let batch = vec![
-        (
+    let mut batch = Vec::new();
+
+    if user_memorable {
+        let user_summary = clawdesk_memory::safe_truncate_with_ellipsis(user_content, MAX_MEMORY_TURN_CHARS);
+        let user_hash = clawdesk_memory::sha256_hex(&user_summary);
+        batch.push((
             user_summary,
             clawdesk_memory::MemorySource::Conversation,
             serde_json::json!({
@@ -334,9 +426,15 @@ pub(crate) async fn store_conversation_memory(
                 "agent_id": source_id,
                 "agent_name": source_name,
                 "content_hash": user_hash,
+                "timestamp": Utc::now().to_rfc3339(),
             }),
-        ),
-        (
+        ));
+    }
+
+    if asst_memorable {
+        let asst_summary = clawdesk_memory::safe_truncate_with_ellipsis(assistant_content, MAX_MEMORY_TURN_CHARS);
+        let asst_hash = clawdesk_memory::sha256_hex(&asst_summary);
+        batch.push((
             asst_summary,
             clawdesk_memory::MemorySource::Conversation,
             serde_json::json!({
@@ -344,16 +442,21 @@ pub(crate) async fn store_conversation_memory(
                 "agent_id": source_id,
                 "agent_name": source_name,
                 "content_hash": asst_hash,
+                "timestamp": Utc::now().to_rfc3339(),
             }),
-        ),
-    ];
+        ));
+    }
+
+    if batch.is_empty() {
+        return;
+    }
 
     match memory.remember_batch(batch).await {
         Ok(ids) => {
             info!(
                 count = ids.len(),
                 source = %source_id,
-                "Memory stored (user + assistant)"
+                "Memory stored (filtered by importance)"
             );
 
             // Temporal edges: record that this source discussed these memories now

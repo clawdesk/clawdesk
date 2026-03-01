@@ -293,22 +293,62 @@ impl<const N: usize> FromIterator<CapabilityId> for CapSet<N> {
     }
 }
 
-/// Convert from the legacy `AgentCapability` enum for backward compatibility.
-impl From<&super::agent_card::AgentCapability> for Option<CapabilityId> {
-    fn from(legacy: &super::agent_card::AgentCapability) -> Self {
-        match legacy {
-            super::agent_card::AgentCapability::TextGeneration => Some(CapabilityId::TextGeneration),
-            super::agent_card::AgentCapability::CodeExecution => Some(CapabilityId::CodeExecution),
-            super::agent_card::AgentCapability::WebSearch => Some(CapabilityId::WebSearch),
-            super::agent_card::AgentCapability::FileProcessing => Some(CapabilityId::FileProcessing),
-            super::agent_card::AgentCapability::ImageProcessing => Some(CapabilityId::ImageProcessing),
-            super::agent_card::AgentCapability::AudioProcessing => Some(CapabilityId::AudioProcessing),
-            super::agent_card::AgentCapability::ApiIntegration => Some(CapabilityId::ApiIntegration),
-            super::agent_card::AgentCapability::DataManagement => Some(CapabilityId::DataManagement),
-            super::agent_card::AgentCapability::Mathematics => Some(CapabilityId::Mathematics),
-            super::agent_card::AgentCapability::Scheduling => Some(CapabilityId::Scheduling),
-            super::agent_card::AgentCapability::Messaging => Some(CapabilityId::Messaging),
-            super::agent_card::AgentCapability::Custom(_) => None,
+/// Convert a skill tag to a `CapabilityId` (for skill wiring).
+///
+/// Returns `None` for tags that don't map to a known capability.
+impl CapabilityId {
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag.to_lowercase().as_str() {
+            "text" | "generation" | "chat" | "llm" => Some(Self::TextGeneration),
+            "code" | "coding" | "programming" | "execution" => Some(Self::CodeExecution),
+            "web" | "search" | "internet" => Some(Self::WebSearch),
+            "file" | "filesystem" | "files" => Some(Self::FileProcessing),
+            "image" | "vision" | "visual" => Some(Self::ImageProcessing),
+            "audio" | "speech" | "tts" | "transcription" => Some(Self::AudioProcessing),
+            "video" => Some(Self::VideoProcessing),
+            "media" => Some(Self::MediaProcessing),
+            "api" | "integration" | "http" => Some(Self::ApiIntegration),
+            "data" | "database" | "storage" => Some(Self::DataManagement),
+            "math" | "mathematics" | "calculation" => Some(Self::Mathematics),
+            "schedule" | "cron" | "calendar" => Some(Self::Scheduling),
+            "message" | "messaging" | "notification" => Some(Self::Messaging),
+            "summarize" | "summary" => Some(Self::Summarization),
+            "translate" | "translation" => Some(Self::Translation),
+            "reason" | "reasoning" => Some(Self::ReasoningAdvanced),
+            "tool" | "tool_use" => Some(Self::ToolUse),
+            "multimodal" | "multi_modal" => Some(Self::MultiModal),
+            _ => None,
+        }
+    }
+
+    /// Parse a capability string from thread/agent config (kebab-case or snake_case).
+    ///
+    /// Returns `None` for unrecognized strings (replacing the old `Custom(String)` variant).
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s {
+            "text-generation" | "text_generation" => Some(Self::TextGeneration),
+            "code-execution" | "code_execution" => Some(Self::CodeExecution),
+            "web-search" | "web_search" => Some(Self::WebSearch),
+            "file-processing" | "file_processing" => Some(Self::FileProcessing),
+            "image-processing" | "image_processing" => Some(Self::ImageProcessing),
+            "audio-processing" | "audio_processing" => Some(Self::AudioProcessing),
+            "video-processing" | "video_processing" => Some(Self::VideoProcessing),
+            "media-processing" | "media_processing" => Some(Self::MediaProcessing),
+            "document-processing" | "document_processing" => Some(Self::DocumentProcessing),
+            "voice-understanding" | "voice_understanding" => Some(Self::VoiceUnderstanding),
+            "text-to-speech" | "text_to_speech" | "tts" => Some(Self::TextToSpeech),
+            "api-integration" | "api_integration" => Some(Self::ApiIntegration),
+            "data-management" | "data_management" => Some(Self::DataManagement),
+            "mathematics" | "math" => Some(Self::Mathematics),
+            "scheduling" | "schedule" => Some(Self::Scheduling),
+            "messaging" | "message" => Some(Self::Messaging),
+            "code-generation" | "code_generation" => Some(Self::CodeGeneration),
+            "summarization" | "summarize" => Some(Self::Summarization),
+            "translation" | "translate" => Some(Self::Translation),
+            "reasoning-advanced" | "reasoning_advanced" | "reasoning" => Some(Self::ReasoningAdvanced),
+            "tool-use" | "tool_use" => Some(Self::ToolUse),
+            "multi-modal" | "multi_modal" | "multimodal" => Some(Self::MultiModal),
+            _ => None,
         }
     }
 }

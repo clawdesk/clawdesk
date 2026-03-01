@@ -39,6 +39,8 @@
 pub mod a2a_routes;
 pub mod admin;
 pub mod bootstrap;
+#[cfg(feature = "browser")]
+pub mod browser_routes;
 pub mod error;
 pub mod fanout;
 pub mod fanout_executor;
@@ -56,6 +58,7 @@ pub mod subagent_manager;
 pub mod thread_ownership;
 pub mod wake;
 pub mod watcher;
+pub mod webhook;
 pub mod ws;
 
 use axum::{
@@ -181,10 +184,22 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
         .route("/a2a/agents/register", post(a2a_routes::register_agent))
         .route("/a2a/agents/discover", post(a2a_routes::discover_agent));
 
+    // Webhook ingestion routes (GAP-A)
+    let webhooks = Router::new()
+        .route(
+            "/api/v1/webhooks",
+            get(webhook::list_webhooks).post(webhook::create_webhook),
+        )
+        .route(
+            "/api/v1/webhooks/:hook_id",
+            post(webhook::receive_webhook).delete(webhook::delete_webhook),
+        );
+
     api.merge(openai)
         .merge(admin)
         .merge(ws)
         .merge(a2a)
+        .merge(webhooks)
         .layer(axum::middleware::from_fn(middleware::request_tracing))
         .with_state(state)
 }

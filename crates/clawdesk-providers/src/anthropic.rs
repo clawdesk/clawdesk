@@ -168,16 +168,9 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "anthropic".into(),
-                        model: model.clone(),
-                        after: start.elapsed(),
-                    }
+                    ProviderError::timeout("anthropic", model.clone(), start.elapsed())
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "anthropic".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("anthropic", e.to_string())
                 }
             })?;
 
@@ -189,38 +182,21 @@ impl Provider for AnthropicProvider {
             let body = response.text().await.unwrap_or_default();
 
             return match status_code {
-                429 => Err(ProviderError::RateLimit {
-                    provider: "anthropic".into(),
-                    retry_after: None,
-                }),
-                401 | 403 => Err(ProviderError::AuthFailure {
-                    provider: "anthropic".into(),
-                    profile_id: "default".into(),
-                }),
+                429 => Err(ProviderError::rate_limit("anthropic", None)),
+                401 | 403 => Err(ProviderError::auth_failure("anthropic", "default")),
                 400 => {
                     if body.contains("billing") || body.contains("credit") {
-                        Err(ProviderError::Billing {
-                            provider: "anthropic".into(),
-                        })
+                        Err(ProviderError::billing("anthropic"))
                     } else {
-                        Err(ProviderError::FormatError {
-                            provider: "anthropic".into(),
-                            detail: body,
-                        })
+                        Err(ProviderError::format_error("anthropic", body))
                     }
                 }
-                _ => Err(ProviderError::ServerError {
-                    provider: "anthropic".into(),
-                    status: status_code,
-                }),
+                _ => Err(ProviderError::server_error("anthropic", status_code)),
             };
         }
 
         let api_response: AnthropicResponse =
-            response.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "anthropic".into(),
-                detail: e.to_string(),
-            })?;
+            response.json().await.map_err(|e| ProviderError::format_error("anthropic", e.to_string()))?;
 
         // Extract text content and tool calls
         let mut text_parts = Vec::new();
@@ -340,22 +316,13 @@ impl Provider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "anthropic".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("anthropic", e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
             return match status {
-                429 => Err(ProviderError::RateLimit {
-                    provider: "anthropic".into(),
-                    retry_after: None,
-                }),
-                _ => Err(ProviderError::ServerError {
-                    provider: "anthropic".into(),
-                    status,
-                }),
+                429 => Err(ProviderError::rate_limit("anthropic", None)),
+                _ => Err(ProviderError::server_error("anthropic", status)),
             };
         }
 
@@ -374,10 +341,7 @@ impl Provider for AnthropicProvider {
         // reqwest chunk-based streaming — no extra feature flags needed
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(|e| {
-            ProviderError::NetworkError {
-                provider: "anthropic".into(),
-                detail: e.to_string(),
-            }
+            ProviderError::network_error("anthropic", e.to_string())
         })? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 

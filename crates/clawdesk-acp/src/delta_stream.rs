@@ -260,16 +260,16 @@ impl DeltaDecoder {
                 self.rolling_hash.append(delta.text.as_bytes());
             }
         } else if delta.offset < self.assembled.len() {
-            // Insert/replace at offset — invalidates rolling hash
+            // Insert/replace at offset — recompute rolling hash
             self.assembled
                 .replace_range(delta.offset..delta.offset, &delta.text);
-            self.hash_valid = false;
+            self.rolling_hash = RollingHash::from_data(self.assembled.as_bytes());
         } else {
             // Gap — pad with spaces (shouldn't happen in normal operation)
             let padding = delta.offset - self.assembled.len();
             self.assembled.extend(std::iter::repeat(' ').take(padding));
             self.assembled.push_str(&delta.text);
-            self.hash_valid = false;
+            self.rolling_hash = RollingHash::from_data(self.assembled.as_bytes());
         }
 
         self.last_seq = Some(delta.seq);
@@ -595,5 +595,242 @@ mod tests {
         let restored: TextDelta = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.seq, 42);
         assert_eq!(restored.text, "test delta");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DeltaPublisher — producer-side bridge between DeltaEncoder and BackpressureStream
+// ═══════════════════════════════════════════════════════════════════════════
+
+use crate::streaming::{BackpressureStream, StreamPayload, StreamError};
+
+/// Producer-side bridge: encodes text chunks into rich deltas and publishes
+/// them through a `BackpressureStream` with overflow protection.
+///
+/// ## Usage
+///
+/// ```text
+/// let stream = BackpressureStream::new(config);
+/// let mut publisher = DeltaPublisher::new("task-42", &stream);
+///
+/// // As LLM yields chunks:
+/// publisher.push("Hello ").await?;
+/// publisher.push("world").await?;
+/// publisher.finish().await?;
+/// ```
+///
+/// Each `push()` call:
+/// 1. Encodes via `DeltaEncoder::push()` → `TextDelta` with seq, offset, hash
+/// 2. Wraps in `StreamPayload::RichTextDelta`
+/// 3. Publishes to `BackpressureStream` with backpressure handling
+pub struct DeltaPublisher<'a> {
+    encoder: DeltaEncoder,
+    stream: &'a BackpressureStream,
+    task_id: String,
+}
+
+impl<'a> DeltaPublisher<'a> {
+    /// Create a new delta publisher for the given task.
+    pub fn new(task_id: impl Into<String>, stream: &'a BackpressureStream) -> Self {
+        let task_id = task_id.into();
+        Self {
+            encoder: DeltaEncoder::new(task_id.clone()),
+            stream,
+            task_id,
+        }
+    }
+
+    /// Create with a custom checkpoint interval.
+    pub fn with_checkpoint_interval(mut self, interval: u64) -> Self {
+        self.encoder = self.encoder.with_checkpoint_interval(interval);
+        self
+    }
+
+    /// Push a text chunk through the delta encoder and into the stream.
+    ///
+    /// Returns the sequence number of the published delta.
+    pub async fn push(&mut self, text: &str) -> Result<u64, StreamError> {
+        let delta = self.encoder.push(text);
+        let seq = delta.seq;
+        self.stream
+            .publish(self.task_id.clone(), StreamPayload::RichTextDelta(delta))
+            .await?;
+        Ok(seq)
+    }
+
+    /// Finish the stream — publish the final done delta.
+    pub async fn finish(&mut self) -> Result<u64, StreamError> {
+        let delta = self.encoder.finish();
+        let seq = delta.seq;
+        self.stream
+            .publish(self.task_id.clone(), StreamPayload::RichTextDelta(delta))
+            .await?;
+        Ok(seq)
+    }
+
+    /// Get the full assembled text so far.
+    pub fn assembled(&self) -> &str {
+        self.encoder.assembled()
+    }
+
+    /// Get the nearest checkpoint at or before a given sequence number.
+    /// Used for reconnection: client sends its `last_seq`, server finds
+    /// the checkpoint and replays from there.
+    pub fn checkpoint_at_or_before(&self, seq: u64) -> Option<&StreamCheckpoint> {
+        self.encoder.checkpoint_at_or_before(seq)
+    }
+
+    /// Current sequence number (next to be assigned).
+    pub fn current_seq(&self) -> u64 {
+        self.encoder.current_seq()
+    }
+}
+
+/// Consumer-side bridge: applies `RichTextDelta` events from a `BackpressureStream`
+/// through a `DeltaDecoder` with integrity verification.
+///
+/// ## Usage
+///
+/// ```text
+/// let mut consumer = DeltaConsumer::new();
+///
+/// while let Some(event) = stream.consume().await {
+///     if let Some(text_update) = consumer.apply_event(&event.payload) {
+///         // text_update is the new chunk for the UI
+///     }
+/// }
+///
+/// println!("Final text: {}", consumer.assembled());
+/// ```
+pub struct DeltaConsumer {
+    decoder: DeltaDecoder,
+}
+
+impl DeltaConsumer {
+    /// Create a new consumer with a fresh decoder.
+    pub fn new() -> Self {
+        Self {
+            decoder: DeltaDecoder::new(),
+        }
+    }
+
+    /// Create a consumer that resumes from a checkpoint.
+    pub fn from_checkpoint(checkpoint: StreamCheckpoint, assembled_text: &str) -> Self {
+        Self {
+            decoder: DeltaDecoder::from_checkpoint(&checkpoint, assembled_text.to_string()),
+        }
+    }
+
+    /// Apply a stream event. Returns `Some(delta_text)` if a `RichTextDelta`
+    /// was successfully applied, `None` for other payload types or integrity failures.
+    pub fn apply_event(&mut self, payload: &StreamPayload) -> Option<String> {
+        match payload {
+            StreamPayload::RichTextDelta(delta) => {
+                if self.decoder.apply(delta) {
+                    Some(delta.text.clone())
+                } else {
+                    debug!(
+                        seq = delta.seq,
+                        hash_mismatches = self.decoder.hash_mismatches(),
+                        "delta hash mismatch — integrity violation"
+                    );
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Full assembled text so far.
+    pub fn assembled(&self) -> &str {
+        self.decoder.assembled()
+    }
+
+    /// Whether the stream is complete (final done delta received).
+    pub fn is_done(&self) -> bool {
+        self.decoder.is_done()
+    }
+
+    /// Last applied sequence number.
+    pub fn last_seq(&self) -> Option<u64> {
+        self.decoder.last_seq()
+    }
+
+    /// Number of hash mismatches encountered.
+    pub fn hash_mismatches(&self) -> u64 {
+        self.decoder.hash_mismatches()
+    }
+
+    /// Create a checkpoint of the current consumer state for reconnection.
+    pub fn checkpoint(&self) -> Option<StreamCheckpoint> {
+        self.decoder.checkpoint()
+    }
+}
+
+impl Default for DeltaConsumer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use crate::streaming::{BackpressureStream, StreamConfig, StreamPayload};
+
+    #[tokio::test]
+    async fn delta_publisher_consumer_roundtrip() {
+        let stream = BackpressureStream::new(StreamConfig::default());
+        let mut publisher = DeltaPublisher::new("task-1", &stream);
+
+        publisher.push("Hello ").await.unwrap();
+        publisher.push("world").await.unwrap();
+        publisher.finish().await.unwrap();
+
+        assert_eq!(publisher.assembled(), "Hello world");
+
+        let mut consumer = DeltaConsumer::new();
+        let mut chunks = Vec::new();
+
+        // Consume exactly 3 events (two pushes + finish).
+        // BackpressureStream::consume() blocks when empty (no close signal),
+        // so we use consume_timeout to avoid hanging.
+        for _ in 0..3 {
+            let event = stream
+                .consume_timeout(std::time::Duration::from_secs(2))
+                .await
+                .expect("expected event within timeout");
+            if let Some(text) = consumer.apply_event(&event.payload) {
+                chunks.push(text);
+            }
+        }
+
+        assert_eq!(chunks, vec!["Hello ", "world", ""]);
+        assert_eq!(consumer.assembled(), "Hello world");
+        assert!(consumer.is_done());
+        assert_eq!(consumer.hash_mismatches(), 0);
+    }
+
+    #[tokio::test]
+    async fn delta_publisher_checkpoint_resumption() {
+        let stream = BackpressureStream::new(StreamConfig::default());
+        let mut publisher = DeltaPublisher::new("task-2", &stream)
+            .with_checkpoint_interval(2);
+
+        publisher.push("aaa").await.unwrap();
+        publisher.push("bbb").await.unwrap();
+        publisher.push("ccc").await.unwrap();
+
+        // Verify checkpoints are created.
+        let cp = publisher.checkpoint_at_or_before(2);
+        assert!(cp.is_some());
+
+        // Simulate consumer resuming from checkpoint.
+        let cp = cp.unwrap().clone();
+        let assembled_so_far = &publisher.assembled()[..cp.offset];
+        let mut consumer = DeltaConsumer::from_checkpoint(cp, assembled_so_far);
+
+        // Consumer should be able to continue from where it left off.
+        assert_eq!(consumer.last_seq(), Some(2));
     }
 }

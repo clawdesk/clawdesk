@@ -157,6 +157,10 @@ pub fn run_audit(config: &AuditConfig) -> AuditReport {
 }
 
 /// SEC-001: Gateway should bind to localhost or have authentication.
+///
+/// Parses the TOML file properly instead of raw string matching.
+/// Checks the `bind_address` field specifically, supports IPv4 localhost
+/// (127.0.0.1), IPv6 localhost (::1), and 0.0.0.0 with auth.
 fn check_gateway_binding(config: &AuditConfig, report: &mut AuditReport) {
     let config_file = config.config_dir.join("gateway.toml");
 
@@ -168,10 +172,57 @@ fn check_gateway_binding(config: &AuditConfig, report: &mut AuditReport) {
 
     match std::fs::read_to_string(&config_file) {
         Ok(content) => {
-            let binds_localhost = content.contains("127.0.0.1")
-                || content.contains("localhost")
-                || content.contains("0.0.0.0").not_or_has_auth(&content);
-            if binds_localhost {
+            // Parse TOML to extract bind_address field specifically.
+            let bind_addr = content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    !trimmed.starts_with('#') && !trimmed.starts_with("//")
+                })
+                .find_map(|line| {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("bind_address") {
+                        let rest = rest.trim();
+                        if let Some(rest) = rest.strip_prefix('=') {
+                            let val = rest.trim().trim_matches('"').trim_matches('\'');
+                            Some(val.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+
+            let is_safe = match bind_addr.as_deref() {
+                None => true, // No bind_address → assume localhost default
+                Some(addr) => {
+                    let addr_lower = addr.to_lowercase();
+                    let is_localhost = addr_lower == "127.0.0.1"
+                        || addr_lower == "localhost"
+                        || addr_lower == "::1"
+                        || addr_lower == "[::1]";
+
+                    if is_localhost {
+                        true
+                    } else if addr_lower == "0.0.0.0" || addr_lower == "::" {
+                        // Wildcard bind — only safe if auth is configured.
+                        // Check for auth-related keys in non-comment lines.
+                        content.lines().any(|line| {
+                            let t = line.trim();
+                            !t.starts_with('#')
+                                && (t.starts_with("auth_token")
+                                    || t.starts_with("auth_enabled")
+                                    || t.starts_with("password")
+                                    || t.starts_with("api_key"))
+                        })
+                    } else {
+                        false
+                    }
+                }
+            };
+
+            if is_safe {
                 report.pass();
             } else {
                 report.fail(AuditFinding {
@@ -183,7 +234,8 @@ fn check_gateway_binding(config: &AuditConfig, report: &mut AuditReport) {
                     severity: Severity::Critical,
                     remediated: false,
                     suggestion: Some(
-                        "Set bind_address to 127.0.0.1 or enable authentication".to_string(),
+                        "Set bind_address to 127.0.0.1 or [::1], or enable authentication"
+                            .to_string(),
                     ),
                 });
             }
@@ -506,21 +558,6 @@ fn check_audit_log_integrity(config: &AuditConfig, report: &mut AuditReport) {
     }
 }
 
-/// Helper trait for gateway binding check.
-trait NotOrHasAuth {
-    fn not_or_has_auth(&self, content: &str) -> bool;
-}
-
-impl NotOrHasAuth for bool {
-    fn not_or_has_auth(&self, content: &str) -> bool {
-        if *self {
-            // Found 0.0.0.0 — check for auth
-            content.contains("auth") || content.contains("password") || content.contains("token")
-        } else {
-            true
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

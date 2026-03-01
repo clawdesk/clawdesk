@@ -1,0 +1,29 @@
+[package]
+name = "clawdesk-migrate"
+description = "Platform migration engine — import from OpenClaw, Claude Desktop, and other AI platforms"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["openclaw"]
+openclaw = []
+claude-desktop = []
+
+[dependencies]
+clawdesk-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yml = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+walkdir = "2"
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

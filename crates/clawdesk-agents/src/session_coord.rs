@@ -5,14 +5,14 @@
 //!
 //! `SessionLaneManager` (session_lane.rs) serializes agent runs within a
 //! single session. But pipelines span multiple sessions (main agent +
-//! sub-agents), and OpenClaw sessions need coordinated lifecycle management.
+//! sub-agents), and legacy sessions need coordinated lifecycle management.
 //!
 //! This module provides:
 //! 1. **Session groups**: Track related sessions (parent + sub-agent sessions).
 //! 2. **Shared cancellation**: `CancellationToken` propagated to all sessions
 //!    in a group — cancel the parent, all children cancel too.
 //! 3. **Cross-system session registration**: Map ClawDesk session IDs to
-//!    OpenClaw session keys for coordinated cleanup.
+//!    legacy session keys for coordinated cleanup.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,7 +30,7 @@ pub type GroupId = String;
 pub enum SessionOrigin {
     /// Native ClawDesk session.
     ClawDesk,
-    /// OpenClaw gateway session.
+    /// legacy gateway session.
     OpenClaw,
     /// External A2A agent.
     External { endpoint: String },
@@ -93,19 +93,30 @@ pub struct GroupSummary {
     pub is_cancelled: bool,
 }
 
+/// Internal state protected by a single mutex (fix: eliminates
+/// TOCTOU race between groups and session_to_group lookups).
+struct CoordinatorState {
+    groups: HashMap<GroupId, SessionGroup>,
+    /// Reverse index: session_id → group_id for fast lookup.
+    session_to_group: HashMap<String, GroupId>,
+}
+
 /// Session coordination manager — tracks groups of related sessions
 /// with shared cancellation tokens.
 pub struct SessionCoordinator {
-    groups: Mutex<HashMap<GroupId, SessionGroup>>,
-    /// Reverse index: session_id → group_id for fast lookup.
-    session_to_group: Mutex<HashMap<String, GroupId>>,
+    /// Single mutex over both maps — atomic access eliminates the TOCTOU
+    /// window where a group could be removed between reading the reverse
+    /// index and accessing the groups map.
+    state: Mutex<CoordinatorState>,
 }
 
 impl SessionCoordinator {
     pub fn new() -> Self {
         Self {
-            groups: Mutex::new(HashMap::new()),
-            session_to_group: Mutex::new(HashMap::new()),
+            state: Mutex::new(CoordinatorState {
+                groups: HashMap::new(),
+                session_to_group: HashMap::new(),
+            }),
         }
     }
 
@@ -113,8 +124,8 @@ impl SessionCoordinator {
     /// Returns the shared cancellation token.
     pub async fn create_group(&self, group_id: impl Into<GroupId>) -> CancellationToken {
         let gid = group_id.into();
-        let mut groups = self.groups.lock().await;
-        let group = groups
+        let mut st = self.state.lock().await;
+        let group = st.groups
             .entry(gid.clone())
             .or_insert_with(|| SessionGroup::new(gid.clone()));
         info!(group_id = %gid, "session group created");
@@ -132,8 +143,8 @@ impl SessionCoordinator {
         parent_id: Option<String>,
     ) -> Option<CancellationToken> {
         let sid = session_id.into();
-        let mut groups = self.groups.lock().await;
-        let group = groups.get_mut(group_id)?;
+        let mut st = self.state.lock().await;
+        let group = st.groups.get_mut(group_id)?;
 
         let session = CoordinatedSession {
             session_id: sid.clone(),
@@ -146,36 +157,37 @@ impl SessionCoordinator {
         group.add_session(session);
         let token = group.cancellation.clone();
 
-        // Update reverse index
-        let mut idx = self.session_to_group.lock().await;
-        idx.insert(sid.clone(), group_id.to_string());
+        // Update reverse index (same lock — no TOCTOU gap)
+        st.session_to_group.insert(sid.clone(), group_id.to_string());
 
         debug!(group_id, session_id = %sid, "session registered in group");
         Some(token)
     }
 
     /// Mark a session as inactive (completed or failed).
+    ///
+    /// Single lock acquisition — no window between reading
+    /// the reverse index and mutating the group where a concurrent
+    /// cancel_group/gc could invalidate the group_id.
     pub async fn deactivate_session(&self, session_id: &str) {
-        let group_id = {
-            let idx = self.session_to_group.lock().await;
-            idx.get(session_id).cloned()
+        let mut st = self.state.lock().await;
+        let group_id = match st.session_to_group.get(session_id) {
+            Some(gid) => gid.clone(),
+            None => return,
         };
 
-        if let Some(gid) = group_id {
-            let mut groups = self.groups.lock().await;
-            if let Some(group) = groups.get_mut(&gid) {
-                if let Some(session) = group.sessions.get_mut(session_id) {
-                    session.active = false;
-                    debug!(group_id = %gid, session_id, "session deactivated");
-                }
+        if let Some(group) = st.groups.get_mut(&group_id) {
+            if let Some(session) = group.sessions.get_mut(session_id) {
+                session.active = false;
+                debug!(group_id = %group_id, session_id, "session deactivated");
             }
         }
     }
 
     /// Cancel all sessions in a group — propagates to all children.
     pub async fn cancel_group(&self, group_id: &str) -> bool {
-        let groups = self.groups.lock().await;
-        if let Some(group) = groups.get(group_id) {
+        let st = self.state.lock().await;
+        if let Some(group) = st.groups.get(group_id) {
             group.cancellation.cancel();
             info!(
                 group_id,
@@ -191,22 +203,22 @@ impl SessionCoordinator {
 
     /// Check if a group is cancelled.
     pub async fn is_cancelled(&self, group_id: &str) -> bool {
-        let groups = self.groups.lock().await;
-        groups
+        let st = self.state.lock().await;
+        st.groups
             .get(group_id)
             .map_or(false, |g| g.cancellation.is_cancelled())
     }
 
     /// Get the group ID for a session.
     pub async fn group_for_session(&self, session_id: &str) -> Option<GroupId> {
-        let idx = self.session_to_group.lock().await;
-        idx.get(session_id).cloned()
+        let st = self.state.lock().await;
+        st.session_to_group.get(session_id).cloned()
     }
 
     /// Get a summary of a group.
     pub async fn group_summary(&self, group_id: &str) -> Option<GroupSummary> {
-        let groups = self.groups.lock().await;
-        let group = groups.get(group_id)?;
+        let st = self.state.lock().await;
+        let group = st.groups.get(group_id)?;
 
         let origins: HashSet<String> = group
             .sessions
@@ -227,10 +239,9 @@ impl SessionCoordinator {
     /// Remove completed groups (all sessions inactive).
     /// Returns the number of groups removed.
     pub async fn gc(&self) -> usize {
-        let mut groups = self.groups.lock().await;
-        let mut idx = self.session_to_group.lock().await;
+        let mut st = self.state.lock().await;
 
-        let to_remove: Vec<GroupId> = groups
+        let to_remove: Vec<GroupId> = st.groups
             .iter()
             .filter(|(_, g)| g.active_count() == 0)
             .map(|(id, _)| id.clone())
@@ -238,9 +249,9 @@ impl SessionCoordinator {
 
         let count = to_remove.len();
         for gid in &to_remove {
-            if let Some(group) = groups.remove(gid) {
+            if let Some(group) = st.groups.remove(gid) {
                 for sid in group.sessions.keys() {
-                    idx.remove(sid);
+                    st.session_to_group.remove(sid);
                 }
             }
         }
@@ -253,8 +264,8 @@ impl SessionCoordinator {
 
     /// Total number of active groups.
     pub async fn group_count(&self) -> usize {
-        let groups = self.groups.lock().await;
-        groups.len()
+        let st = self.state.lock().await;
+        st.groups.len()
     }
 }
 

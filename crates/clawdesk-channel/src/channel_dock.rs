@@ -1,6 +1,6 @@
 //! Channel Dock — lightweight metadata registry decoupled from channel instances.
 //!
-//! ## GAP-4: Channel Dock Pattern
+//! ## Channel Dock Pattern
 //!
 //! The full `Channel` trait requires a running channel instance (with network
 //! connections, auth state, etc.). The `ChannelDock` provides a way to query

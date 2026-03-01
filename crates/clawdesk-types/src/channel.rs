@@ -25,6 +25,16 @@ pub enum ChannelId {
     Irc,
     /// CLI / gateway internal message
     Internal,
+    /// Microsoft Teams via Bot Framework
+    Teams,
+    /// Matrix protocol (Element, etc.)
+    Matrix,
+    /// Signal Messenger via signal-cli
+    Signal,
+    /// Generic webhook (inbound POST + outbound HTTP callback)
+    Webhook,
+    /// Mastodon / Fediverse (ActivityPub)
+    Mastodon,
 }
 
 impl fmt::Display for ChannelId {
@@ -39,6 +49,11 @@ impl fmt::Display for ChannelId {
             Self::IMessage => write!(f, "imessage"),
             Self::Irc => write!(f, "irc"),
             Self::Internal => write!(f, "internal"),
+            Self::Teams => write!(f, "teams"),
+            Self::Matrix => write!(f, "matrix"),
+            Self::Signal => write!(f, "signal"),
+            Self::Webhook => write!(f, "webhook"),
+            Self::Mastodon => write!(f, "mastodon"),
         }
     }
 }

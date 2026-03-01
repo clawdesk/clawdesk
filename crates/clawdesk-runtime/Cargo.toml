@@ -23,7 +23,7 @@ clawdesk-acp = { workspace = true }
 sochdb = { workspace = true }
 
 # --- Async runtime ---
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util"] }
 
 # --- Serialization ---
 serde = { workspace = true }

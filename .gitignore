@@ -16,6 +16,7 @@ _write_*.py
 *.swp
 *.swo
 .DS_Store
+new.js
 
 # Tauri
 /crates/clawdesk-tauri/gen/

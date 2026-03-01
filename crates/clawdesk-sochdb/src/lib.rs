@@ -29,6 +29,7 @@
 //! - On `Drop`, checkpoint + fsync are called automatically.
 
 pub mod bridge;
+pub mod cold_tier;
 pub mod config;
 pub mod conversation;
 pub mod federation;
@@ -571,6 +572,131 @@ impl SochStore {
     // Maintenance
     // =========================================================================
 
+    /// Truncate the WAL file to 0 bytes.
+    ///
+    /// The in-memory memtable retains all data for the current session, but
+    /// a crash/restart after truncation will only recover data written AFTER
+    /// the truncation. Use after `delete_prefix` when you need deletions to
+    /// truly survive restart (the WAL recovery path does not preserve
+    /// tombstones — deleted entries re-appear as empty-value writes).
+    pub fn truncate_wal(&self) -> Result<(), StorageError> {
+        let _guard = self.op_lock.lock();
+        self.connection.truncate_wal()
+            .map_err(|e| StorageError::OpenFailed {
+                detail: format!("truncate_wal failed: {e}"),
+            })
+    }
+
+    /// Atomically clear all chat-related data from the WAL.
+    ///
+    /// Because SochDB's WAL recovery does not distinguish tombstones from
+    /// regular writes, `delete_prefix` tombstones are lost across restarts.
+    /// This method works around the limitation by:
+    ///
+    /// 1. Deleting chat data in the memtable (tombstones)
+    /// 2. Collecting all non-chat data that must survive
+    /// 3. Truncating the WAL (physically empty)
+    /// 4. Re-writing the non-chat data to the fresh WAL
+    ///
+    /// After this, the WAL only contains non-chat data. On restart, WAL
+    /// replay recovers only the preserved data — deleted chats stay deleted.
+    pub fn clear_all_chat_data(&self) -> Result<usize, StorageError> {
+        let _guard = self.op_lock.lock();
+
+        // ── Step 1: Delete chat-related prefixes (tombstones in memtable) ──
+        let chat_prefixes = [
+            "chats/",
+            "chat_index/",
+            "chat_sessions/",
+            "tool_history/",
+            "sessions/",
+            "turns/",
+            "archive/",
+            "archive_index/",
+        ];
+        let mut total_deleted = 0usize;
+        for prefix in &chat_prefixes {
+            let entries = self.connection.scan(prefix)
+                .map_err(|e| StorageError::OpenFailed {
+                    detail: format!("clear_all_chat_data: scan '{}' failed: {e}", prefix),
+                })?;
+            let count = entries.len();
+            for (key, _) in &entries {
+                self.connection.delete(key)
+                    .map_err(|e| StorageError::OpenFailed {
+                        detail: format!("clear_all_chat_data: delete '{}' failed: {e}", key),
+                    })?;
+            }
+            if count > 0 {
+                self.connection.commit()
+                    .map_err(|e| StorageError::OpenFailed {
+                        detail: format!("clear_all_chat_data: commit after '{}' failed: {e}", prefix),
+                    })?;
+            }
+            total_deleted += count;
+        }
+
+        // ── Step 2: Collect non-chat data from memtable ──────────────────
+        // Tombstones correctly shadow deleted chat data, so scanning non-chat
+        // prefixes returns only the data we want to preserve.
+        let preserve_prefixes = [
+            "agents/",
+            "config/",
+            "graph/",
+            "pipelines/",
+            "pipeline_runs/",
+            "notifications/",
+            "clipboard/",
+            "canvases/",
+            "journal/",
+            "skills/",
+            "runtime:",
+        ];
+        let mut preserved: Vec<(String, Vec<u8>)> = Vec::new();
+        for prefix in &preserve_prefixes {
+            if let Ok(entries) = self.connection.scan(prefix) {
+                preserved.extend(entries);
+            }
+        }
+        // Also preserve the singleton key "channel_origins"
+        if let Ok(Some(val)) = self.connection.get("channel_origins") {
+            preserved.push(("channel_origins".to_string(), val));
+        }
+
+        let preserved_count = preserved.len();
+
+        // ── Step 3: Truncate WAL (memtable stays intact) ─────────────────
+        self.connection.truncate_wal()
+            .map_err(|e| StorageError::OpenFailed {
+                detail: format!("clear_all_chat_data: truncate_wal failed: {e}"),
+            })?;
+
+        // ── Step 4: Re-write preserved data to fresh WAL ─────────────────
+        if !preserved.is_empty() {
+            for (key, value) in &preserved {
+                self.connection.put(key, value)
+                    .map_err(|e| StorageError::OpenFailed {
+                        detail: format!("clear_all_chat_data: re-put '{}' failed: {e}", key),
+                    })?;
+            }
+            self.connection.commit()
+                .map_err(|e| StorageError::OpenFailed {
+                    detail: format!("clear_all_chat_data: commit preserved data failed: {e}"),
+                })?;
+            self.connection.fsync()
+                .map_err(|e| StorageError::OpenFailed {
+                    detail: format!("clear_all_chat_data: fsync preserved data failed: {e}"),
+                })?;
+        }
+
+        tracing::info!(
+            deleted = total_deleted,
+            preserved = preserved_count,
+            "clear_all_chat_data: WAL truncated and non-chat data re-persisted"
+        );
+        Ok(total_deleted)
+    }
+
     /// Get a reference to the underlying EmbeddedConnection.
     ///
     /// Used by `SochConn` bridge for advanced SochDB modules that need
@@ -652,5 +778,130 @@ impl Drop for SochStore {
 impl std::fmt::Debug for SochStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SochStore").finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_all_chat_data_removes_chat_preserves_non_chat() {
+        let store = SochStore::open_ephemeral_quiet().unwrap();
+
+        // Write chat data under various prefixes
+        store.put_durable("chats/abc123", b"session-data").unwrap();
+        store.put_durable("chats/def456", b"session-data-2").unwrap();
+        store.put_durable("tool_history/abc123", b"tools").unwrap();
+        store.put_durable("chat_index/agent1/2024-01-01/abc123", b"idx").unwrap();
+        store.put_durable("sessions/abc123/messages/100", b"msg").unwrap();
+
+        // Write non-chat data that must survive
+        store.put_durable("agents/my-agent", b"agent-config").unwrap();
+        store.put_durable("config/main", b"app-config").unwrap();
+        store.put_durable("pipelines/p1", b"pipeline").unwrap();
+        store.put_durable("channel_origins", b"origins").unwrap();
+
+        // Verify everything exists
+        assert!(store.get("chats/abc123").unwrap().is_some());
+        assert!(store.get("agents/my-agent").unwrap().is_some());
+
+        // Clear all chat data
+        let deleted = store.clear_all_chat_data().unwrap();
+        assert!(deleted >= 5, "should delete at least 5 chat entries, got {deleted}");
+
+        // Chat data should be gone
+        assert!(store.scan("chats/").unwrap().is_empty());
+        assert!(store.scan("tool_history/").unwrap().is_empty());
+        assert!(store.scan("chat_index/").unwrap().is_empty());
+        assert!(store.scan("sessions/").unwrap().is_empty());
+
+        // Non-chat data should be preserved
+        assert_eq!(store.get("agents/my-agent").unwrap().unwrap(), b"agent-config");
+        assert_eq!(store.get("config/main").unwrap().unwrap(), b"app-config");
+        assert_eq!(store.get("pipelines/p1").unwrap().unwrap(), b"pipeline");
+        assert_eq!(store.get("channel_origins").unwrap().unwrap(), b"origins");
+    }
+
+    #[test]
+    fn clear_all_chat_data_survives_reopen() {
+        // This test simulates the restart scenario by closing and reopening the store
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "clawdesk-clear-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        // Phase 1: Write data + clear chats
+        {
+            let store = SochStore::open(&tmp_dir).unwrap();
+            store.put_durable("chats/abc", b"session-json").unwrap();
+            store.put_durable("chats/def", b"session-json-2").unwrap();
+            store.put_durable("agents/my-agent", b"agent-config").unwrap();
+            store.put_durable("config/main", b"app-config").unwrap();
+
+            let deleted = store.clear_all_chat_data().unwrap();
+            assert!(deleted >= 2);
+
+            // Drop triggers shutdown (checkpoint + fsync)
+        }
+
+        // Phase 2: Reopen — chat data should NOT come back
+        {
+            let store = SochStore::open(&tmp_dir).unwrap();
+
+            // Chat data must be gone (the whole point of this fix)
+            let chats = store.scan("chats/").unwrap();
+            assert!(
+                chats.is_empty(),
+                "Chat data resurrected after restart! Found {} entries: {:?}",
+                chats.len(),
+                chats.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>()
+            );
+
+            // Non-chat data must survive
+            assert_eq!(
+                store.get("agents/my-agent").unwrap().unwrap(),
+                b"agent-config",
+                "agents/ data lost after clear + restart"
+            );
+            assert_eq!(
+                store.get("config/main").unwrap().unwrap(),
+                b"app-config",
+                "config/ data lost after clear + restart"
+            );
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn clear_all_chat_data_empty_db_is_noop() {
+        // Use a unique temp dir to avoid contamination from other tests
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "clawdesk-noop-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let store = SochStore::open(&tmp_dir).unwrap();
+        let deleted = store.clear_all_chat_data().unwrap();
+        assert_eq!(deleted, 0);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn truncate_wal_does_not_panic() {
+        let store = SochStore::open_ephemeral_quiet().unwrap();
+        store.put_durable("test/key", b"value").unwrap();
+        store.truncate_wal().unwrap();
+        // After truncation, memtable still has the data for the current session
+        assert_eq!(store.get("test/key").unwrap().unwrap(), b"value");
     }
 }

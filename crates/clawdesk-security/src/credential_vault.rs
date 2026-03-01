@@ -8,7 +8,7 @@
 //! ## Security Properties
 //! - Credentials never stored in plaintext on disk
 //! - OS keychain integration for hardware-backed security (Secure Enclave on macOS)
-//! - In-memory credentials zeroed on drop (best-effort)
+//! - In-memory credential secrets zeroed on drop via `zeroize::Zeroizing<String>`
 //! - Concurrent-safe access via `RwLock`
 //!
 //! ## Keychain key format
@@ -17,15 +17,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
+use zeroize::{Zeroize, Zeroizing};
 
 /// A stored credential with metadata.
+///
+/// The `secret` field is zeroed on drop via a custom `Drop` implementation
+/// to ensure the heap memory backing the API key / token is overwritten.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredCredential {
     /// Provider this credential belongs to (e.g., "anthropic", "openai").
     pub provider: String,
     /// Unique credential identifier within the provider.
     pub credential_id: String,
-    /// The API key or token (sensitive).
+    /// The API key or token (sensitive). Zeroed on drop.
     #[serde(skip_serializing)]
     pub secret: String,
     /// Optional organization ID.
@@ -40,6 +44,12 @@ pub struct StoredCredential {
     pub last_verified: Option<chrono::DateTime<chrono::Utc>>,
     /// Whether this credential has been marked as expired/invalid.
     pub is_expired: bool,
+}
+
+impl Drop for StoredCredential {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
 }
 
 impl StoredCredential {
@@ -283,7 +293,7 @@ impl CredentialVault {
     /// returns just the secret string.
     pub fn get_secret(&self, provider: &str, credential_id: &str) -> Result<Option<String>, VaultError> {
         self.get(provider, credential_id)
-            .map(|opt| opt.map(|c| c.secret))
+            .map(|opt| opt.map(|c| c.secret.clone()))
     }
 
     /// Store a simple key-value secret (provider, id, secret).

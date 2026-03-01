@@ -20,14 +20,22 @@
 //! Routing (capability matching): O(A × C) where A = |agents|, C = |capabilities|.
 //! For typical instances (A < 50, C < 20), this is sub-microsecond.
 
-use crate::agent_card::{AgentCapability, AgentCard};
+use crate::agent_card::AgentCard;
+use crate::capability::CapabilityId;
 use rustc_hash::FxHashMap;
 use tracing::{debug, info};
 
 /// Agent directory — registry of known agents and their cards.
+///
+/// Maintains an inverted index `CapabilityId → Vec<AgentId>` for O(C × avg)
+/// routing instead of O(A × C) full scan. The index is rebuilt on
+/// register/deregister and includes hierarchical closure (an agent with
+/// `AudioProcessing` also appears under `MediaProcessing`).
 #[derive(Clone)]
 pub struct AgentDirectory {
     pub(crate) agents: FxHashMap<String, AgentEntry>,
+    /// Inverted index: capability → set of agent IDs that have it (after closure).
+    cap_index: FxHashMap<CapabilityId, Vec<String>>,
 }
 
 /// Entry in the agent directory.
@@ -42,6 +50,76 @@ pub struct AgentEntry {
     pub is_healthy: bool,
     /// Last health check timestamp.
     pub last_health_check: Option<chrono::DateTime<chrono::Utc>>,
+    /// Social/reputation metrics from user feedback (reactions, ratings).
+    pub social_metrics: SocialMetrics,
+}
+
+/// Bayesian reputation tracker using Beta-distribution parameters.
+///
+/// Models user satisfaction as a Beta(α, β) distribution where:
+/// - α (positive) is incremented for positive feedback (👍, ✅, ⭐)
+/// - β (negative) is incremented for negative feedback (👎, ❌)
+///
+/// The expected reputation is `E[X] = α / (α + β)`, yielding a value in
+/// `[0, 1]` that converges to the true satisfaction rate with more data.
+///
+/// Uses Thompson Sampling–compatible priors: `α₀ = β₀ = 1` (uniform prior).
+#[derive(Debug, Clone)]
+pub struct SocialMetrics {
+    /// Positive feedback count (Beta distribution α parameter).
+    pub positive: f64,
+    /// Negative feedback count (Beta distribution β parameter).
+    pub negative: f64,
+    /// Total number of interactions (for decay / recency gating).
+    pub total_interactions: u64,
+}
+
+impl SocialMetrics {
+    /// Uniform prior: no evidence yet.
+    pub fn new() -> Self {
+        Self {
+            positive: 1.0,
+            negative: 1.0,
+            total_interactions: 0,
+        }
+    }
+
+    /// Record a positive feedback signal (e.g., thumbs-up reaction).
+    pub fn record_positive(&mut self) {
+        self.positive += 1.0;
+        self.total_interactions += 1;
+    }
+
+    /// Record a negative feedback signal (e.g., thumbs-down reaction).
+    pub fn record_negative(&mut self) {
+        self.negative += 1.0;
+        self.total_interactions += 1;
+    }
+
+    /// Expected reputation: E[Beta(α, β)] = α / (α + β).
+    /// Returns a value in [0, 1]. With the uniform prior (1,1), a fresh
+    /// agent starts at 0.5.
+    pub fn reputation(&self) -> f64 {
+        self.positive / (self.positive + self.negative)
+    }
+
+    /// Reputation boost factor for router scoring.
+    ///
+    /// Maps reputation [0,1] to a multiplicative factor in [0.8, 1.2]:
+    /// - reputation 0.5 (neutral) → factor 1.0 (no effect)
+    /// - reputation 1.0 (perfect) → factor 1.2 (+20%)
+    /// - reputation 0.0 (worst)   → factor 0.8 (−20%)
+    ///
+    /// The bounded range prevents reputation from dominating capability score.
+    pub fn routing_boost(&self) -> f64 {
+        0.8 + 0.4 * self.reputation()
+    }
+}
+
+impl Default for SocialMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Routing decision result.
@@ -56,7 +134,7 @@ pub enum RoutingDecision {
     /// No suitable agent found.
     NoMatch {
         reason: String,
-        required_capabilities: Vec<AgentCapability>,
+        required_capabilities: Vec<CapabilityId>,
     },
 }
 
@@ -64,13 +142,30 @@ impl AgentDirectory {
     pub fn new() -> Self {
         Self {
             agents: FxHashMap::default(),
+            cap_index: FxHashMap::default(),
         }
     }
 
     /// Register or update an agent card.
-    pub fn register(&mut self, card: AgentCard) {
+    pub fn register(&mut self, mut card: AgentCard) {
         let id = card.id.clone();
+        // Ensure capset with closure is built.
+        card.rebuild_capset();
         info!(agent = %id, name = %card.name, caps = card.capabilities.len(), "registered agent");
+
+        // Remove old index entries if re-registering.
+        self.remove_from_index(&id);
+
+        // Add to inverted index: every capability in the closed set.
+        for &cap in CapabilityId::all() {
+            if card.has_capability(cap) {
+                self.cap_index
+                    .entry(cap)
+                    .or_insert_with(Vec::new)
+                    .push(id.clone());
+            }
+        }
+
         self.agents.insert(
             id,
             AgentEntry {
@@ -79,13 +174,43 @@ impl AgentDirectory {
                 last_latency_ms: None,
                 is_healthy: true,
                 last_health_check: None,
+                social_metrics: SocialMetrics::new(),
             },
         );
     }
 
     /// Remove an agent from the directory.
     pub fn deregister(&mut self, agent_id: &str) -> Option<AgentEntry> {
+        self.remove_from_index(agent_id);
         self.agents.remove(agent_id)
+    }
+
+    /// Remove agent from all inverted index posting lists.
+    fn remove_from_index(&mut self, agent_id: &str) {
+        for posting_list in self.cap_index.values_mut() {
+            posting_list.retain(|id| id != agent_id);
+        }
+    }
+
+    /// Get candidate agent IDs for a set of required capabilities.
+    ///
+    /// Returns the *union* of posting lists for all required capabilities.
+    /// O(C × avg_posting_list_length) instead of O(A).
+    pub fn candidates_for(&self, required: &[CapabilityId]) -> Vec<&str> {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for &cap in required {
+            if let Some(list) = self.cap_index.get(&cap) {
+                for id in list {
+                    seen.insert(id.as_str());
+                }
+            }
+            // Also look up the closed required set — if the requirement is
+            // MediaProcessing, agents indexed under MediaProcessing are candidates.
+            // If requirement is AudioProcessing, the closure adds MediaProcessing
+            // but we already indexed agents under their closure, so the union covers it.
+        }
+        seen.into_iter().collect()
     }
 
     /// Get an agent card by ID.
@@ -120,6 +245,27 @@ impl AgentDirectory {
             entry.last_health_check = Some(chrono::Utc::now());
         }
     }
+
+    /// Record a user reaction (feedback signal) for an agent.
+    ///
+    /// Positive reaction emojis (👍, ✅, ⭐, ❤️, etc.) increment the positive
+    /// Beta parameter. Negative reactions (👎, ❌) increment the negative
+    /// parameter. Neutral/unknown reactions are ignored.
+    pub fn record_reaction(&mut self, agent_id: &str, positive: bool) {
+        if let Some(entry) = self.agents.get_mut(agent_id) {
+            if positive {
+                entry.social_metrics.record_positive();
+            } else {
+                entry.social_metrics.record_negative();
+            }
+            debug!(
+                agent = agent_id,
+                positive = positive,
+                reputation = format!("{:.3}", entry.social_metrics.reputation()),
+                "recorded social feedback"
+            );
+        }
+    }
 }
 
 impl Default for AgentDirectory {
@@ -144,32 +290,38 @@ impl AgentRouter {
     /// Find the best agent for a set of required capabilities.
     ///
     /// Algorithm:
-    /// 1. Filter to healthy agents with score ≥ threshold.
-    /// 2. Among eligible agents, select by: highest score → lowest load → lowest latency.
+    /// 1. Use inverted index to get candidate agents (O(C × avg)).
+    /// 2. Filter to healthy agents with score ≥ threshold.
+    /// 3. Among eligible agents, select by: highest score → lowest load → lowest latency.
     ///
-    /// Complexity: O(A × C) where A = |agents|, C = |required_capabilities|.
+    /// Complexity: O(C × avg + K log K) where K = |candidates| ≪ |agents|.
     pub fn route(
         &self,
         directory: &AgentDirectory,
-        required_capabilities: &[AgentCapability],
+        required_capabilities: &[CapabilityId],
         exclude_agents: &[String],
     ) -> RoutingDecision {
-        let mut candidates: Vec<(&str, f64, u32, u64)> = directory
-            .agents
+        // Use inverted index for candidate pre-filtering.
+        let candidate_ids = directory.candidates_for(required_capabilities);
+
+        let mut candidates: Vec<(&str, f64, u32, u64)> = candidate_ids
             .iter()
+            .filter_map(|&id| directory.agents.get(id).map(|entry| (id, entry)))
             .filter(|(id, entry)| {
                 entry.is_healthy
-                    && !exclude_agents.contains(id)
+                    && !exclude_agents.iter().any(|ex| ex == *id)
                     && entry
                         .card
                         .max_concurrent_tasks
                         .map_or(true, |max| entry.active_tasks < max)
             })
             .map(|(id, entry)| {
-                let score = entry.card.capability_score(required_capabilities);
+                let cap_score = entry.card.capability_score(required_capabilities);
+                // Modulate capability score by reputation [0.8x .. 1.2x].
+                let score = cap_score * entry.social_metrics.routing_boost();
                 let load = entry.active_tasks;
                 let latency = entry.last_latency_ms.unwrap_or(u64::MAX);
-                (id.as_str(), score, load, latency)
+                (id, score, load, latency)
             })
             .filter(|(_, score, _, _)| *score >= self.min_score_threshold)
             .collect();
@@ -215,15 +367,17 @@ impl AgentRouter {
     pub fn find_all(
         &self,
         directory: &AgentDirectory,
-        required_capabilities: &[AgentCapability],
+        required_capabilities: &[CapabilityId],
     ) -> Vec<(String, f64)> {
-        directory
-            .agents
+        let candidate_ids = directory.candidates_for(required_capabilities);
+
+        candidate_ids
             .iter()
+            .filter_map(|&id| directory.agents.get(id).map(|entry| (id, entry)))
             .filter(|(_, entry)| entry.is_healthy)
             .map(|(id, entry)| {
                 let score = entry.card.capability_score(required_capabilities);
-                (id.clone(), score)
+                (id.to_string(), score)
             })
             .filter(|(_, score)| *score >= self.min_score_threshold)
             .collect()
@@ -240,9 +394,10 @@ impl Default for AgentRouter {
 mod tests {
     use super::*;
 
-    fn make_agent(id: &str, caps: Vec<AgentCapability>) -> AgentCard {
+    fn make_agent(id: &str, caps: Vec<CapabilityId>) -> AgentCard {
         let mut card = AgentCard::new(id, id, format!("http://{}.local", id));
         card.capabilities = caps;
+        card.rebuild_capset();
         card
     }
 
@@ -251,20 +406,20 @@ mod tests {
         let mut dir = AgentDirectory::new();
         dir.register(make_agent(
             "web-agent",
-            vec![AgentCapability::WebSearch, AgentCapability::TextGeneration],
+            vec![CapabilityId::WebSearch, CapabilityId::TextGeneration],
         ));
         dir.register(make_agent(
             "code-agent",
             vec![
-                AgentCapability::CodeExecution,
-                AgentCapability::TextGeneration,
+                CapabilityId::CodeExecution,
+                CapabilityId::TextGeneration,
             ],
         ));
 
         let router = AgentRouter::new();
         let decision = router.route(
             &dir,
-            &[AgentCapability::WebSearch, AgentCapability::TextGeneration],
+            &[CapabilityId::WebSearch, CapabilityId::TextGeneration],
             &[],
         );
 
@@ -282,18 +437,18 @@ mod tests {
         let mut dir = AgentDirectory::new();
         dir.register(make_agent(
             "busy",
-            vec![AgentCapability::TextGeneration],
+            vec![CapabilityId::TextGeneration],
         ));
         dir.register(make_agent(
             "idle",
-            vec![AgentCapability::TextGeneration],
+            vec![CapabilityId::TextGeneration],
         ));
         dir.increment_tasks("busy");
         dir.increment_tasks("busy");
         dir.increment_tasks("busy");
 
         let router = AgentRouter::new();
-        let decision = router.route(&dir, &[AgentCapability::TextGeneration], &[]);
+        let decision = router.route(&dir, &[CapabilityId::TextGeneration], &[]);
 
         match decision {
             RoutingDecision::Route { agent_id, .. } => {
@@ -308,13 +463,63 @@ mod tests {
         let mut dir = AgentDirectory::new();
         dir.register(make_agent(
             "down",
-            vec![AgentCapability::TextGeneration],
+            vec![CapabilityId::TextGeneration],
         ));
         dir.update_health("down", false, None);
 
         let router = AgentRouter::new();
-        let decision = router.route(&dir, &[AgentCapability::TextGeneration], &[]);
+        let decision = router.route(&dir, &[CapabilityId::TextGeneration], &[]);
 
         assert!(matches!(decision, RoutingDecision::NoMatch { .. }));
+    }
+
+    #[test]
+    fn social_metrics_default_reputation() {
+        let m = SocialMetrics::new();
+        // Uniform prior: 1/(1+1) = 0.5
+        assert!((m.reputation() - 0.5).abs() < 1e-10);
+        // Neutral boost factor: 0.8 + 0.4 * 0.5 = 1.0
+        assert!((m.routing_boost() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn social_metrics_positive_feedback() {
+        let mut m = SocialMetrics::new();
+        for _ in 0..8 {
+            m.record_positive();
+        }
+        // α=9, β=1 → reputation 0.9
+        assert!((m.reputation() - 0.9).abs() < 1e-10);
+        assert!(m.routing_boost() > 1.1);
+        assert_eq!(m.total_interactions, 8);
+    }
+
+    #[test]
+    fn social_metrics_affect_routing() {
+        let mut dir = AgentDirectory::new();
+        dir.register(make_agent(
+            "loved",
+            vec![CapabilityId::TextGeneration],
+        ));
+        dir.register(make_agent(
+            "disliked",
+            vec![CapabilityId::TextGeneration],
+        ));
+
+        // Give "loved" positive feedback, "disliked" negative feedback
+        for _ in 0..10 {
+            dir.record_reaction("loved", true);
+            dir.record_reaction("disliked", false);
+        }
+
+        let router = AgentRouter::new();
+        let decision = router.route(&dir, &[CapabilityId::TextGeneration], &[]);
+
+        match decision {
+            RoutingDecision::Route { agent_id, .. } => {
+                assert_eq!(agent_id, "loved", "agent with better reputation should be preferred");
+            }
+            RoutingDecision::NoMatch { .. } => panic!("expected a match"),
+        }
     }
 }

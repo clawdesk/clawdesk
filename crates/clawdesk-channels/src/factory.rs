@@ -465,7 +465,8 @@ impl ChannelFactory {
             .optional("allowed_guild_ids", ConfigFieldType::UnsignedArray, "Restrict to these guild IDs")
             .optional("allowed_users", ConfigFieldType::StringArray, "Allowed user IDs (\"*\" = everyone)")
             .optional("listen_to_bots", ConfigFieldType::Bool, "Process messages from other bots")
-            .optional("mention_only", ConfigFieldType::Bool, "Only respond when @mentioned");
+            .optional("mention_only", ConfigFieldType::Bool, "Only respond when @mentioned")
+            .optional("default_channel_id", ConfigFieldType::String, "Default Discord channel ID for cross-channel sends");
         f.register_with_schema("discord", discord_schema, |config| {
             let bot_token = config.require_string("bot_token")?;
             let application_id = config.require_string("application_id")?;
@@ -476,6 +477,10 @@ impl ChannelFactory {
             };
             let listen_to_bots = config.bool_or("listen_to_bots", false);
             let mention_only = config.bool_or("mention_only", false);
+            let default_channel_id = {
+                let s = config.string_or("default_channel_id", "");
+                if s.is_empty() { None } else { s.parse::<u64>().ok() }
+            };
             Ok(Arc::new(crate::discord::DiscordChannel::new(
                 bot_token,
                 application_id,
@@ -483,6 +488,7 @@ impl ChannelFactory {
                 allowed_users,
                 listen_to_bots,
                 mention_only,
+                default_channel_id,
             )))
         });
 

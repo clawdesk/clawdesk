@@ -6,7 +6,7 @@
 //! - Consumer lag = producer_offset - consumer_offset
 
 use crate::event::Event;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
@@ -43,7 +43,7 @@ pub struct Topic {
     /// Broadcast channel for notifying subscribers of new events
     notify: broadcast::Sender<u64>,
     /// Per-subscriber cursor positions: subscriber_id → last consumed offset
-    cursors: RwLock<HashMap<String, u64>>,
+    cursors: DashMap<String, u64>,
 }
 
 impl Topic {
@@ -55,7 +55,7 @@ impl Topic {
             write_offset: AtomicU64::new(0),
             config,
             notify,
-            cursors: RwLock::new(HashMap::new()),
+            cursors: DashMap::new(),
         })
     }
 
@@ -83,16 +83,13 @@ impl Topic {
 
     /// Register a new consumer with a starting cursor position.
     pub async fn register_consumer(&self, consumer_id: impl Into<String>, start_offset: u64) {
-        let mut cursors = self.cursors.write().await;
-        cursors.insert(consumer_id.into(), start_offset);
+        self.cursors.insert(consumer_id.into(), start_offset);
     }
 
     /// Read events from the given offset, up to `max_count`.
     /// Returns the events and the new cursor position.
     pub async fn consume(&self, consumer_id: &str, max_count: usize) -> (Vec<Event>, u64) {
-        let cursors = self.cursors.read().await;
-        let cursor = cursors.get(consumer_id).copied().unwrap_or(0);
-        drop(cursors);
+        let cursor = self.cursors.get(consumer_id).map(|v| *v).unwrap_or(0);
 
         let buf = self.buffer.read().await;
         let current_write = self.write_offset.load(Ordering::SeqCst);
@@ -113,8 +110,7 @@ impl Topic {
         drop(buf);
 
         // Advance cursor
-        let mut cursors = self.cursors.write().await;
-        cursors.insert(consumer_id.to_string(), new_cursor);
+        self.cursors.insert(consumer_id.to_string(), new_cursor);
 
         (events, new_cursor)
     }
@@ -126,8 +122,7 @@ impl Topic {
 
     /// Get consumer lag for a specific subscriber.
     pub async fn consumer_lag(&self, consumer_id: &str) -> u64 {
-        let cursors = self.cursors.read().await;
-        let cursor = cursors.get(consumer_id).copied().unwrap_or(0);
+        let cursor = self.cursors.get(consumer_id).map(|v| *v).unwrap_or(0);
         let head = self.write_offset.load(Ordering::SeqCst);
         head.saturating_sub(cursor)
     }

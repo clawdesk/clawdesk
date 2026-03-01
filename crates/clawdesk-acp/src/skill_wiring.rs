@@ -12,13 +12,14 @@
 //! `SkillWiring` automatically syncs the `SkillRegistry` → `AgentCard.skills`:
 //! 1. Scans all active skills in the registry.
 //! 2. Maps each `Skill.manifest` → `AgentSkill` (id, name, description, parameter schema).
-//! 3. Derives `AgentCapability` from skill tags (e.g., tag "web" → `WebSearch`).
+//! 3. Derives `CapabilityId` from skill tags (e.g., tag "web" → `WebSearch`).
 //! 4. Patches the `AgentCard` with the derived skills and capabilities.
 //!
 //! This runs on-demand (not blocking the hot path) as a sync function that
 //! any system can call after skill registry changes.
 
-use crate::agent_card::{AgentCapability, AgentCard, AgentSkill};
+use crate::agent_card::{AgentCard, AgentSkill};
+use crate::capability::CapabilityId;
 use serde_json::json;
 use tracing::info;
 
@@ -44,9 +45,9 @@ pub fn sync_skills_to_card(card: &mut AgentCard, skills: &[SkillSnapshot]) {
         };
         agent_skills.push(agent_skill);
 
-        // Derive capabilities from tags
+        // Derive capabilities from tags using CapabilityId::from_tag()
         for tag in &skill.tags {
-            if let Some(cap) = tag_to_capability(tag) {
+            if let Some(cap) = CapabilityId::from_tag(tag) {
                 capabilities.insert(cap);
             }
         }
@@ -62,6 +63,7 @@ pub fn sync_skills_to_card(card: &mut AgentCard, skills: &[SkillSnapshot]) {
             card.capabilities.push(cap);
         }
     }
+    card.rebuild_capset();
 
     info!(
         skills = skill_count,
@@ -100,24 +102,12 @@ pub struct SkillParam {
     pub required: bool,
 }
 
-/// Map a skill tag to an `AgentCapability`.
+/// Map a skill tag to a `CapabilityId`.
 ///
 /// Returns `None` for tags that don't map to a known capability.
-fn tag_to_capability(tag: &str) -> Option<AgentCapability> {
-    match tag.to_lowercase().as_str() {
-        "text" | "generation" | "chat" | "llm" => Some(AgentCapability::TextGeneration),
-        "code" | "coding" | "programming" | "execution" => Some(AgentCapability::CodeExecution),
-        "web" | "search" | "internet" => Some(AgentCapability::WebSearch),
-        "file" | "filesystem" | "files" => Some(AgentCapability::FileProcessing),
-        "image" | "vision" | "visual" => Some(AgentCapability::ImageProcessing),
-        "audio" | "speech" | "tts" | "transcription" => Some(AgentCapability::AudioProcessing),
-        "api" | "integration" | "http" => Some(AgentCapability::ApiIntegration),
-        "data" | "database" | "storage" => Some(AgentCapability::DataManagement),
-        "math" | "mathematics" | "calculation" => Some(AgentCapability::Mathematics),
-        "schedule" | "cron" | "calendar" => Some(AgentCapability::Scheduling),
-        "message" | "messaging" | "notification" => Some(AgentCapability::Messaging),
-        _ => None,
-    }
+/// Delegates to `CapabilityId::from_tag()` for the canonical mapping.
+fn tag_to_capability(tag: &str) -> Option<CapabilityId> {
+    CapabilityId::from_tag(tag)
 }
 
 /// Convert parameter definitions to a JSON Schema object.
@@ -155,10 +145,10 @@ fn parameters_to_json_schema(params: &[SkillParam]) -> serde_json::Value {
     schema
 }
 
-/// Derive an `AgentCapability` bitset summary string for logging.
-pub fn capability_summary(caps: &[AgentCapability]) -> String {
+/// Derive a capability summary string for logging.
+pub fn capability_summary(caps: &[CapabilityId]) -> String {
     caps.iter()
-        .map(|c| format!("{:?}", c))
+        .map(|c| c.name())
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -239,19 +229,19 @@ mod tests {
         sync_skills_to_card(&mut card, &sample_skills());
 
         // Should have WebSearch, CodeExecution, Mathematics
-        assert!(card.capabilities.contains(&AgentCapability::WebSearch));
-        assert!(card.capabilities.contains(&AgentCapability::CodeExecution));
-        assert!(card.capabilities.contains(&AgentCapability::Mathematics));
+        assert!(card.capabilities.contains(&CapabilityId::WebSearch));
+        assert!(card.capabilities.contains(&CapabilityId::CodeExecution));
+        assert!(card.capabilities.contains(&CapabilityId::Mathematics));
     }
 
     #[test]
     fn sync_preserves_existing_capabilities() {
         let mut card = test_card();
-        card.capabilities.push(AgentCapability::Messaging);
+        card.capabilities.push(CapabilityId::Messaging);
         sync_skills_to_card(&mut card, &sample_skills());
 
-        assert!(card.capabilities.contains(&AgentCapability::Messaging));
-        assert!(card.capabilities.contains(&AgentCapability::WebSearch));
+        assert!(card.capabilities.contains(&CapabilityId::Messaging));
+        assert!(card.capabilities.contains(&CapabilityId::WebSearch));
     }
 
     #[test]
@@ -286,10 +276,10 @@ mod tests {
 
     #[test]
     fn tag_mapping_coverage() {
-        assert_eq!(tag_to_capability("web"), Some(AgentCapability::WebSearch));
-        assert_eq!(tag_to_capability("code"), Some(AgentCapability::CodeExecution));
-        assert_eq!(tag_to_capability("math"), Some(AgentCapability::Mathematics));
-        assert_eq!(tag_to_capability("audio"), Some(AgentCapability::AudioProcessing));
+        assert_eq!(tag_to_capability("web"), Some(CapabilityId::WebSearch));
+        assert_eq!(tag_to_capability("code"), Some(CapabilityId::CodeExecution));
+        assert_eq!(tag_to_capability("math"), Some(CapabilityId::Mathematics));
+        assert_eq!(tag_to_capability("audio"), Some(CapabilityId::AudioProcessing));
         assert_eq!(tag_to_capability("unknown_tag"), None);
     }
 
@@ -320,7 +310,7 @@ mod tests {
         let web_count = card
             .capabilities
             .iter()
-            .filter(|c| **c == AgentCapability::WebSearch)
+            .filter(|c| **c == CapabilityId::WebSearch)
             .count();
         assert_eq!(web_count, 1);
     }

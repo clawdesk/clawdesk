@@ -25,6 +25,63 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Spawn mode — how the sub-agent thread is created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnMode {
+    /// Fire-and-forget: execute, announce result, optionally clean up.
+    Run,
+    /// Persistent: keeps the thread alive for interactive back-and-forth.
+    Session,
+}
+
+impl Default for SpawnMode {
+    fn default() -> Self {
+        Self::Run
+    }
+}
+
+impl SpawnMode {
+    /// Whether this mode announces the result to the requester's thread.
+    pub fn announces_on_complete(self) -> bool {
+        matches!(self, Self::Run)
+    }
+}
+
+impl std::fmt::Display for SpawnMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Run => f.write_str("run"),
+            Self::Session => f.write_str("session"),
+        }
+    }
+}
+
+impl From<&str> for SpawnMode {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "session" | "persistent" => Self::Session,
+            _ => Self::Run,
+        }
+    }
+}
+
+/// Cleanup policy after task completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupPolicy {
+    /// Preserve the thread and history.
+    Keep,
+    /// Remove the sub-agent thread after announce.
+    Delete,
+}
+
+impl Default for CleanupPolicy {
+    fn default() -> Self {
+        Self::Keep
+    }
+}
+
 /// Unique task identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub String);
@@ -140,26 +197,19 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_key: Option<String>,
 
-    /// Spawn mode: `"run"` (fire-and-forget) or `"session"` (persistent).
-    /// Determines whether the task thread is ephemeral or long-lived.
-    #[serde(default = "default_run_mode", skip_serializing_if = "is_run_mode")]
-    pub spawn_mode: String,
+    /// Spawn mode: how the sub-agent thread is created.
+    #[serde(default)]
+    pub spawn_mode: SpawnMode,
 
     /// Cleanup policy after task completion.
-    /// `"keep"` — preserve the thread and history.
-    /// `"delete"` — remove the sub-agent thread after announce.
-    #[serde(default = "default_cleanup", skip_serializing_if = "is_keep")]
-    pub cleanup: String,
+    #[serde(default)]
+    pub cleanup: CleanupPolicy,
 
     /// Whether to announce the result to the requester's thread.
     #[serde(default = "default_announce")]
     pub announce_on_complete: bool,
 }
 
-fn default_run_mode() -> String { "run".to_string() }
-fn is_run_mode(s: &str) -> bool { s == "run" }
-fn default_cleanup() -> String { "keep".to_string() }
-fn is_keep(s: &str) -> bool { s == "keep" }
 fn default_announce() -> bool { true }
 
 /// Record of a state transition.
@@ -195,8 +245,8 @@ impl Task {
             history: vec![],
             thread_id: None,
             session_key: None,
-            spawn_mode: default_run_mode(),
-            cleanup: default_cleanup(),
+            spawn_mode: SpawnMode::default(),
+            cleanup: CleanupPolicy::default(),
             announce_on_complete: true,
         }
     }
@@ -207,11 +257,11 @@ impl Task {
         executor_id: impl Into<String>,
         input: serde_json::Value,
         thread_id: u128,
-        spawn_mode: &str,
+        spawn_mode: SpawnMode,
     ) -> Self {
         let mut task = Self::new(requester_id, executor_id, input);
         task.thread_id = Some(thread_id);
-        task.spawn_mode = spawn_mode.to_string();
+        task.spawn_mode = spawn_mode;
         task.session_key = Some(format!("agent:{}:{:032x}", task.executor_id, thread_id));
         task
     }
@@ -391,5 +441,71 @@ mod tests {
         assert_eq!(task.history[0].to, TaskState::Working);
         assert_eq!(task.history[1].from, TaskState::Working);
         assert_eq!(task.history[1].to, TaskState::Completed);
+    }
+
+    #[test]
+    fn checkpoint_roundtrip() {
+        let task = Task::new("a", "b", serde_json::json!({"q": "hello"}));
+        let cp = TaskCheckpoint::new(&task, 3, serde_json::json!({"step_2": "done"}));
+        assert_eq!(cp.task_id, task.id);
+        assert_eq!(cp.completed_steps, 3);
+        assert!(!cp.step_outputs.is_null());
+        // Verify serde roundtrip
+        let json = serde_json::to_string(&cp).unwrap();
+        let restored: TaskCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.completed_steps, 3);
+    }
+}
+
+// ─── Durable Task Checkpoint ────────────────────────────────────────────────
+
+/// Serializable checkpoint for long-running task execution.
+///
+/// Captures enough state to resume a multi-step pipeline or task from the
+/// last successful step after a process restart. The checkpoint is designed
+/// to be persisted to SochDB, filesystem, or any `CronPersistence`-like backend.
+///
+/// ## Invariant
+///
+/// `completed_steps ≤ total_steps` (when total is known). Steps `0..completed_steps`
+/// can be skipped on resume; execution restarts at step `completed_steps`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskCheckpoint {
+    /// Task this checkpoint belongs to.
+    pub task_id: TaskId,
+    /// Snapshot of the full task state at checkpoint time.
+    pub task_snapshot: Task,
+    /// Number of completed pipeline steps.
+    pub completed_steps: usize,
+    /// Intermediate step outputs: `{ "step_0": <value>, "step_1": <value>, ... }`.
+    /// Used to feed prior outputs into resumed steps without re-execution.
+    pub step_outputs: serde_json::Value,
+    /// When this checkpoint was created.
+    pub checkpoint_at: DateTime<Utc>,
+    /// Optional human-readable label (e.g., "after web-search step").
+    pub label: Option<String>,
+}
+
+impl TaskCheckpoint {
+    /// Create a checkpoint from the current task state.
+    pub fn new(
+        task: &Task,
+        completed_steps: usize,
+        step_outputs: serde_json::Value,
+    ) -> Self {
+        Self {
+            task_id: task.id.clone(),
+            task_snapshot: task.clone(),
+            completed_steps,
+            step_outputs,
+            checkpoint_at: Utc::now(),
+            label: None,
+        }
+    }
+
+    /// Create a labeled checkpoint.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 }

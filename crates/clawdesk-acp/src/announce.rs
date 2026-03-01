@@ -25,10 +25,15 @@
 //! `DeliveryCallback` is notified.
 
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+
+/// Default subscription TTL — 1 hour.
+const DEFAULT_SUBSCRIPTION_TTL: Duration = Duration::from_secs(3600);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Delivery target
@@ -161,28 +166,68 @@ impl RetryPolicy {
 /// The router holds a delivery queue and processes announcements in order.
 /// Actual delivery is callback-based (via `DeliveryHandler`) so the router
 /// is transport-agnostic.
+///
+/// # Thread Safety
+///
+/// `AnnounceRouter` is internally concurrent — all methods take `&self`.
+/// Subscriptions use `DashMap` for lock-free concurrent access.
+/// The delivery queue uses `tokio::sync::mpsc` channels, eliminating the
+/// need for external `Mutex` wrapping.
+///
+/// **Usage:**
+/// ```rust,ignore
+/// let router = Arc::new(AnnounceRouter::with_defaults());
+/// // No Mutex needed — methods are &self
+/// router.subscribe("task-1", target);
+/// router.announce("task-1", "agent-a", payload);
+/// ```
+///
+/// **Lock ordering** (if held alongside other locks):
+/// 1. `TaskStore` lock
+/// 2. `AnnounceRouter` receiver lock  (always acquire *after* TaskStore)
+///
+/// The `subscribe/announce/retry` methods never block.
 pub struct AnnounceRouter {
-    /// Pending deliveries.
-    queue: VecDeque<Announcement>,
+    /// Send side for enqueuing announcements. Cloneable for fan-in.
+    tx: mpsc::Sender<Announcement>,
+    /// Receive side for pulling announcements for delivery.
+    /// Wrapped in a tokio Mutex since mpsc::Receiver requires `&mut self`.
+    rx: tokio::sync::Mutex<mpsc::Receiver<Announcement>>,
     /// Retry policy.
     retry_policy: RetryPolicy,
-    /// Successfully delivered count.
-    pub delivered_count: u64,
-    /// Failed delivery count (after exhausting retries).
-    pub failed_count: u64,
-    /// Active subscriptions: task_id → list of targets.
-    subscriptions: std::collections::HashMap<String, Vec<DeliveryTarget>>,
+    /// Successfully delivered count (atomic — no lock needed).
+    delivered_count: AtomicU64,
+    /// Failed delivery count (atomic — no lock needed).
+    failed_count: AtomicU64,
+    /// Active subscriptions: task_id → list of targets with TTL.
+    /// `DashMap` gives concurrent read/write without a global lock.
+    subscriptions: DashMap<String, Vec<TimedSubscription>>,
+    /// TTL for subscriptions — stale entries are lazily purged.
+    subscription_ttl: Duration,
 }
+
+/// A subscription with a creation timestamp for TTL-based expiry.
+#[derive(Debug, Clone)]
+struct TimedSubscription {
+    target: DeliveryTarget,
+    subscribed_at: Instant,
+}
+
+/// Default channel capacity for the delivery queue.
+const DEFAULT_CHANNEL_CAPACITY: usize = 4096;
 
 impl AnnounceRouter {
     /// Create a new announce router.
     pub fn new(retry_policy: RetryPolicy) -> Self {
+        let (tx, rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
         Self {
-            queue: VecDeque::new(),
+            tx,
+            rx: tokio::sync::Mutex::new(rx),
             retry_policy,
-            delivered_count: 0,
-            failed_count: 0,
-            subscriptions: std::collections::HashMap::new(),
+            delivered_count: AtomicU64::new(0),
+            failed_count: AtomicU64::new(0),
+            subscriptions: DashMap::new(),
+            subscription_ttl: DEFAULT_SUBSCRIPTION_TTL,
         }
     }
 
@@ -191,31 +236,68 @@ impl AnnounceRouter {
         Self::new(RetryPolicy::default())
     }
 
+    /// Set the subscription TTL.
+    pub fn with_subscription_ttl(mut self, ttl: Duration) -> Self {
+        self.subscription_ttl = ttl;
+        self
+    }
+
+    /// Garbage-collect all expired subscriptions across all tasks.
+    /// Returns the number of tasks whose subscription lists were cleaned up.
+    pub fn gc_subscriptions(&self) -> usize {
+        let now = Instant::now();
+        let ttl = self.subscription_ttl;
+        let mut gc_count = 0;
+
+        self.subscriptions.retain(|_, subs| {
+            let before = subs.len();
+            subs.retain(|s| now.duration_since(s.subscribed_at) < ttl);
+            if subs.len() < before {
+                gc_count += 1;
+            }
+            !subs.is_empty()
+        });
+
+        gc_count
+    }
+
     /// Subscribe a delivery target to a task's results.
     ///
     /// When the task produces results (completion, failure, progress, artifacts),
     /// announcements are generated and queued for delivery to all subscribed targets.
-    pub fn subscribe(&mut self, task_id: &str, target: DeliveryTarget) {
+    pub fn subscribe(&self, task_id: &str, target: DeliveryTarget) {
         info!(task_id = task_id, "subscribed delivery target");
         self.subscriptions
             .entry(task_id.to_string())
             .or_default()
-            .push(target);
+            .push(TimedSubscription {
+                target,
+                subscribed_at: Instant::now(),
+            });
     }
 
     /// Remove all subscriptions for a task.
-    pub fn unsubscribe(&mut self, task_id: &str) -> usize {
+    pub fn unsubscribe(&self, task_id: &str) -> usize {
         self.subscriptions
             .remove(task_id)
-            .map(|v| v.len())
+            .map(|(_, v)| v.len())
             .unwrap_or(0)
     }
 
     /// Announce a payload for a task. Creates an `Announcement` for each
     /// subscribed target and enqueues them for delivery.
-    pub fn announce(&mut self, task_id: &str, source_agent: &str, payload: AnnouncePayload) -> usize {
-        let targets = match self.subscriptions.get(task_id) {
-            Some(targets) => targets.clone(),
+    ///
+    /// Lazily purges expired subscriptions (TTL-based).
+    pub fn announce(&self, task_id: &str, source_agent: &str, payload: AnnouncePayload) -> usize {
+        let now = Instant::now();
+        let ttl = self.subscription_ttl;
+
+        // Lazily purge expired subscriptions for this task.
+        let targets: Vec<DeliveryTarget> = match self.subscriptions.get_mut(task_id) {
+            Some(mut subs) => {
+                subs.retain(|s| now.duration_since(s.subscribed_at) < ttl);
+                subs.iter().map(|s| s.target.clone()).collect()
+            }
             None => {
                 debug!(task_id = task_id, "no subscribers for task");
                 return 0;
@@ -234,8 +316,13 @@ impl AnnounceRouter {
                 attempts: 0,
                 max_attempts: self.retry_policy.max_attempts,
             };
-            self.queue.push_back(announcement);
-            count += 1;
+            // try_send: non-blocking. If channel is full, drop the announcement
+            // and log a warning. In practice, 4096 capacity means this is rare.
+            if self.tx.try_send(announcement).is_err() {
+                warn!(task_id = task_id, "delivery queue full, dropping announcement");
+            } else {
+                count += 1;
+            }
         }
 
         info!(task_id = task_id, targets = count, "announcements queued");
@@ -243,13 +330,14 @@ impl AnnounceRouter {
     }
 
     /// Pop the next announcement for delivery. Returns `None` if the queue is empty.
-    pub fn next_delivery(&mut self) -> Option<Announcement> {
-        self.queue.pop_front()
+    pub async fn next_delivery(&self) -> Option<Announcement> {
+        let mut rx = self.rx.lock().await;
+        rx.try_recv().ok()
     }
 
     /// Re-enqueue an announcement for retry after a failed delivery.
     /// Returns `false` if max attempts exhausted.
-    pub fn retry(&mut self, mut announcement: Announcement) -> bool {
+    pub fn retry(&self, mut announcement: Announcement) -> bool {
         announcement.attempts += 1;
         if announcement.attempts >= announcement.max_attempts {
             warn!(
@@ -258,7 +346,7 @@ impl AnnounceRouter {
                 attempts = announcement.attempts,
                 "delivery permanently failed after max retries"
             );
-            self.failed_count += 1;
+            self.failed_count.fetch_add(1, Ordering::Relaxed);
             return false;
         }
 
@@ -267,36 +355,46 @@ impl AnnounceRouter {
             attempt = announcement.attempts,
             "re-enqueuing for retry"
         );
-        self.queue.push_back(announcement);
+        // try_send is non-blocking; channel should have space after a pop.
+        let _ = self.tx.try_send(announcement);
         true
     }
 
     /// Record a successful delivery.
-    pub fn record_delivered(&mut self) {
-        self.delivered_count += 1;
+    pub fn record_delivered(&self) {
+        self.delivered_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Number of pending deliveries.
+    ///
+    /// Note: This is an approximation when accessed concurrently — the
+    /// channel length can change between the call and when you act on it.
     pub fn pending(&self) -> usize {
-        self.queue.len()
+        // mpsc::Sender::max_capacity() - mpsc::Sender::capacity() = items in channel
+        DEFAULT_CHANNEL_CAPACITY - self.tx.capacity()
     }
 
     /// Whether there are pending deliveries.
     pub fn has_pending(&self) -> bool {
-        !self.queue.is_empty()
+        self.pending() > 0
     }
 
     /// Drain all pending announcements (for shutdown / batch processing).
-    pub fn drain_pending(&mut self) -> Vec<Announcement> {
-        self.queue.drain(..).collect()
+    pub async fn drain_pending(&self) -> Vec<Announcement> {
+        let mut rx = self.rx.lock().await;
+        let mut drained = Vec::new();
+        while let Ok(ann) = rx.try_recv() {
+            drained.push(ann);
+        }
+        drained
     }
 
     /// Summary for monitoring.
     pub fn summary(&self) -> AnnounceSummary {
         AnnounceSummary {
-            pending: self.queue.len(),
-            delivered: self.delivered_count,
-            failed: self.failed_count,
+            pending: self.pending(),
+            delivered: self.delivered_count.load(Ordering::Relaxed),
+            failed: self.failed_count.load(Ordering::Relaxed),
             subscriptions: self.subscriptions.len(),
         }
     }
@@ -325,9 +423,9 @@ pub struct AnnounceSummary {
 mod tests {
     use super::*;
 
-    #[test]
-    fn subscribe_and_announce() {
-        let mut router = AnnounceRouter::with_defaults();
+    #[tokio::test]
+    async fn subscribe_and_announce() {
+        let router = AnnounceRouter::with_defaults();
 
         router.subscribe(
             "task-1",
@@ -357,25 +455,25 @@ mod tests {
         assert_eq!(router.pending(), 2);
     }
 
-    #[test]
-    fn no_subscribers_no_announcements() {
-        let mut router = AnnounceRouter::with_defaults();
+    #[tokio::test]
+    async fn no_subscribers_no_announcements() {
+        let router = AnnounceRouter::with_defaults();
         let queued = router.announce(
             "task-orphan",
             "agent-a",
             AnnouncePayload::TaskFailed { error: "oops".into() },
         );
         assert_eq!(queued, 0);
-        assert!(router.next_delivery().is_none());
+        assert!(router.next_delivery().await.is_none());
     }
 
-    #[test]
-    fn delivery_retry_exhaustion() {
+    #[tokio::test]
+    async fn delivery_retry_exhaustion() {
         let policy = RetryPolicy {
             max_attempts: 3,
             ..Default::default()
         };
-        let mut router = AnnounceRouter::new(policy);
+        let router = AnnounceRouter::new(policy);
 
         router.subscribe(
             "task-2",
@@ -390,22 +488,22 @@ mod tests {
             AnnouncePayload::Progress { percent: 0.5, message: None },
         );
 
-        let ann = router.next_delivery().unwrap();
+        let ann = router.next_delivery().await.unwrap();
         assert_eq!(ann.attempts, 0);
 
         // Retry 1
         assert!(router.retry(ann.clone()));
-        let ann = router.next_delivery().unwrap();
+        let ann = router.next_delivery().await.unwrap();
         assert_eq!(ann.attempts, 1);
 
         // Retry 2
         assert!(router.retry(ann.clone()));
-        let ann = router.next_delivery().unwrap();
+        let ann = router.next_delivery().await.unwrap();
         assert_eq!(ann.attempts, 2);
 
         // Retry 3 — should fail (max_attempts = 3)
         assert!(!router.retry(ann));
-        assert_eq!(router.failed_count, 1);
+        assert_eq!(router.failed_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -424,9 +522,9 @@ mod tests {
         assert_eq!(policy.delay_for_attempt(10), Duration::from_secs(60));
     }
 
-    #[test]
-    fn unsubscribe_removes_targets() {
-        let mut router = AnnounceRouter::with_defaults();
+    #[tokio::test]
+    async fn unsubscribe_removes_targets() {
+        let router = AnnounceRouter::with_defaults();
         router.subscribe(
             "task-3",
             DeliveryTarget::Channel { channel_id: "test".into(), thread_id: None },
@@ -439,19 +537,19 @@ mod tests {
         assert_eq!(q, 0);
     }
 
-    #[test]
-    fn drain_pending_empties_queue() {
-        let mut router = AnnounceRouter::with_defaults();
+    #[tokio::test]
+    async fn drain_pending_empties_queue() {
+        let router = AnnounceRouter::with_defaults();
         router.subscribe("t", DeliveryTarget::Channel { channel_id: "c".into(), thread_id: None });
         router.announce("t", "a", AnnouncePayload::Progress { percent: 1.0, message: None });
-        let drained = router.drain_pending();
+        let drained = router.drain_pending().await;
         assert_eq!(drained.len(), 1);
-        assert!(router.next_delivery().is_none());
+        assert!(router.next_delivery().await.is_none());
     }
 
     #[test]
     fn summary_reflects_state() {
-        let mut router = AnnounceRouter::with_defaults();
+        let router = AnnounceRouter::with_defaults();
         router.subscribe("t", DeliveryTarget::Channel { channel_id: "c".into(), thread_id: None });
         router.announce("t", "a", AnnouncePayload::TaskCompleted {
             output: serde_json::json!(null),
@@ -463,5 +561,48 @@ mod tests {
         assert_eq!(s.pending, 1);
         assert_eq!(s.delivered, 1);
         assert_eq!(s.subscriptions, 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_subscribe_and_announce() {
+        use std::sync::Arc;
+
+        let router = Arc::new(AnnounceRouter::with_defaults());
+        let mut handles = Vec::new();
+
+        // 10 threads subscribing and announcing concurrently
+        for i in 0..10 {
+            let r = Arc::clone(&router);
+            handles.push(tokio::spawn(async move {
+                let task_id = format!("task-{}", i);
+                r.subscribe(
+                    &task_id,
+                    DeliveryTarget::Channel {
+                        channel_id: format!("ch-{}", i),
+                        thread_id: None,
+                    },
+                );
+                r.announce(
+                    &task_id,
+                    "agent",
+                    AnnouncePayload::TaskCompleted {
+                        output: serde_json::json!({"i": i}),
+                        duration_ms: 100,
+                    },
+                );
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(router.subscriptions.len(), 10);
+        assert_eq!(router.pending(), 10);
+
+        // Drain all
+        let drained = router.drain_pending().await;
+        assert_eq!(drained.len(), 10);
+        assert_eq!(router.pending(), 0);
     }
 }

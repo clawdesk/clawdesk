@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use clawdesk_channel::{Channel, MessageSink, Reactions, StreamHandle, Streaming};
 use clawdesk_types::channel::{ChannelId, ChannelMeta};
 use clawdesk_types::message::{
-    DeliveryReceipt, MediaAttachment, NormalizedMessage, OutboundMessage,
+    DeliveryReceipt, MediaAttachment, MessageOrigin, NormalizedMessage, OutboundMessage,
     SenderIdentity,
 };
 use reqwest::Client;
@@ -53,6 +53,10 @@ pub struct TelegramChannel {
     running: AtomicBool,
     /// Shutdown notifier.
     shutdown: Notify,
+    /// Auto-discovered chat ID from `getUpdates` probe at startup.
+    /// Populated when `allowed_chat_ids` is empty and the bot receives
+    /// or has pending messages. Used by `default_origin()` as fallback.
+    discovered_chat_id: AtomicI64,
 }
 
 impl TelegramChannel {
@@ -68,6 +72,7 @@ impl TelegramChannel {
             offset: AtomicI64::new(0),
             running: AtomicBool::new(false),
             shutdown: Notify::new(),
+            discovered_chat_id: AtomicI64::new(0),
         }
     }
 
@@ -111,6 +116,13 @@ impl TelegramChannel {
 
                                 if let Some(msg) = update.message {
                                     let chat_id = msg.chat.id;
+
+                                    // Auto-discover: update discovered_chat_id from
+                                    // the first message we see (enables default_origin).
+                                    if self.discovered_chat_id.load(Ordering::Relaxed) == 0 {
+                                        self.discovered_chat_id.store(chat_id, Ordering::Relaxed);
+                                        info!(chat_id, "Telegram: auto-discovered chat target from inbound message");
+                                    }
 
                                     // Filter by allowed chats
                                     if !self.is_allowed(chat_id) {
@@ -186,6 +198,7 @@ impl TelegramChannel {
             body_for_agent: None,
             sender,
             media,
+            artifact_refs: vec![],
             reply_context: None,
             origin,
             timestamp: chrono::Utc::now(),
@@ -239,6 +252,42 @@ impl Channel for TelegramChannel {
             );
         }
 
+        // ── Auto-discover default chat target ─────────────────────────
+        // When allowed_chat_ids is empty (allow-all mode), probe the
+        // Telegram API for any pending or recent update so we have a
+        // chat_id to use as the default send target. This eliminates
+        // the cold-start problem where "send a message to telegram"
+        // fails because no target is known yet.
+        if self.allowed_chat_ids.is_empty() {
+            let probe_url = self.api_url("getUpdates");
+            let probe_result = self.client
+                .post(&probe_url)
+                .json(&serde_json::json!({
+                    "limit": 1,
+                    "timeout": 0,
+                    "allowed_updates": ["message"]
+                }))
+                .send()
+                .await;
+
+            if let Ok(resp) = probe_result {
+                if let Ok(body) = resp.json::<TelegramResponse<Vec<TelegramUpdate>>>().await {
+                    if body.ok {
+                        if let Some(update) = body.result.as_ref().and_then(|u| u.first()) {
+                            if let Some(msg) = &update.message {
+                                let chat_id = msg.chat.id;
+                                self.discovered_chat_id.store(chat_id, Ordering::Relaxed);
+                                info!(
+                                    chat_id,
+                                    "Telegram: auto-discovered default chat target from pending update"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Spawn the long-polling loop on a background task.
         // We create a new TelegramChannel instance so the spawned future
         // has 'static lifetime and owns its state independently.
@@ -247,6 +296,11 @@ impl Channel for TelegramChannel {
             self.allowed_chat_ids.clone(),
             self.enable_groups,
         ));
+        // Propagate the discovered chat_id to the poll instance
+        poll_channel.discovered_chat_id.store(
+            self.discovered_chat_id.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         poll_channel.running.store(true, Ordering::Relaxed);
 
         tokio::spawn(async move {
@@ -320,6 +374,20 @@ impl Channel for TelegramChannel {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn default_origin(&self) -> Option<MessageOrigin> {
+        // Priority: explicit allowed_chat_ids[0] → auto-discovered chat_id
+        let chat_id = self.allowed_chat_ids.first().copied()
+            .or_else(|| {
+                let discovered = self.discovered_chat_id.load(Ordering::Relaxed);
+                if discovered != 0 { Some(discovered) } else { None }
+            })?;
+        Some(MessageOrigin::Telegram {
+            chat_id,
+            message_id: 0,
+            thread_id: None,
+        })
     }
 }
 

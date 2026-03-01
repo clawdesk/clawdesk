@@ -24,6 +24,7 @@ pub mod oauth;
 pub mod sandbox_policy;
 pub mod scanner;
 pub mod secret_ref;
+pub mod skill_verify;
 pub mod tokens;
 
 pub use acl::AclManager;
@@ -37,5 +38,6 @@ pub use group_policy::GroupPolicyManager;
 pub use identity::IdentityContract;
 pub use scanner::CascadeScanner;
 pub use secret_ref::{SecretRef, SecretDetector, resolve_or_passthrough, resolve_or_fallback, migrate_env_to_vault};
+pub use skill_verify::SkillVerifier;
 pub use oauth::{OAuthFlowManager, AuthProfile, AuthProfileManager, TokenSet, OAuthClientConfig};
 pub use tokens::{AuthError, ScopedToken, ServerSecret, TokenScope};

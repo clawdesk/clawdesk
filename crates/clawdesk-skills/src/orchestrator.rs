@@ -3,7 +3,7 @@
 //!
 //! ## Dynamic Skills Selection
 //!
-//! OpenClaw skills are static per-agent: loaded once at startup, never
+//! legacy skills are static per-agent: loaded once at startup, never
 //! changed during a conversation. ClawDesk's `TriggerEvaluator` + `SkillSelector`
 //! already enable per-turn dynamic selection, but the integration was missing.
 //!

@@ -15,7 +15,7 @@
 //! This implementation uses `hmac` + `sha2` crates available in the workspace.
 
 use async_trait::async_trait;
-use clawdesk_types::error::ProviderError;
+use clawdesk_types::error::{ProviderError, ProviderErrorKind};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -119,10 +119,7 @@ impl GlmProvider {
     pub fn new(api_key: &str) -> Result<Self, ProviderError> {
         let parts: Vec<&str> = api_key.splitn(2, '.').collect();
         if parts.len() != 2 {
-            return Err(ProviderError::AuthFailure {
-                provider: "glm".into(),
-                profile_id: "API key must be in 'id.secret' format".into(),
-            });
+            return Err(ProviderError::auth_failure("glm", "API key must be in 'id.secret' format"));
         }
 
         Ok(Self {
@@ -143,10 +140,7 @@ impl GlmProvider {
     pub fn from_env() -> Result<Self, ProviderError> {
         let key = std::env::var("GLM_API_KEY")
             .or_else(|_| std::env::var("ZHIPUAI_API_KEY"))
-            .map_err(|_| ProviderError::AuthFailure {
-                provider: "glm".into(),
-                profile_id: "set GLM_API_KEY or ZHIPUAI_API_KEY env var".into(),
-            })?;
+            .map_err(|_| ProviderError::auth_failure("glm", "set GLM_API_KEY or ZHIPUAI_API_KEY env var"))?;
 
         Self::new(&key)
     }
@@ -218,10 +212,7 @@ impl GlmProvider {
         let signing_input = format!("{header_b64}.{payload_b64}");
 
         let mut mac = HmacSha256::new_from_slice(self.api_key_secret.as_bytes())
-            .map_err(|e| ProviderError::FormatError {
-                provider: "glm".into(),
-                detail: format!("HMAC init failed: {e}"),
-            })?;
+            .map_err(|e| ProviderError::format_error("glm", format!("HMAC init failed: {e}")))?;
         mac.update(signing_input.as_bytes());
         let signature = mac.finalize().into_bytes();
         let sig_b64 = URL_SAFE_NO_PAD.encode(&signature);
@@ -290,16 +281,9 @@ impl Provider for GlmProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "glm".into(),
-                        model: model.to_string(),
-                        after: std::time::Duration::from_secs(120),
-                    }
+                    ProviderError::timeout("glm", model.to_string(), std::time::Duration::from_secs(120))
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "glm".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("glm", e.to_string())
                 }
             })?;
 
@@ -307,39 +291,21 @@ impl Provider for GlmProvider {
         if status != 200 {
             let body_text = resp.text().await.unwrap_or_default();
             return Err(match status {
-                429 => ProviderError::RateLimit {
-                    provider: "glm".into(),
-                    retry_after: None,
-                },
-                401 | 403 => ProviderError::AuthFailure {
-                    provider: "glm".into(),
-                    profile_id: String::new(),
-                },
-                s if s >= 500 => ProviderError::ServerError {
-                    provider: "glm".into(),
-                    status: s,
-                },
-                _ => ProviderError::FormatError {
-                    provider: "glm".into(),
-                    detail: format!("HTTP {status}: {body_text}"),
-                },
+                429 => ProviderError::rate_limit("glm", None),
+                401 | 403 => ProviderError::auth_failure("glm", String::new()),
+                s if s >= 500 => ProviderError::server_error("glm", s),
+                _ => ProviderError::format_error("glm", format!("HTTP {status}: {body_text}")),
             });
         }
 
         let resp_body: CompletionResponse =
-            resp.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "glm".into(),
-                detail: format!("JSON parse error: {e}"),
-            })?;
+            resp.json().await.map_err(|e| ProviderError::format_error("glm", format!("JSON parse error: {e}")))?;
 
         let choice = resp_body
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| ProviderError::FormatError {
-                provider: "glm".into(),
-                detail: "no choices".into(),
-            })?;
+            .ok_or_else(|| ProviderError::format_error("glm", "no choices"))?;
 
         let usage = resp_body.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
@@ -391,9 +357,9 @@ mod tests {
     #[test]
     fn test_key_parse_invalid() {
         let err = GlmProvider::new("bad-key").unwrap_err();
-        match err {
-            ProviderError::AuthFailure { .. } => {}
-            other => panic!("expected AuthFailure, got {other:?}"),
+        match err.kind {
+            ProviderErrorKind::AuthFailure { .. } => {}
+            ref other => panic!("expected AuthFailure, got {other:?}"),
         }
     }
 

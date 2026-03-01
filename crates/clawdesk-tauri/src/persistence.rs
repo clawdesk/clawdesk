@@ -253,6 +253,7 @@ mod tests {
                 tokens_used: 1000,
                 source: "clawdesk".to_string(),
                 template_id: None,
+                channels: vec![],
             },
         );
 

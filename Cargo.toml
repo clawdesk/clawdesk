@@ -30,6 +30,12 @@ members = [
     "crates/clawdesk-bus",
     "crates/clawdesk-adapters",
     "crates/clawdesk-threads",
+    "crates/clawdesk-bench",
+    "crates/clawdesk-sandbox",
+    "crates/clawdesk-mcp",
+    "crates/clawdesk-extensions",
+    "crates/clawdesk-migrate",
+    "crates/clawdesk-simd",
 ]
 resolver = "2"
 
@@ -101,22 +107,29 @@ clawdesk-discovery = { path = "crates/clawdesk-discovery" }
 clawdesk-bus = { path = "crates/clawdesk-bus" }
 clawdesk-adapters = { path = "crates/clawdesk-adapters" }
 clawdesk-threads = { path = "crates/clawdesk-threads" }
+clawdesk-sandbox = { path = "crates/clawdesk-sandbox" }
+clawdesk-mcp = { path = "crates/clawdesk-mcp" }
+clawdesk-extensions = { path = "crates/clawdesk-extensions" }
+clawdesk-migrate = { path = "crates/clawdesk-migrate" }
+clawdesk-simd = { path = "crates/clawdesk-simd" }
 
 # --- SochDB (embedded ACID vector database) ---
-sochdb = { path = "../sochdb/sochdb-client", features = ["embedded"] }
-sochdb-core = { path = "../sochdb/sochdb-core" }
-sochdb-storage = { path = "../sochdb/sochdb-storage" }
-sochdb-index = { path = "../sochdb/sochdb-index" }
-sochdb-query = { path = "../sochdb/sochdb-query" }
+sochdb = { version = "0.5.0", features = ["embedded"] }
+sochdb-core = { version = "0.5.0" }
+sochdb-storage = { version = "0.5.0" }
+sochdb-index = { version = "0.5.0" }
+sochdb-query = { version = "0.5.0" }
 
 # --- Async runtime ---
-tokio = { version = "1", features = ["full"] }
+# Library crates get minimal features; leaf binaries (cli, tauri, bench) add "full".
+tokio = { version = "1", features = ["macros", "sync", "time", "rt"] }
 tokio-util = { version = "0.7" }
 
 # --- Serialization ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+serde_yml = "0.0.12"
 
 # --- HTTP / WebSocket ---
 axum = { version = "0.7", features = ["ws"] }
@@ -153,6 +166,20 @@ hex = "0.4"
 
 # --- Text search ---
 aho-corasick = "1"
+regex = "1"
+
+# --- Sandbox / WASM ---
+wasmtime = "22"
+wasmtime-wasi = "22"
+
+# --- Credential encryption ---
+aes-gcm = "0.10"
+argon2 = "0.5"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.8"
+
+# --- Directory walking ---
+walkdir = "2"
 
 # --- Utilities ---
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -166,6 +193,7 @@ toml = "0.8"
 im = "15"
 parking_lot = "0.12"
 dashmap = "5.5"
+lru = "0.12"
 
 # --- iMessage / IRC / WhatsApp storage ---
 rusqlite = { version = "0.32", features = ["bundled"] }

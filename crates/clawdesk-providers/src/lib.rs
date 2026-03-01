@@ -26,7 +26,11 @@ pub mod reliable;
 pub mod router;
 pub mod telnyx;
 pub mod tool_call_accumulator;
+pub mod tool_recovery;
 pub mod vertex;
+
+pub use negotiator::ProviderNegotiator;
+pub use registry::ProviderRegistry;
 
 use async_trait::async_trait;
 use clawdesk_types::error::ProviderError;

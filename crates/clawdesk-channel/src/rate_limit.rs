@@ -7,9 +7,9 @@
 //! `DashMap` (or `HashMap + RwLock`) guards bucket creation only (cold path).
 
 use clawdesk_types::channel::ChannelId;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::time::Instant;
 
 /// Per-channel rate limit configuration.
@@ -94,7 +94,7 @@ impl AtomicBucket {
 pub struct ChannelRateLimiter {
     limits: HashMap<ChannelId, ChannelRateLimit>,
     default_limit: ChannelRateLimit,
-    buckets: RwLock<HashMap<ChannelId, AtomicBucket>>,
+    buckets: DashMap<ChannelId, AtomicBucket>,
     epoch: Instant,
 }
 
@@ -107,7 +107,7 @@ impl ChannelRateLimiter {
         Self {
             limits: overrides,
             default_limit,
-            buckets: RwLock::new(HashMap::new()),
+            buckets: DashMap::new(),
             epoch: Instant::now(),
         }
     }
@@ -125,22 +125,16 @@ impl ChannelRateLimiter {
         let refill = limit.refill_per_sec;
         let now_ms = self.now_ms();
 
-        // Fast path: read lock to find existing bucket.
-        {
-            let buckets = self.buckets.read().unwrap();
-            if let Some(bucket) = buckets.get(&channel_id) {
-                return bucket.try_consume(capacity, refill, now_ms);
-            }
+        // Fast path: check existing bucket.
+        if let Some(bucket) = self.buckets.get(&channel_id) {
+            return bucket.try_consume(capacity, refill, now_ms);
         }
 
-        // Slow path: create new bucket under write lock.
-        {
-            let mut buckets = self.buckets.write().unwrap();
-            let bucket = buckets.entry(channel_id).or_insert_with(|| {
-                AtomicBucket::new(capacity, now_ms)
-            });
-            bucket.try_consume(capacity, refill, now_ms)
-        }
+        // Slow path: create new bucket.
+        let entry = self.buckets.entry(channel_id).or_insert_with(|| {
+            AtomicBucket::new(capacity, now_ms)
+        });
+        entry.try_consume(capacity, refill, now_ms)
     }
 
     /// Wait until a send is allowed, then consume a token.

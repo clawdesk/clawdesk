@@ -4,7 +4,7 @@
 //! messages aren't processed until approved by the device owner.
 //!
 //! ## Security Properties
-//! - Codes generated from CSPRNG (SipHash + OS entropy via RandomState)
+//! - Codes generated from OS CSPRNG (`rand::rngs::OsRng`)
 //! - 6-digit numeric code: collision probability ≈ 10⁻⁶ per concurrent pair
 //! - Codes expire after τ = 300 seconds (configurable)
 //! - Queue bounded at Q_max = 100 to prevent memory exhaustion from pairing spam
@@ -12,8 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::hash::{BuildHasher, Hasher};
-use std::collections::hash_map::RandomState;
+use rand::Rng;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -65,10 +64,6 @@ pub struct DmPairingManager {
     order: VecDeque<String>,
     /// Code expiration duration.
     expiry: Duration,
-    /// Entropy source for code generation.
-    rng: RandomState,
-    /// Counter for additional entropy mixing.
-    counter: u64,
 }
 
 impl DmPairingManager {
@@ -77,8 +72,6 @@ impl DmPairingManager {
             pending: HashMap::new(),
             order: VecDeque::new(),
             expiry: Duration::from_secs(DEFAULT_EXPIRY_SECS),
-            rng: RandomState::new(),
-            counter: 0,
         }
     }
 
@@ -204,20 +197,11 @@ impl DmPairingManager {
         self.order.retain(|c| !expired_codes.contains(c));
     }
 
-    /// Generate a CSPRNG-backed 6-digit code.
+    /// Generate a CSPRNG-backed 6-digit code using OS entropy.
     fn generate_code(&mut self) -> String {
+        let mut rng = rand::rngs::OsRng;
         loop {
-            self.counter = self.counter.wrapping_add(1);
-            let mut hasher = self.rng.build_hasher();
-            hasher.write_u64(self.counter);
-            hasher.write_u64(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64,
-            );
-            let hash = hasher.finish();
-            let code = format!("{:06}", hash % 1_000_000);
+            let code = format!("{:06}", rng.gen_range(0..1_000_000u32));
 
             // Ensure uniqueness
             if !self.pending.contains_key(&code) {

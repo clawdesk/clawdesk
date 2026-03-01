@@ -1,6 +1,6 @@
-//! OpenClaw → ClawDesk state migration pipeline.
+//! Legacy → ClawDesk state migration pipeline.
 //!
-//! Imports existing OpenClaw installation data into ClawDesk's domain model:
+//! Imports existing legacy installation data into ClawDesk's domain model:
 //! - **Sessions**: conversation history → ClawDesk memory
 //! - **Credentials**: provider API keys → ClawDesk credential store
 //! - **Cron jobs**: scheduled tasks → ClawDesk cron manager
@@ -22,7 +22,7 @@ pub type MigrationResult<T> = Result<T, MigrationError>;
 /// Errors that can occur during migration.
 #[derive(Debug)]
 pub enum MigrationError {
-    /// OpenClaw installation not found at the expected path.
+    /// legacy installation not found at the expected path.
     InstallationNotFound(PathBuf),
     /// A specific data file is missing or unreadable.
     DataFileError {
@@ -47,7 +47,7 @@ impl fmt::Display for MigrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InstallationNotFound(p) => {
-                write!(f, "OpenClaw installation not found at {}", p.display())
+                write!(f, "legacy installation not found at {}", p.display())
             }
             Self::DataFileError { path, reason } => {
                 write!(f, "data file error at {}: {}", path.display(), reason)
@@ -138,10 +138,10 @@ impl MigrationReport {
     }
 }
 
-/// Detected OpenClaw installation layout.
+/// Detected legacy installation layout.
 #[derive(Debug, Clone)]
 pub struct OpenClawInstallation {
-    /// Root directory of the OpenClaw data.
+    /// Root directory of the legacy data.
     pub root: PathBuf,
     /// Sessions directory (conversation history).
     pub sessions_dir: Option<PathBuf>,
@@ -155,7 +155,7 @@ pub struct OpenClawInstallation {
     pub memory_dir: Option<PathBuf>,
 }
 
-/// Detect an OpenClaw installation at common paths.
+/// Detect an legacy installation at common paths.
 pub fn detect_installation() -> Option<OpenClawInstallation> {
     let candidates = [
         dirs_path("~/.openclaw"),
@@ -171,7 +171,7 @@ pub fn detect_installation() -> Option<OpenClawInstallation> {
     None
 }
 
-/// Detect an OpenClaw installation at a specific path.
+/// Detect an legacy installation at a specific path.
 pub fn detect_installation_at(path: &Path) -> MigrationResult<OpenClawInstallation> {
     if !path.exists() {
         return Err(MigrationError::InstallationNotFound(path.to_path_buf()));
@@ -239,7 +239,7 @@ pub fn deterministic_id(component: MigrationComponent, source_key: &str) -> Stri
     format!("mig_{:016x}", hasher.finish())
 }
 
-/// Parsed OpenClaw session for migration.
+/// Parsed legacy session for migration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawSession {
     pub id: String,
@@ -249,7 +249,7 @@ pub struct OpenClawSession {
     pub updated_at: Option<String>,
 }
 
-/// A message within an OpenClaw session.
+/// A message within an legacy session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawMessage {
     pub role: String,
@@ -257,7 +257,7 @@ pub struct OpenClawMessage {
     pub timestamp: Option<String>,
 }
 
-/// Parsed OpenClaw credential entry.
+/// Parsed legacy credential entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawCredential {
     pub provider: String,
@@ -266,7 +266,7 @@ pub struct OpenClawCredential {
     pub value: String,
 }
 
-/// Parsed OpenClaw cron job entry.
+/// Parsed legacy cron job entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawCronJob {
     pub name: String,
@@ -276,7 +276,7 @@ pub struct OpenClawCronJob {
     pub enabled: bool,
 }
 
-/// Parsed OpenClaw skill entry.
+/// Parsed legacy skill entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawSkill {
     pub name: String,
@@ -285,7 +285,7 @@ pub struct OpenClawSkill {
     pub config: HashMap<String, serde_json::Value>,
 }
 
-/// Parse OpenClaw sessions from a JSON string.
+/// Parse legacy sessions from a JSON string.
 pub fn parse_sessions(json: &str) -> MigrationResult<Vec<OpenClawSession>> {
     serde_json::from_str(json).map_err(|e| MigrationError::ParseError {
         source: "sessions".to_string(),
@@ -293,7 +293,7 @@ pub fn parse_sessions(json: &str) -> MigrationResult<Vec<OpenClawSession>> {
     })
 }
 
-/// Parse OpenClaw credentials from a JSON string.
+/// Parse legacy credentials from a JSON string.
 pub fn parse_credentials(json: &str) -> MigrationResult<Vec<OpenClawCredential>> {
     serde_json::from_str(json).map_err(|e| MigrationError::ParseError {
         source: "credentials".to_string(),
@@ -301,7 +301,7 @@ pub fn parse_credentials(json: &str) -> MigrationResult<Vec<OpenClawCredential>>
     })
 }
 
-/// Parse OpenClaw cron jobs from a JSON string.
+/// Parse legacy cron jobs from a JSON string.
 pub fn parse_cron_jobs(json: &str) -> MigrationResult<Vec<OpenClawCronJob>> {
     serde_json::from_str(json).map_err(|e| MigrationError::ParseError {
         source: "cron_jobs".to_string(),
@@ -309,7 +309,7 @@ pub fn parse_cron_jobs(json: &str) -> MigrationResult<Vec<OpenClawCronJob>> {
     })
 }
 
-/// Parse OpenClaw skills from a JSON string.
+/// Parse legacy skills from a JSON string.
 pub fn parse_skills(json: &str) -> MigrationResult<Vec<OpenClawSkill>> {
     serde_json::from_str(json).map_err(|e| MigrationError::ParseError {
         source: "skills".to_string(),
@@ -317,7 +317,7 @@ pub fn parse_skills(json: &str) -> MigrationResult<Vec<OpenClawSkill>> {
     })
 }
 
-/// Migrate sessions: convert OpenClaw sessions to ClawDesk memory entries.
+/// Migrate sessions: convert legacy sessions to ClawDesk memory entries.
 pub fn migrate_sessions(sessions: &[OpenClawSession]) -> ComponentMigrationStatus {
     let mut status = ComponentMigrationStatus::new(MigrationComponent::Sessions);
     status.total = sessions.len();
@@ -336,7 +336,7 @@ pub fn migrate_sessions(sessions: &[OpenClawSession]) -> ComponentMigrationStatu
     status
 }
 
-/// Migrate credentials: convert OpenClaw credentials to ClawDesk credential store.
+/// Migrate credentials: convert legacy credentials to ClawDesk credential store.
 pub fn migrate_credentials(credentials: &[OpenClawCredential]) -> ComponentMigrationStatus {
     let mut status = ComponentMigrationStatus::new(MigrationComponent::Credentials);
     status.total = credentials.len();
@@ -356,7 +356,7 @@ pub fn migrate_credentials(credentials: &[OpenClawCredential]) -> ComponentMigra
     status
 }
 
-/// Migrate cron jobs: convert OpenClaw cron entries to ClawDesk cron tasks.
+/// Migrate cron jobs: convert legacy cron entries to ClawDesk cron tasks.
 pub fn migrate_cron_jobs(jobs: &[OpenClawCronJob]) -> ComponentMigrationStatus {
     let mut status = ComponentMigrationStatus::new(MigrationComponent::CronJobs);
     status.total = jobs.len();
@@ -381,7 +381,7 @@ pub fn migrate_cron_jobs(jobs: &[OpenClawCronJob]) -> ComponentMigrationStatus {
     status
 }
 
-/// Migrate skills: convert OpenClaw skill entries to ClawDesk skill registry.
+/// Migrate skills: convert legacy skill entries to ClawDesk skill registry.
 pub fn migrate_skills(skills: &[OpenClawSkill]) -> ComponentMigrationStatus {
     let mut status = ComponentMigrationStatus::new(MigrationComponent::Skills);
     status.total = skills.len();

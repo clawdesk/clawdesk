@@ -237,6 +237,14 @@ impl InboundAdapterRegistry {
     pub fn count(&self) -> usize {
         self.adapters.len()
     }
+
+    /// Get a clone of the shared sender for external injection (e.g. webhooks).
+    ///
+    /// This allows non-adapter components to inject `InboundEnvelope` values
+    /// into the same merged stream consumed by the event bus.
+    pub fn sender(&self) -> mpsc::Sender<Result<InboundEnvelope, AdapterError>> {
+        self.tx.clone()
+    }
 }
 
 /// Time-windowed Bloom filter for message deduplication.
@@ -402,6 +410,7 @@ mod tests {
                     channel: ChannelId::Telegram,
                 },
                 media: vec![],
+                artifact_refs: vec![],
                 reply_context: None,
                 origin: MessageOrigin::Telegram {
                     chat_id: 12345,

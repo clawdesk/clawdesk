@@ -52,9 +52,10 @@ impl CronExecutor {
 
     /// Execute a single cron task.
     pub async fn execute_task(&self, task: &CronTask) -> Result<CronRunLog, CronError> {
-        // Check overlap.
+        // Check overlap + mark as running in a single write-lock scope
+        // to eliminate the TOCTOU race between read-check and write-insert.
         if task.skip_if_running {
-            let running = self.running.read().await;
+            let mut running = self.running.write().await;
             if running.contains(&task.id) {
                 let log = CronRunLog {
                     task_id: task.id.clone(),
@@ -66,15 +67,17 @@ impl CronExecutor {
                     error: Some("Overlapping with running instance".to_string()),
                     tokens_used: None,
                 };
+                // Drop lock before appending log
+                drop(running);
                 self.append_log(log.clone()).await;
                 return Err(CronError::Overlapping {
                     id: task.id.clone(),
                 });
             }
-        }
-
-        // Mark as running.
-        {
+            // Atomically mark as running while we still hold the write lock
+            running.insert(task.id.clone());
+        } else {
+            // Not skip_if_running — just mark running unconditionally
             let mut running = self.running.write().await;
             running.insert(task.id.clone());
         }
@@ -243,6 +246,9 @@ mod tests {
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            depends_on: vec![],
+            chain_mode: Default::default(),
+            max_retained_logs: 0,
         }
     }
 

@@ -217,12 +217,14 @@ pub async fn send_message(
         ..Default::default()
     };
 
-    let runner = AgentRunner::new(
+    let runner = AgentRunner::builder(
         std::sync::Arc::clone(provider),
         std::sync::Arc::clone(&state.tools),
         config,
         state.cancel.clone(),
-    );
+    )
+    .without_sandbox()
+    .build();
 
     let agent_response = runner
         .run(chat_history, "You are a helpful assistant.".to_string())
@@ -339,6 +341,7 @@ pub async fn delegate_task(
     Json(req): Json<DelegateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     use clawdesk_acp::thread_agent::{create_spawn_task, SpawnRequest};
+    use clawdesk_acp::task::{SpawnMode, CleanupPolicy};
 
     let source_agent_id = format!("thread-{}", thread_id);
 
@@ -377,8 +380,8 @@ pub async fn delegate_task(
         child_agent_id: req.target_agent_id.clone(),
         title: format!("Delegated from {}", source_agent_id),
         task_prompt: req.prompt.clone(),
-        spawn_mode: req.spawn_mode.clone(),
-        cleanup: "keep".to_string(),
+        spawn_mode: SpawnMode::from(req.spawn_mode.as_str()),
+        cleanup: CleanupPolicy::Keep,
         model: None,
         capabilities: vec![],
         skills: vec![],

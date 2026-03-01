@@ -292,6 +292,7 @@ impl Channel for IMessageChannel {
                                 channel: ChannelId::IMessage,
                             },
                             media: vec![],
+                            artifact_refs: vec![],
                             reply_context: None,
                             origin: clawdesk_types::message::MessageOrigin::IMessage {
                                 rowid,

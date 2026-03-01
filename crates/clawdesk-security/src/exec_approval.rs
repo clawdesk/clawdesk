@@ -9,11 +9,11 @@
 
 use crate::command_policy::RiskLevel;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 /// Current state of an execution approval request.
@@ -66,14 +66,14 @@ pub enum ApprovalError {
 
 /// Manager for approval-gated execution requests.
 pub struct ExecApprovalManager {
-    entries: RwLock<HashMap<Uuid, ApprovalEntry>>,
+    entries: DashMap<Uuid, ApprovalEntry>,
     default_ttl: Duration,
 }
 
 impl ExecApprovalManager {
     pub fn new(default_ttl: Duration) -> Self {
         Self {
-            entries: RwLock::new(HashMap::new()),
+            entries: DashMap::new(),
             default_ttl,
         }
     }
@@ -103,7 +103,7 @@ impl ExecApprovalManager {
             status: ApprovalStatus::Pending,
             notify: Arc::new(Notify::new()),
         };
-        self.entries.write().await.insert(request.id, entry);
+        self.entries.insert(request.id, entry);
         request
     }
 
@@ -111,18 +111,14 @@ impl ExecApprovalManager {
     pub async fn status(&self, request_id: Uuid) -> Option<ApprovalStatus> {
         self.ensure_timeout_if_needed(request_id).await;
         self.entries
-            .read()
-            .await
             .get(&request_id)
             .map(|entry| entry.status.clone())
     }
 
     /// Approve a request.
     pub async fn approve(&self, request_id: Uuid, approver: impl Into<String>) -> Result<(), ApprovalError> {
-        let mut entries = self.entries.write().await;
-        let Some(entry) = entries.get_mut(&request_id) else {
-            return Err(ApprovalError::NotFound(request_id));
-        };
+        let mut entry = self.entries.get_mut(&request_id)
+            .ok_or(ApprovalError::NotFound(request_id))?;
         if entry.status.is_terminal() {
             return Err(ApprovalError::AlreadyFinalized(request_id));
         }
@@ -141,10 +137,8 @@ impl ExecApprovalManager {
         approver: impl Into<String>,
         reason: Option<String>,
     ) -> Result<(), ApprovalError> {
-        let mut entries = self.entries.write().await;
-        let Some(entry) = entries.get_mut(&request_id) else {
-            return Err(ApprovalError::NotFound(request_id));
-        };
+        let mut entry = self.entries.get_mut(&request_id)
+            .ok_or(ApprovalError::NotFound(request_id))?;
         if entry.status.is_terminal() {
             return Err(ApprovalError::AlreadyFinalized(request_id));
         }
@@ -162,10 +156,8 @@ impl ExecApprovalManager {
         loop {
             self.ensure_timeout_if_needed(request_id).await;
             let (status, notify, expires_at) = {
-                let entries = self.entries.read().await;
-                let Some(entry) = entries.get(&request_id) else {
-                    return Err(ApprovalError::NotFound(request_id));
-                };
+                let entry = self.entries.get(&request_id)
+                    .ok_or(ApprovalError::NotFound(request_id))?;
                 (
                     entry.status.clone(),
                     Arc::clone(&entry.notify),
@@ -194,7 +186,7 @@ impl ExecApprovalManager {
     pub async fn cleanup_terminal_older_than(&self, age: Duration) {
         let age = chrono::Duration::from_std(age).unwrap_or_else(|_| chrono::Duration::seconds(60));
         let cutoff = Utc::now() - age;
-        self.entries.write().await.retain(|_, entry| {
+        self.entries.retain(|_, entry| {
             match &entry.status {
                 ApprovalStatus::Pending => true,
                 ApprovalStatus::Approved { at, .. } => *at >= cutoff,
@@ -205,13 +197,11 @@ impl ExecApprovalManager {
     }
 
     async fn ensure_timeout_if_needed(&self, request_id: Uuid) {
-        let mut entries = self.entries.write().await;
-        let Some(entry) = entries.get_mut(&request_id) else {
-            return;
-        };
-        if matches!(entry.status, ApprovalStatus::Pending) && Utc::now() >= entry.request.expires_at {
-            entry.status = ApprovalStatus::TimedOut { at: Utc::now() };
-            entry.notify.notify_waiters();
+        if let Some(mut entry) = self.entries.get_mut(&request_id) {
+            if matches!(entry.status, ApprovalStatus::Pending) && Utc::now() >= entry.request.expires_at {
+                entry.status = ApprovalStatus::TimedOut { at: Utc::now() };
+                entry.notify.notify_waiters();
+            }
         }
     }
 }

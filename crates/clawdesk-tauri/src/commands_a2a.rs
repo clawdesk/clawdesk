@@ -51,21 +51,9 @@ pub async fn register_a2a_agent(
     let mut card = AgentCard::new(request.agent_id, name, &url);
     card.description = desc;
     for cap_str in &request.capabilities {
-        let cap = match cap_str.as_str() {
-            "text_generation" => clawdesk_acp::AgentCapability::TextGeneration,
-            "code_execution" => clawdesk_acp::AgentCapability::CodeExecution,
-            "web_search" => clawdesk_acp::AgentCapability::WebSearch,
-            "file_processing" => clawdesk_acp::AgentCapability::FileProcessing,
-            "image_processing" => clawdesk_acp::AgentCapability::ImageProcessing,
-            "audio_processing" => clawdesk_acp::AgentCapability::AudioProcessing,
-            "api_integration" => clawdesk_acp::AgentCapability::ApiIntegration,
-            "data_management" => clawdesk_acp::AgentCapability::DataManagement,
-            "mathematics" => clawdesk_acp::AgentCapability::Mathematics,
-            "scheduling" => clawdesk_acp::AgentCapability::Scheduling,
-            "messaging" => clawdesk_acp::AgentCapability::Messaging,
-            other => clawdesk_acp::AgentCapability::Custom(other.to_string()),
-        };
-        card = card.with_capability(cap);
+        if let Some(cap) = clawdesk_acp::CapabilityId::from_str_loose(cap_str) {
+            card = card.with_capability(cap);
+        }
     }
 
     let mut dir = state.agent_directory.write().map_err(|e| e.to_string())?;
@@ -104,13 +92,21 @@ pub async fn get_self_agent_card(state: State<'_, AppState>) -> Result<serde_jso
     };
 
     let card = AgentCard::new("self", "ClawDesk", "http://127.0.0.1:18789")
-        .with_capability(clawdesk_acp::AgentCapability::TextGeneration)
-        .with_capability(clawdesk_acp::AgentCapability::CodeExecution)
-        .with_capability(clawdesk_acp::AgentCapability::Custom(
-            format!("{} agents, {} skills", agents.len(), skill_count),
-        ));
+        .with_capability(clawdesk_acp::CapabilityId::TextGeneration)
+        .with_capability(clawdesk_acp::CapabilityId::CodeExecution);
 
-    serde_json::to_value(&card).map_err(|e| e.to_string())
+    // Serialize capabilities as plain strings for UI display.
+    let caps: Vec<String> = card.capabilities.iter().map(|c| c.name().to_string()).collect();
+
+    Ok(serde_json::json!({
+        "id": card.id,
+        "name": card.name,
+        "description": card.description,
+        "endpoint": card.endpoint,
+        "capabilities": caps,
+        "agents": agents.len(),
+        "skills": skill_count,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

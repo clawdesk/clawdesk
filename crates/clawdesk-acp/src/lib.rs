@@ -48,7 +48,9 @@
 pub mod agent_card;
 pub mod announce;
 pub mod capability;
+pub mod capability_algebra;
 pub mod content_router;
+pub mod contract;
 pub mod delta_stream;
 pub mod discovery;
 pub mod error;
@@ -63,16 +65,18 @@ pub mod streaming;
 pub mod task;
 pub mod thread_agent;
 
-pub use agent_card::{AgentCard, AgentCapability, AgentEndpoint, AgentSkill};
+pub use agent_card::{AgentCard, AgentEndpoint, AgentSkill};
 pub use announce::{AnnounceRouter, Announcement, AnnouncePayload, DeliveryTarget, DeliveryResult, RetryPolicy};
 pub use capability::{CapSet, CapabilityId};
+pub use capability_algebra::{GradedCapSet, GradedCapability, CapabilityRequirement, quality_score, rank_agents};
+pub use contract::{BehavioralContract, ContractRegistry, CostEnvelope, Condition, ContractEvaluation};
 pub use error::{AcpError, AcpErrorKind, AcpResult, Retryability, Severity};
 pub use heartbeat::{HeartbeatConfig, HeartbeatMonitor, HeartbeatCallback, PingPayload, PongPayload, PingResult};
 pub use message::{A2AMessage, A2AMessageKind, Artifact};
-pub use router::{AgentDirectory, AgentRouter, RoutingDecision};
+pub use router::{AgentDirectory, AgentEntry, AgentRouter, RoutingDecision, SocialMetrics};
 pub use server::A2AHandler;
 pub use session_router::{AgentSource, AgentSummary, CircuitBreaker, SessionRouter};
-pub use task::{Task, TaskId, TaskState, TaskEvent};
+pub use task::{Task, TaskId, TaskState, TaskEvent, TaskCheckpoint, SpawnMode, CleanupPolicy};
 pub use thread_agent::{
     ThreadAgentConfig, ThreadAgentRegistry, ThreadInfo,
     SpawnRequest, SpawnResult,

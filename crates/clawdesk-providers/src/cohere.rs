@@ -165,16 +165,9 @@ impl Provider for CohereProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "cohere".into(),
-                        model: model.clone(),
-                        after: start.elapsed(),
-                    }
+                    ProviderError::timeout("cohere", model.clone(), start.elapsed())
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "cohere".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("cohere", e.to_string())
                 }
             })?;
 
@@ -184,26 +177,14 @@ impl Provider for CohereProvider {
         if !status.is_success() {
             let status_code = status.as_u16();
             return match status_code {
-                429 => Err(ProviderError::RateLimit {
-                    provider: "cohere".into(),
-                    retry_after: None, // Cohere headers could populate this
-                }),
-                401 | 403 => Err(ProviderError::AuthFailure {
-                    provider: "cohere".into(),
-                    profile_id: "default".into(),
-                }),
-                _ => Err(ProviderError::ServerError {
-                    provider: "cohere".into(),
-                    status: status_code,
-                }),
+                429 => Err(ProviderError::rate_limit("cohere", None)),
+                401 | 403 => Err(ProviderError::auth_failure("cohere", "default")),
+                _ => Err(ProviderError::server_error("cohere", status_code)),
             };
         }
 
         let api_response: CohereResponse =
-            response.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "cohere".into(),
-                detail: e.to_string(),
-            })?;
+            response.json().await.map_err(|e| ProviderError::format_error("cohere", e.to_string()))?;
 
         let mut content_out = String::new();
         if let Some(contents) = api_response.message.content {
@@ -314,22 +295,13 @@ impl Provider for CohereProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "cohere".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("cohere", e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
             return match status {
-                429 => Err(ProviderError::RateLimit {
-                    provider: "cohere".into(),
-                    retry_after: None,
-                }),
-                _ => Err(ProviderError::ServerError {
-                    provider: "cohere".into(),
-                    status,
-                }),
+                429 => Err(ProviderError::rate_limit("cohere", None)),
+                _ => Err(ProviderError::server_error("cohere", status)),
             };
         }
 
@@ -342,10 +314,7 @@ impl Provider for CohereProvider {
         let mut current_function_id = String::new();
 
         while let Some(chunk) = response.chunk().await.map_err(|e| {
-            ProviderError::NetworkError {
-                provider: "cohere".into(),
-                detail: e.to_string(),
-            }
+            ProviderError::network_error("cohere", e.to_string())
         })? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 

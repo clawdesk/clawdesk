@@ -170,16 +170,9 @@ impl Provider for TelnyxProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "telnyx".into(),
-                        model: model.to_string(),
-                        after: std::time::Duration::from_secs(120),
-                    }
+                    ProviderError::timeout("telnyx", model.to_string(), std::time::Duration::from_secs(120))
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "telnyx".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("telnyx", e.to_string())
                 }
             })?;
 
@@ -187,39 +180,21 @@ impl Provider for TelnyxProvider {
         if status != 200 {
             let body_text = resp.text().await.unwrap_or_default();
             return Err(match status {
-                429 => ProviderError::RateLimit {
-                    provider: "telnyx".into(),
-                    retry_after: None,
-                },
-                401 | 403 => ProviderError::AuthFailure {
-                    provider: "telnyx".into(),
-                    profile_id: String::new(),
-                },
-                s if s >= 500 => ProviderError::ServerError {
-                    provider: "telnyx".into(),
-                    status: s,
-                },
-                _ => ProviderError::FormatError {
-                    provider: "telnyx".into(),
-                    detail: format!("HTTP {status}: {body_text}"),
-                },
+                429 => ProviderError::rate_limit("telnyx", None),
+                401 | 403 => ProviderError::auth_failure("telnyx", String::new()),
+                s if s >= 500 => ProviderError::server_error("telnyx", s),
+                _ => ProviderError::format_error("telnyx", format!("HTTP {status}: {body_text}")),
             });
         }
 
         let resp_body: CompletionResponse =
-            resp.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "telnyx".into(),
-                detail: format!("JSON parse error: {e}"),
-            })?;
+            resp.json().await.map_err(|e| ProviderError::format_error("telnyx", format!("JSON parse error: {e}")))?;
 
         let choice = resp_body
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| ProviderError::FormatError {
-                provider: "telnyx".into(),
-                detail: "no choices".into(),
-            })?;
+            .ok_or_else(|| ProviderError::format_error("telnyx", "no choices"))?;
 
         let usage = resp_body.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
@@ -254,16 +229,10 @@ impl Provider for TelnyxProvider {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "telnyx".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("telnyx", e.to_string()))?;
 
         if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 {
-            return Err(ProviderError::AuthFailure {
-                provider: "telnyx".into(),
-                profile_id: String::new(),
-            });
+            return Err(ProviderError::auth_failure("telnyx", String::new()));
         }
 
         debug!("telnyx health check passed");

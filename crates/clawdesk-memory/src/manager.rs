@@ -7,12 +7,12 @@
 //!
 //! When the backend implements `MemoryBackend` (e.g., `SochMemoryBackend`),
 //! the manager automatically uses:
-//! - **Atomic writes** (Task 1): all-or-nothing multi-index writes
-//! - **Graph nodes** (Task 7): memory nodes + edges in knowledge graph
-//! - **Graph-contextual retrieval** (Task 3): scope search to graph-reachable memories
-//! - **Temporal pre-filter** (Task 4): true time-bounded edge queries
-//! - **Policy checks** (Task 9): PII redaction before storage, access control on read
-//! - **Trace spans** (Task 8): OpenTelemetry-compatible instrumentation
+//! - **Atomic writes**: all-or-nothing multi-index writes
+//! - **Graph nodes**: memory nodes + edges in knowledge graph
+//! - **Graph-contextual retrieval**: scope search to graph-reachable memories
+//! - **Temporal pre-filter**: true time-bounded edge queries
+//! - **Policy checks**: PII redaction before storage, access control on read
+//! - **Trace spans**: OpenTelemetry-compatible instrumentation
 
 use crate::chunker::{chunk_text, sha256_hex, ChunkerConfig};
 use crate::embedding::EmbeddingProvider;
@@ -73,13 +73,13 @@ pub struct MemoryConfig {
     pub temporal_decay: TemporalDecayConfig,
     /// MMR diversity re-ranking configuration.
     pub mmr: MmrConfig,
-    /// Optional session node ID for graph-contextual retrieval (Task 3).
+    /// Optional session node ID for graph-contextual retrieval.
     /// When set, `recall()` scopes search to memories reachable from this node.
     pub session_node_id: Option<String>,
-    /// Optional trace run ID for observability spans (Task 8).
+    /// Optional trace run ID for observability spans.
     /// When set, `remember()` and `recall()` emit trace spans.
     pub trace_run_id: Option<String>,
-    /// Optional agent ID for policy access checks (Task 9).
+    /// Optional agent ID for policy access checks.
     pub agent_id: Option<String>,
     /// Maximum graph traversal depth for contextual retrieval.
     pub graph_max_depth: usize,
@@ -128,7 +128,7 @@ pub struct MemoryManager<S: MemoryBackend> {
 
 impl<S: MemoryBackend> MemoryManager<S> {
     pub fn new(store: Arc<S>, embedding: Arc<dyn EmbeddingProvider>, config: MemoryConfig) -> Self {
-        // Recover any incomplete atomic writes from a prior crash (Task 1).
+        // Recover any incomplete atomic writes from a prior crash.
         match store.recover_atomic_writes() {
             Ok(0) => {}
             Ok(n) => info!(replayed = n, "recovered incomplete atomic memory writes"),
@@ -190,7 +190,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
             .map(|_| ())
     }
 
-    /// Apply policy check on content before storage (Task 9).
+    /// Apply policy check on content before storage.
     /// Returns the (possibly redacted) content, or an error if denied.
     fn policy_filter_content(&self, content: &str) -> Result<String, String> {
         match self.store.policy_check_content(content) {
@@ -212,10 +212,10 @@ impl<S: MemoryBackend> MemoryManager<S> {
     /// content-hash dedup key so duplicate writes are idempotent.
     ///
     /// ## SochDB Integration
-    /// - **Task 1**: All chunks written atomically (all-or-nothing)
-    /// - **Task 7**: Graph nodes + edges created for each memory
-    /// - **Task 8**: Trace spans emitted for the operation
-    /// - **Task 9**: Content checked against policy before storage
+    /// - All chunks written atomically (all-or-nothing)
+    /// - Graph nodes + edges created for each memory
+    /// - Trace spans emitted for the operation
+    /// - Content checked against policy before storage
     pub async fn remember(
         &self,
         content: &str,
@@ -224,12 +224,12 @@ impl<S: MemoryBackend> MemoryManager<S> {
     ) -> Result<String, String> {
         self.ensure_collection().await?;
 
-        // ── Task 8: Start trace span ───────────────────────────────
+        // ── Start trace span ───────────────────────────────
         let span = self.config.trace_run_id.as_ref().and_then(|rid| {
             self.store.trace_start_span(rid, "memory.remember")
         });
 
-        // ── Task 9: Policy check on content ────────────────────────
+        // ── Policy check on content ────────────────────────
         let content = self.policy_filter_content(content)?;
 
         let chunks = chunk_text(&content, &self.config.chunker);
@@ -256,12 +256,47 @@ impl<S: MemoryBackend> MemoryManager<S> {
             self.pipeline.embed_all(&texts).await.map_err(|e| format!("batch embed: {e}"))?
         };
 
+        // ── Similarity dedup: reject near-duplicates (≥0.92 cosine) ─
+        // Only check the first chunk — if it's a near-dup, the whole content is.
+        const DEDUP_SIMILARITY_THRESHOLD: f32 = 0.92;
+        if let Some(first_emb) = batch_result.embeddings.first() {
+            match self.store.search(
+                &self.config.collection_name,
+                &first_emb.vector,
+                1,
+                Some(DEDUP_SIMILARITY_THRESHOLD),
+            ).await {
+                Ok(existing) if !existing.is_empty() => {
+                    let best = &existing[0];
+                    debug!(
+                        score = best.score,
+                        existing_id = %best.id,
+                        "similarity dedup: skipping near-duplicate memory (score >= {DEDUP_SIMILARITY_THRESHOLD})"
+                    );
+                    if let Some(ref s) = span {
+                        self.store.trace_end_span(s, true, Some(HashMap::from([
+                            ("dedup".into(), "skipped".into()),
+                            ("existing_id".into(), best.id.clone()),
+                            ("similarity".into(), format!("{:.4}", best.score)),
+                        ])));
+                    }
+                    // Return the existing memory's ID instead of creating a duplicate
+                    return Ok(best.id.clone());
+                }
+                Ok(_) => {} // No near-duplicates, proceed
+                Err(e) => {
+                    // Don't block storage on a dedup check failure
+                    debug!(error = %e, "similarity dedup check failed, proceeding with storage");
+                }
+            }
+        }
+
         let now = chrono::Utc::now();
         let now_str = now.to_rfc3339();
         let collection = &self.config.collection_name;
         let primary_id = uuid::Uuid::new_v4().to_string();
 
-        // ── Build atomic write ops (Task 1) + graph nodes (Task 7) ─
+        // ── Build atomic write ops + graph nodes ─
         let mut atomic_ops: Vec<MemoryWriteOp> = Vec::new();
         let mut ids = Vec::with_capacity(chunks.len());
 
@@ -294,7 +329,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
                 })
                 .unwrap_or_default();
 
-            // Task 1: Atomic PutEmbedding op
+            // Atomic PutEmbedding op
             atomic_ops.push(MemoryWriteOp::PutEmbedding {
                 collection: collection.to_string(),
                 id: id.clone(),
@@ -302,7 +337,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
                 metadata: meta_map,
             });
 
-            // Task 7: Create graph node for this memory chunk
+            // Create graph node for this memory chunk
             let mut node_props: HashMap<String, serde_json::Value> = HashMap::new();
             node_props.insert("source".into(), serde_json::json!(format!("{:?}", source)));
             node_props.insert("timestamp".into(), serde_json::json!(&now_str));
@@ -315,7 +350,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
                 properties: node_props,
             });
 
-            // Task 7: Link chunk to session node if available
+            // Link chunk to session node if available
             if let Some(ref session_id) = self.config.session_node_id {
                 atomic_ops.push(MemoryWriteOp::CreateEdge {
                     namespace: "clawdesk".to_string(),
@@ -326,7 +361,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
                 });
             }
 
-            // Task 7: Link multi-chunk memories together
+            // Link multi-chunk memories together
             if chunks.len() > 1 && i > 0 {
                 atomic_ops.push(MemoryWriteOp::CreateEdge {
                     namespace: "clawdesk".to_string(),
@@ -342,7 +377,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
             ids.push(id);
         }
 
-        // ── Task 1: Execute atomic write ───────────────────────────
+        // ── Execute atomic write ───────────────────────────
         match self.store.write_atomic(&primary_id, atomic_ops) {
             Ok(result) => {
                 debug!(
@@ -386,7 +421,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
             }
         }
 
-        // ── Task 8: End trace span ─────────────────────────────────
+        // ── End trace span ─────────────────────────────────
         if let Some(ref s) = span {
             self.store.trace_end_span(s, true, Some(HashMap::from([
                 ("memory_id".into(), primary_id.clone()),
@@ -411,7 +446,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
             self.store.trace_start_span(rid, "memory.remember_batch")
         });
 
-        // Task 9: Policy-filter all content
+        // Policy-filter all content
         let filtered_items: Vec<(String, MemorySource, serde_json::Value)> = items
             .into_iter()
             .map(|(content, source, meta)| {
@@ -431,7 +466,36 @@ impl<S: MemoryBackend> MemoryManager<S> {
         let now_str = chrono::Utc::now().to_rfc3339();
         let mut all_ids = Vec::with_capacity(filtered_items.len());
 
+        // ── Similarity dedup: reject near-duplicates (≥0.92 cosine) ─
+        // Same threshold as remember() to maintain consistency.
+        const DEDUP_SIMILARITY_THRESHOLD: f32 = 0.92;
+
         for ((content, source, metadata), emb) in filtered_items.into_iter().zip(batch_result.embeddings) {
+            // Check for near-duplicate before inserting
+            match self.store.search(
+                collection,
+                &emb.vector,
+                1,
+                Some(DEDUP_SIMILARITY_THRESHOLD),
+            ).await {
+                Ok(existing) if !existing.is_empty() => {
+                    let best = &existing[0];
+                    debug!(
+                        score = best.score,
+                        existing_id = %best.id,
+                        "batch dedup: skipping near-duplicate memory (score >= {DEDUP_SIMILARITY_THRESHOLD})"
+                    );
+                    // Return the existing memory's ID instead of creating a duplicate
+                    all_ids.push(best.id.clone());
+                    continue;
+                }
+                Ok(_) => {} // No near-duplicates, proceed
+                Err(e) => {
+                    // Don't block storage on a dedup check failure
+                    debug!(error = %e, "batch dedup check failed, proceeding with storage");
+                }
+            }
+
             let id = uuid::Uuid::new_v4().to_string();
             let content_hash = sha256_hex(&content);
 
@@ -441,7 +505,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
             enriched_meta["timestamp"] = serde_json::json!(&now_str);
             enriched_meta["content_hash"] = serde_json::json!(&content_hash);
 
-            // Build atomic ops (Task 1 + Task 7)
+            // Build atomic ops
             let meta_map: HashMap<String, String> = enriched_meta
                 .as_object()
                 .map(|o| {
@@ -519,10 +583,10 @@ impl<S: MemoryBackend> MemoryManager<S> {
     /// temporal decay → MMR diversity re-ranking → min-relevance filter.
     ///
     /// ## SochDB Integration
-    /// - **Task 3**: Scopes search to graph-reachable memories when session_node_id is set
-    /// - **Task 4**: Uses temporal pre-filter via edge queries
-    /// - **Task 8**: Trace spans for each pipeline stage
-    /// - **Task 9**: Access control check before returning results
+    /// - Scopes search to graph-reachable memories when session_node_id is set
+    /// - Uses temporal pre-filter via edge queries
+    /// - Trace spans for each pipeline stage
+    /// - Access control check before returning results
     pub async fn recall(
         &self,
         query: &str,
@@ -534,7 +598,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
             self.store.trace_start_span(rid, "memory.recall")
         });
 
-        // ── Task 9: Access control check ───────────────────────────
+        // ── Access control check ───────────────────────────
         if let Some(ref agent_id) = self.config.agent_id {
             if !self.store.policy_check_access(agent_id, &self.config.collection_name) {
                 if let Some(ref s) = span {
@@ -557,7 +621,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
         let top_k = max_results.unwrap_or(self.config.max_results);
         let fetch_k = (top_k * 3).max(20); // 3x headroom
 
-        // ── Task 3: Graph-contextual pre-filter ────────────────────
+        // ── Graph-contextual pre-filter ────────────────────
         // When a session node is set, find all memory IDs reachable from it
         // and use them to scope the vector search.
         let reachable_ids: Option<Vec<String>> = self.config.session_node_id.as_ref().and_then(|session_id| {
@@ -585,7 +649,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
             )
             .await?;
 
-        // Task 3: Filter to graph-reachable memories if available
+        // Filter to graph-reachable memories if available
         if let Some(ref reachable) = reachable_ids {
             let before = results.len();
             results.retain(|r| reachable.contains(&r.id));
@@ -610,7 +674,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
             }
         }
 
-        // ── Task 4: Temporal pre-filter ────────────────────────────
+        // ── Temporal pre-filter ────────────────────────────
         // If the backend supports temporal edges, check which memories are
         // still "valid" at the current time. This is more accurate than
         // the post-hoc exponential decay.
@@ -693,7 +757,7 @@ impl<S: MemoryBackend> MemoryManager<S> {
             .filter(|r| r.score >= self.config.min_relevance)
             .collect();
 
-        // ── Task 8: End trace span ─────────────────────────────────
+        // ── End trace span ─────────────────────────────────
         if let Some(ref s) = span {
             self.store.trace_end_span(s, true, Some(HashMap::from([
                 ("query_len".into(), query.len().to_string()),

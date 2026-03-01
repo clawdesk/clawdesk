@@ -13,3 +13,10 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
+aho-corasick = { workspace = true }
+
+[features]
+default = []
+## Enable lightweight lock-ordering telemetry in release builds.
+## Adds ~2 AtomicU64 increments per lock acquisition (negligible overhead).
+lock-telemetry = []

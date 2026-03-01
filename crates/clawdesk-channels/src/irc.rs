@@ -653,6 +653,7 @@ impl Channel for IrcChannel {
                             channel: ChannelId::Irc,
                         },
                         media: vec![],
+                        artifact_refs: vec![],
                         reply_context: None,
                         origin: clawdesk_types::message::MessageOrigin::Irc {
                             target: reply_target,

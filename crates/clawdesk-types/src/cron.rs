@@ -23,6 +23,52 @@ pub struct CronTask {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+
+    // --- Dependency chaining (GAP-C) ---
+    /// Predecessor tasks that must complete before this task runs.
+    #[serde(default)]
+    pub depends_on: Vec<TaskDependency>,
+    /// How this task consumes dependency results.
+    #[serde(default)]
+    pub chain_mode: ChainMode,
+    /// Maximum number of runs to retain in durable log (0 = use global default).
+    #[serde(default)]
+    pub max_retained_logs: u32,
+}
+
+/// A dependency on another cron task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskDependency {
+    /// ID of the predecessor task.
+    pub task_id: String,
+    /// Required status for the dependency to be satisfied.
+    /// Defaults to `Succeeded`.
+    #[serde(default = "default_required_status")]
+    pub required_status: CronRunStatus,
+    /// Whether to inject the predecessor's result into this task's prompt.
+    #[serde(default)]
+    pub inject_result: bool,
+}
+
+fn default_required_status() -> CronRunStatus {
+    CronRunStatus::Succeeded
+}
+
+/// How a chained task handles its dependencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChainMode {
+    /// No dependencies required (default).
+    Independent,
+    /// All dependencies must be satisfied since last run.
+    AllRequired,
+    /// At least one dependency must be satisfied.
+    AnyRequired,
+}
+
+impl Default for ChainMode {
+    fn default() -> Self {
+        Self::Independent
+    }
 }
 
 /// Where to deliver cron task results.

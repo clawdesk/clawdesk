@@ -681,6 +681,13 @@ export function SettingsPage({
                           <span key={s} className="chip">{s}</span>
                         ))}
                         <span className="chip">{a.model}</span>
+                        {(a.channels ?? []).length > 0 ? (
+                          (a.channels ?? []).map((ch) => (
+                            <span key={ch} className="chip" style={{ background: "var(--accent-bg)", color: "var(--brand)" }}>{ch}</span>
+                          ))
+                        ) : (
+                          <span className="chip" style={{ opacity: 0.5 }}>all channels</span>
+                        )}
                         <span>{a.msg_count} msgs · {(a.tokens_used ?? 0).toLocaleString()}/{(a.token_budget ?? 0).toLocaleString()} tokens</span>
                       </div>
                     </div>

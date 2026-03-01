@@ -4,17 +4,18 @@
 
 #[cfg(test)]
 mod tests {
-    use clawdesk_acp::agent_card::{AgentCapability, AgentCard};
+    use clawdesk_acp::agent_card::AgentCard;
+    use clawdesk_acp::capability::{CapSet, CapabilityId};
     use clawdesk_acp::router::{AgentDirectory, AgentRouter, RoutingDecision};
     use clawdesk_acp::task::{Task, TaskEvent, TaskState};
-    use clawdesk_acp::capability::{CapSet, CapabilityId};
     use clawdesk_acp::content_router::ContentRouterBuilder;
     use clawdesk_acp::discovery::{DiscoveryCache, DiscoveryCacheConfig};
     use clawdesk_acp::error::{AcpError, AcpErrorKind};
 
-    fn make_agent_card(id: &str, caps: Vec<AgentCapability>) -> AgentCard {
+    fn make_agent_card(id: &str, caps: Vec<CapabilityId>) -> AgentCard {
         let mut card = AgentCard::new(id, id, format!("http://localhost:8080/agents/{id}"));
         card.capabilities = caps;
+        card.rebuild_capset();
         card
     }
 
@@ -23,7 +24,7 @@ mod tests {
     #[test]
     fn phase1_register_and_lookup() {
         let mut dir = AgentDirectory::new();
-        let card = make_agent_card("agent-1", vec![AgentCapability::TextGeneration, AgentCapability::CodeExecution]);
+        let card = make_agent_card("agent-1", vec![CapabilityId::TextGeneration, CapabilityId::CodeExecution]);
         dir.register(card);
 
         let found = dir.get("agent-1");
@@ -34,7 +35,7 @@ mod tests {
     #[test]
     fn phase1_deregister() {
         let mut dir = AgentDirectory::new();
-        dir.register(make_agent_card("agent-1", vec![AgentCapability::TextGeneration]));
+        dir.register(make_agent_card("agent-1", vec![CapabilityId::TextGeneration]));
         dir.deregister("agent-1");
         assert!(dir.get("agent-1").is_none());
     }
@@ -44,11 +45,11 @@ mod tests {
     #[test]
     fn phase2_route_to_best_agent() {
         let mut dir = AgentDirectory::new();
-        dir.register(make_agent_card("coder", vec![AgentCapability::TextGeneration, AgentCapability::CodeExecution]));
-        dir.register(make_agent_card("artist", vec![AgentCapability::ImageProcessing]));
+        dir.register(make_agent_card("coder", vec![CapabilityId::TextGeneration, CapabilityId::CodeExecution]));
+        dir.register(make_agent_card("artist", vec![CapabilityId::ImageProcessing]));
 
         let router = AgentRouter::new();
-        let decision = router.route(&dir, &[AgentCapability::CodeExecution], &[]);
+        let decision = router.route(&dir, &[CapabilityId::CodeExecution], &[]);
 
         match decision {
             RoutingDecision::Route { agent_id, .. } => assert_eq!(agent_id, "coder"),
@@ -59,10 +60,11 @@ mod tests {
     #[test]
     fn phase2_no_matching_agent() {
         let mut dir = AgentDirectory::new();
-        dir.register(make_agent_card("artist", vec![AgentCapability::ImageProcessing]));
+        dir.register(make_agent_card("artist", vec![CapabilityId::ImageProcessing]));
 
         let router = AgentRouter::new();
-        let decision = router.route(&dir, &[AgentCapability::AudioProcessing], &[]);
+        // Use Mathematics — completely disjoint from ImageProcessing/MediaProcessing hierarchy
+        let decision = router.route(&dir, &[CapabilityId::Mathematics], &[]);
 
         assert!(matches!(decision, RoutingDecision::NoMatch { .. }));
     }
@@ -165,8 +167,8 @@ mod tests {
     fn phase8_end_to_end() {
         // 1. Register.
         let mut dir = AgentDirectory::new();
-        dir.register(make_agent_card("nlp", vec![AgentCapability::TextGeneration]));
-        dir.register(make_agent_card("vision", vec![AgentCapability::ImageProcessing]));
+        dir.register(make_agent_card("nlp", vec![CapabilityId::TextGeneration]));
+        dir.register(make_agent_card("vision", vec![CapabilityId::ImageProcessing]));
 
         // 2. Cache.
         let mut cache = DiscoveryCache::new(DiscoveryCacheConfig::default());

@@ -26,7 +26,7 @@ pub struct PipelineResult {
 pub type AgentExecutor =
     Box<dyn Fn(&NormalizedMessage, &str) -> Result<String, String> + Send + Sync>;
 
-/// GAP-10: Streaming agent executor.
+/// Streaming agent executor.
 /// Returns a stream of text chunks instead of a single complete response.
 /// The receiver yields partial response chunks as they arrive from the LLM.
 ///
@@ -54,7 +54,7 @@ pub struct ReplyPipeline {
     classifier: TriggerClassifier,
     router: MessageRouter,
     executor: Option<AgentExecutor>,
-    /// GAP-10: Optional streaming executor for channels that prefer streaming.
+    /// Optional streaming executor for channels that prefer streaming.
     streaming_executor: Option<StreamingAgentExecutor>,
 }
 
@@ -74,7 +74,7 @@ impl ReplyPipeline {
         self
     }
 
-    /// GAP-10: Set the streaming agent executor function.
+    /// Set the streaming agent executor function.
     ///
     /// When `prefer_streaming` is true on the `ReplyPath`, calling
     /// `process_streaming()` will use this executor instead of the
@@ -84,7 +84,7 @@ impl ReplyPipeline {
         self
     }
 
-    /// GAP-10: Check if streaming is available for a given reply path.
+    /// Check if streaming is available for a given reply path.
     pub fn supports_streaming(&self, prefer_streaming: bool) -> bool {
         prefer_streaming && self.streaming_executor.is_some()
     }
@@ -166,7 +166,7 @@ impl ReplyPipeline {
 
         // Stage 4: Enrich (add context, session info, media descriptions).
         //
-        // GAP-6: Process media attachments and inject text descriptions into the
+        // Process media attachments and inject text descriptions into the
         // message body so the agent can reason about images, audio, documents, etc.
         // URL link previews are also extracted and appended as context.
         let t = Instant::now();
@@ -230,7 +230,7 @@ impl ReplyPipeline {
         timings.push(("enrich", t.elapsed()));
 
         // Stage 5: Execute (call the agent).
-        // GAP-6: Pass the enriched body (with media descriptions) to the executor.
+        // Pass the enriched body (with media descriptions) to the executor.
         let t = Instant::now();
         let enriched_msg = if enriched_body != msg.body {
             let mut m = msg.clone();
@@ -315,6 +315,7 @@ mod tests {
                 channel,
             },
             media: vec![],
+            artifact_refs: vec![],
             reply_context: None,
             origin: clawdesk_types::message::MessageOrigin::Internal {
                 source: "test".to_string(),

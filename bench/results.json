@@ -1,0 +1,68 @@
+{
+  "timestamp": "2026-02-24T00:01:40.258453",
+  "config": {
+    "ollama_url": "http://localhost:11434",
+    "model": "nomic-embed-text",
+    "db_path": "/tmp/clawdesk_bench_sochdb",
+    "min_relevance": 0.05
+  },
+  "elapsed_seconds": 10.72724199295044,
+  "total_tests": 61,
+  "competencies": {
+    "accurate_retrieval": {
+      "num_tests": 21,
+      "exact_match": 0.0,
+      "substring_match": 0.9524,
+      "f1": 0.299,
+      "recall_at_1": 0.9524,
+      "recall_at_5": 1.0,
+      "mrr": 0.9762,
+      "rouge_l": 0.299,
+      "latency_ms": 26.2
+    },
+    "test_time_learning": {
+      "num_tests": 11,
+      "exact_match": 0.0,
+      "substring_match": 0.4545,
+      "f1": 0.0924,
+      "recall_at_1": 0.4545,
+      "recall_at_5": 0.9091,
+      "mrr": 0.6091,
+      "rouge_l": 0.0924,
+      "latency_ms": 26.2
+    },
+    "long_range_understanding": {
+      "num_tests": 14,
+      "exact_match": 0.0,
+      "substring_match": 0.9286,
+      "f1": 0.2298,
+      "recall_at_1": 0.9286,
+      "recall_at_5": 0.9286,
+      "mrr": 0.9357,
+      "rouge_l": 0.2298,
+      "latency_ms": 49.7
+    },
+    "conflict_resolution": {
+      "num_tests": 10,
+      "exact_match": 0.0,
+      "substring_match": 0.0,
+      "f1": 0.0133,
+      "recall_at_1": 0.0,
+      "recall_at_5": 1.0,
+      "mrr": 0.42,
+      "rouge_l": 0.0133,
+      "latency_ms": 29.6
+    },
+    "semantic_similarity": {
+      "num_tests": 5,
+      "exact_match": 0.0,
+      "substring_match": 1.0,
+      "f1": 0.3151,
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "mrr": 1.0,
+      "rouge_l": 0.3151,
+      "latency_ms": 26.8
+    }
+  }
+}

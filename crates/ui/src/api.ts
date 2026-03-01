@@ -105,6 +105,31 @@ import type {
   TemporalEdgeInfo,
   // Debug
   StorageSnapshot,
+  // Sandbox
+  SandboxStatusInfo,
+  SandboxExecResult,
+  SandboxBackendInfo,
+  ResourceLimitsInfo,
+  SandboxResourceUsage,
+  // MCP
+  McpServerInfo,
+  McpToolInfo,
+  McpToolCallResult,
+  McpBundledTemplate,
+  McpConnectRequest,
+  // Extensions
+  IntegrationInfo,
+  IntegrationCategoryInfo,
+  VaultStatusInfo,
+  HealthStatusInfo,
+  OAuthFlowInfo,
+  IntegrationStatsInfo,
+  CredentialRequirementInfo,
+  // Migration
+  MigrationSourceInfo,
+  MigrationReportInfo,
+  MigrationRequest,
+  ValidateSourceResult,
 } from "./types";
 
 // ── Browser-dev mode detection ────────────────────────────
@@ -668,6 +693,12 @@ export async function clearAllChats(): Promise<number> {
 
 export async function updateChatTitle(chatId: string, title: string): Promise<boolean> {
   return invoke<boolean>("update_chat_title", { chatId, title });
+}
+
+/** Diagnostic: dump all session metadata from SochDB (no message content). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function debugSessionStorage(): Promise<any[]> {
+  return invoke<any[]>("debug_session_storage");
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1614,3 +1645,350 @@ export async function getVoiceInputStatus(): Promise<VoiceInputStatusResult> {
   return invoke<VoiceInputStatusResult>("get_voice_input_status");
 }
 
+// ══════════════════════════════════════════════════════════════
+// Sandbox — Multi-modal Code Execution Isolation (5)
+// ══════════════════════════════════════════════════════════════
+
+export async function getSandboxStatus(): Promise<SandboxStatusInfo> {
+  if (isBrowserDev) {
+    return {
+      available: true,
+      max_isolation: "ProcessIsolation",
+      available_levels: ["None", "PathScope", "ProcessIsolation"],
+      default_limits: {
+        cpu_time_secs: 30,
+        wall_time_secs: 60,
+        memory_bytes: 536870912,
+        max_fds: 256,
+        max_output_bytes: 10485760,
+        max_processes: 10,
+      },
+    };
+  }
+  return invoke<SandboxStatusInfo>("get_sandbox_status");
+}
+
+export async function listSandboxBackends(): Promise<SandboxBackendInfo[]> {
+  if (isBrowserDev) {
+    return [
+      { name: "WorkspaceSandbox", isolation_level: "PathScope", available: true },
+      { name: "SubprocessSandbox", isolation_level: "ProcessIsolation", available: true },
+    ];
+  }
+  return invoke<SandboxBackendInfo[]>("list_sandbox_backends");
+}
+
+export async function executeSandboxed(
+  command: string,
+  isolationLevel?: string,
+  limits?: ResourceLimitsInfo,
+): Promise<SandboxExecResult> {
+  if (isBrowserDev) {
+    return {
+      exit_code: 0,
+      stdout: `[mock] ${command}`,
+      stderr: "",
+      duration_ms: 42,
+      resource_usage: { cpu_time_ms: 30, wall_time_ms: 42, peak_memory_bytes: 1024000, output_bytes: 100 },
+    };
+  }
+  return invoke<SandboxExecResult>("execute_sandboxed", {
+    command,
+    isolationLevel,
+    limits,
+  });
+}
+
+export async function getSandboxResourceLimits(): Promise<ResourceLimitsInfo> {
+  if (isBrowserDev) {
+    return {
+      cpu_time_secs: 30,
+      wall_time_secs: 60,
+      memory_bytes: 536870912,
+      max_fds: 256,
+      max_output_bytes: 10485760,
+      max_processes: 10,
+    };
+  }
+  return invoke<ResourceLimitsInfo>("get_sandbox_resource_limits");
+}
+
+export async function cleanupSandboxes(): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("cleanup_sandboxes");
+}
+
+// ══════════════════════════════════════════════════════════════
+// MCP — Model Context Protocol (10)
+// ══════════════════════════════════════════════════════════════
+
+export async function listMcpServers(): Promise<McpServerInfo[]> {
+  if (isBrowserDev) {
+    return [
+      { name: "sqlite", transport: "stdio", connected: true, tool_count: 4 },
+      { name: "filesystem", transport: "stdio", connected: true, tool_count: 6 },
+    ];
+  }
+  return invoke<McpServerInfo[]>("list_mcp_servers");
+}
+
+export async function connectMcpServer(request: McpConnectRequest): Promise<McpServerInfo> {
+  if (isBrowserDev) {
+    return { name: request.name, transport: request.transport, connected: true, tool_count: 0 };
+  }
+  return invoke<McpServerInfo>("connect_mcp_server", { request });
+}
+
+export async function disconnectMcpServer(serverName: string): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("disconnect_mcp_server", { serverName });
+}
+
+export async function listMcpTools(serverName?: string): Promise<McpToolInfo[]> {
+  if (isBrowserDev) {
+    return [
+      { name: "read_query", description: "Execute a SELECT query", input_schema: {}, server: "sqlite" },
+      { name: "write_query", description: "Execute INSERT/UPDATE/DELETE", input_schema: {}, server: "sqlite" },
+      { name: "list_tables", description: "List database tables", input_schema: {}, server: "sqlite" },
+      { name: "read_file", description: "Read a file", input_schema: {}, server: "filesystem" },
+      { name: "write_file", description: "Write to a file", input_schema: {}, server: "filesystem" },
+      { name: "list_directory", description: "List directory contents", input_schema: {}, server: "filesystem" },
+    ];
+  }
+  return invoke<McpToolInfo[]>("list_mcp_tools", { serverName });
+}
+
+export async function callMcpTool(
+  serverName: string,
+  toolName: string,
+  arguments_: any,
+): Promise<McpToolCallResult> {
+  if (isBrowserDev) {
+    return {
+      content: [{ content_type: "text", text: `[mock] Tool ${toolName} executed` }],
+      is_error: false,
+    };
+  }
+  return invoke<McpToolCallResult>("call_mcp_tool", { serverName, toolName, arguments: arguments_ });
+}
+
+export async function getMcpServerStatus(serverName: string): Promise<McpServerInfo> {
+  if (isBrowserDev) {
+    return { name: serverName, transport: "stdio", connected: true, tool_count: 0 };
+  }
+  return invoke<McpServerInfo>("get_mcp_server_status", { serverName });
+}
+
+export async function listMcpTemplates(): Promise<McpBundledTemplate[]> {
+  if (isBrowserDev) {
+    return [
+      { name: "sqlite", category: "database", description: "SQLite database access via MCP" },
+      { name: "filesystem", category: "system", description: "File system operations" },
+      { name: "github", category: "devtools", description: "GitHub API integration" },
+      { name: "brave-search", category: "search", description: "Brave Search API" },
+      { name: "puppeteer", category: "browser", description: "Browser automation" },
+    ];
+  }
+  return invoke<McpBundledTemplate[]>("list_mcp_templates");
+}
+
+export async function listMcpCategories(): Promise<string[]> {
+  if (isBrowserDev) return ["database", "system", "devtools", "search", "browser"];
+  return invoke<string[]>("list_mcp_categories");
+}
+
+export async function installMcpTemplate(
+  templateName: string,
+  envOverrides?: Record<string, string>,
+): Promise<McpServerInfo> {
+  if (isBrowserDev) {
+    return { name: templateName, transport: "stdio", connected: true, tool_count: 0 };
+  }
+  return invoke<McpServerInfo>("install_mcp_template", { templateName, envOverrides });
+}
+
+export async function disconnectAllMcp(): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("disconnect_all_mcp");
+}
+
+// ══════════════════════════════════════════════════════════════
+// Extensions — Integration Registry + Vault + Health (19)
+// ══════════════════════════════════════════════════════════════
+
+export async function listIntegrations(): Promise<IntegrationInfo[]> {
+  if (isBrowserDev) {
+    return [
+      { name: "github", description: "GitHub API", category: "DevTools", icon: "🐙", enabled: true, credentials_required: [{ name: "token", description: "Personal access token", env_var: "GITHUB_TOKEN", required: true }], has_oauth: true, health_check_url: "https://api.github.com" },
+      { name: "slack", description: "Slack workspace", category: "Communication", icon: "💼", enabled: false, credentials_required: [{ name: "bot_token", description: "Bot token", env_var: "SLACK_BOT_TOKEN", required: true }], has_oauth: true, health_check_url: "https://slack.com/api/api.test" },
+      { name: "jira", description: "Atlassian Jira", category: "Productivity", icon: "📋", enabled: false, credentials_required: [{ name: "api_token", description: "API token", env_var: "JIRA_API_TOKEN", required: true }], has_oauth: false, health_check_url: undefined },
+    ];
+  }
+  return invoke<IntegrationInfo[]>("list_integrations");
+}
+
+export async function getIntegrationDetail(name: string): Promise<IntegrationInfo> {
+  if (isBrowserDev) {
+    return { name, description: `${name} integration`, category: "DevTools", icon: "🔌", enabled: false, credentials_required: [], has_oauth: false, health_check_url: undefined };
+  }
+  return invoke<IntegrationInfo>("get_integration_detail", { name });
+}
+
+export async function listIntegrationCategories(): Promise<IntegrationCategoryInfo[]> {
+  if (isBrowserDev) {
+    return [
+      { name: "DevTools", count: 5 },
+      { name: "Productivity", count: 4 },
+      { name: "Communication", count: 3 },
+      { name: "Data", count: 4 },
+      { name: "Cloud", count: 3 },
+      { name: "Search", count: 2 },
+    ];
+  }
+  return invoke<IntegrationCategoryInfo[]>("list_integration_categories");
+}
+
+export async function enableIntegration(name: string): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("enable_integration", { name });
+}
+
+export async function disableIntegration(name: string): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("disable_integration", { name });
+}
+
+export async function getIntegrationStats(): Promise<IntegrationStatsInfo> {
+  if (isBrowserDev) return { total: 25, enabled: 3, disabled: 22 };
+  return invoke<IntegrationStatsInfo>("get_integration_stats");
+}
+
+export async function vaultStatus(): Promise<VaultStatusInfo> {
+  if (isBrowserDev) return { exists: true, unlocked: false, credential_count: 0 };
+  return invoke<VaultStatusInfo>("vault_status");
+}
+
+export async function vaultInitialize(password: string): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("vault_initialize", { password });
+}
+
+export async function vaultUnlock(password: string): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("vault_unlock", { password });
+}
+
+export async function vaultLock(): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("vault_lock");
+}
+
+export async function vaultStoreCredential(name: string, value: string): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("vault_store_credential", { name, value });
+}
+
+export async function vaultGetCredential(name: string): Promise<string | null> {
+  if (isBrowserDev) return null;
+  return invoke<string | null>("vault_get_credential", { name });
+}
+
+export async function vaultDeleteCredential(name: string): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("vault_delete_credential", { name });
+}
+
+export async function vaultListCredentials(): Promise<string[]> {
+  if (isBrowserDev) return ["github_token", "slack_bot_token"];
+  return invoke<string[]>("vault_list_credentials");
+}
+
+export async function getAllHealthStatuses(): Promise<HealthStatusInfo[]> {
+  if (isBrowserDev) {
+    return [
+      { name: "github", state: "Healthy", last_check: new Date().toISOString(), last_success: new Date().toISOString(), consecutive_failures: 0, latency_ms: 120 },
+      { name: "slack", state: "Unknown", consecutive_failures: 0 },
+    ];
+  }
+  return invoke<HealthStatusInfo[]>("get_all_health_statuses");
+}
+
+export async function getIntegrationHealth(name: string): Promise<HealthStatusInfo> {
+  if (isBrowserDev) {
+    return { name, state: "Unknown", consecutive_failures: 0 };
+  }
+  return invoke<HealthStatusInfo>("get_integration_health", { name });
+}
+
+export async function checkIntegrationHealth(name: string): Promise<HealthStatusInfo> {
+  if (isBrowserDev) {
+    return { name, state: "Healthy", last_check: new Date().toISOString(), last_success: new Date().toISOString(), consecutive_failures: 0, latency_ms: 150 };
+  }
+  return invoke<HealthStatusInfo>("check_integration_health", { name });
+}
+
+export async function startExtensionOAuth(integrationName: string): Promise<OAuthFlowInfo> {
+  if (isBrowserDev) {
+    return { auth_url: "https://example.com/oauth/authorize?mock=true", state: "mock_state_123" };
+  }
+  return invoke<OAuthFlowInfo>("start_extension_oauth", { integrationName });
+}
+
+export async function completeExtensionOAuth(
+  integrationName: string,
+  code: string,
+  stateParam: string,
+): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("complete_extension_oauth", { integrationName, code, stateParam });
+}
+
+// ══════════════════════════════════════════════════════════════
+// Migration — Import from Other AI Apps (4)
+// ══════════════════════════════════════════════════════════════
+
+export async function listMigrationSources(): Promise<MigrationSourceInfo[]> {
+  if (isBrowserDev) {
+    return [
+      { name: "openclaw", label: "OpenClaw", supported_items: ["Agents", "Sessions", "Skills", "Channels", "Credentials", "Config"] },
+      { name: "claude_desktop", label: "Claude Desktop", supported_items: ["Agents", "Sessions", "Skills", "Channels", "Credentials", "Config"] },
+    ];
+  }
+  return invoke<MigrationSourceInfo[]>("list_migration_sources");
+}
+
+export async function validateMigrationSource(
+  source: string,
+  sourcePath: string,
+): Promise<ValidateSourceResult> {
+  if (isBrowserDev) {
+    return { valid: true, source, found_items: ["Agents", "Skills", "Config"], error: undefined };
+  }
+  return invoke<ValidateSourceResult>("validate_migration_source", { source, sourcePath });
+}
+
+export async function runMigration(request: MigrationRequest): Promise<MigrationReportInfo> {
+  if (isBrowserDev) {
+    return {
+      source: request.source,
+      source_path: request.source_path,
+      dry_run: request.dry_run,
+      success: true,
+      summary: { total: 5, migrated: 4, skipped: 1, failed: 0, dry_run: request.dry_run ? 5 : 0 },
+      items: [
+        { category: "Agents", source_name: "default-agent.yaml", dest_path: "agents/default-agent.toml", status: "Migrated", note: "" },
+        { category: "Skills", source_name: "web-search.md", dest_path: "skills/web-search.md", status: "Migrated", note: "" },
+      ],
+      warnings: [],
+      errors: [],
+    };
+  }
+  return invoke<MigrationReportInfo>("run_migration", { request });
+}
+
+export async function previewMigration(source: string, sourcePath: string): Promise<MigrationReportInfo> {
+  if (isBrowserDev) {
+    return runMigration({ source, source_path: sourcePath, dry_run: true, overwrite: false });
+  }
+  return invoke<MigrationReportInfo>("preview_migration", { source, sourcePath });
+}

@@ -97,7 +97,7 @@ pub struct PluginContext {
 /// Internal services exposed to plugins.
 struct PluginServices {
     kv_store: RwLock<HashMap<String, String>>,
-    log_buffer: RwLock<Vec<LogEntry>>,
+    log_buffer: RwLock<clawdesk_types::DropOldest<LogEntry>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +125,7 @@ impl PluginContext {
             config: serde_json::Value::Null,
             services: Arc::new(PluginServices {
                 kv_store: RwLock::new(HashMap::new()),
-                log_buffer: RwLock::new(Vec::new()),
+                log_buffer: RwLock::new(clawdesk_types::DropOldest::new(1000)),
             }),
         }
     }
@@ -184,7 +184,7 @@ impl PluginContext {
 
     /// Get recent log entries.
     pub async fn get_logs(&self) -> Vec<LogEntry> {
-        self.services.log_buffer.read().await.clone()
+        self.services.log_buffer.read().await.to_vec()
     }
 
     /// Get a config value by JSON pointer (e.g. "/database/host").

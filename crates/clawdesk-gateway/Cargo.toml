@@ -10,23 +10,34 @@ rust-version.workspace = true
 [lib]
 doctest = false
 
+[features]
+default = ["cron", "media", "skills", "acp"]
+cron = ["dep:clawdesk-cron"]
+media = ["dep:clawdesk-media"]
+skills = ["dep:clawdesk-skills"]
+acp = ["dep:clawdesk-acp"]
+browser = ["dep:clawdesk-browser"]
+full = ["cron", "media", "skills", "acp", "browser"]
+
 [dependencies]
 clawdesk-types = { workspace = true }
 clawdesk-storage = { workspace = true }
 clawdesk-domain = { workspace = true }
+clawdesk-media = { workspace = true, optional = true }
 clawdesk-channel = { workspace = true }
 clawdesk-providers = { workspace = true }
 clawdesk-agents = { workspace = true }
 clawdesk-sochdb = { workspace = true }
 clawdesk-plugin = { workspace = true }
-clawdesk-cron = { workspace = true }
-clawdesk-acp = { workspace = true }
+clawdesk-cron = { workspace = true, optional = true }
+clawdesk-bus = { workspace = true }
+clawdesk-acp = { workspace = true, optional = true }
 async-trait = { workspace = true }
 arc-swap = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread"] }
 tokio-util = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
@@ -34,9 +45,13 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
 async-stream = "0.3"
-clawdesk-skills = { workspace = true }
+clawdesk-skills = { workspace = true, optional = true }
+clawdesk-browser = { workspace = true, optional = true }
 clawdesk-channels = { workspace = true }
 clawdesk-security = { workspace = true }
 clawdesk-runtime = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

@@ -1,10 +1,10 @@
-//! OpenClaw → ClawDesk skill adapter.
+//! Legacy → ClawDesk skill adapter.
 //!
-//! Translates OpenClaw's `SKILL.md` format (YAML frontmatter + Markdown body)
+//! Translates the `SKILL.md` format (YAML frontmatter + Markdown body)
 //! into ClawDesk's `Skill` type (`SkillManifest` + prompt fragment). Enables
-//! zero-modification porting of ~70% of OpenClaw's 52+ skills.
+//! zero-modification porting of ~70% of the 52+ skills.
 //!
-//! ## OpenClaw skill format
+//! ## legacy skill format
 //!
 //! ```text
 //! ---
@@ -20,7 +20,7 @@
 //!
 //! ## Mapping
 //!
-//! | OpenClaw field              | ClawDesk field                |
+//! | Legacy field              | ClawDesk field                |
 //! |-----------------------------|-------------------------------|
 //! | `name`                      | `SkillId("openclaw", name)`   |
 //! | `description`               | `description` + `display_name`|
@@ -39,7 +39,7 @@ use sha2::{Sha256, Digest};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-/// Well-known tool names that appear in OpenClaw skill prompts.
+/// Well-known tool names that appear in legacy skill prompts.
 /// These are agent-level tools that skills reference but don't own.
 const KNOWN_AGENT_TOOLS: &[&str] = &[
     "web_search", "web_fetch", "file_read", "file_write", "file_list",
@@ -48,9 +48,9 @@ const KNOWN_AGENT_TOOLS: &[&str] = &[
     "curl", "grep", "find", "cat", "ls", "mkdir", "rm",
 ];
 
-/// Extract tool bindings from an OpenClaw skill's prompt body and metadata.
+/// Extract tool bindings from an legacy skill's prompt body and metadata.
 ///
-/// OpenClaw skills don't declare tools in frontmatter — they reference them
+/// legacy skills don't declare tools in frontmatter — they reference them
 /// implicitly in the prompt body. We extract these references to populate
 /// `provided_tools` so the executor can wire them up.
 ///
@@ -157,10 +157,10 @@ fn extract_tool_bindings(
 }
 
 // ─────────────────────────────────────────────────────────────
-// OpenClaw frontmatter types (deserialized from YAML)
+// legacy frontmatter types (deserialized from YAML)
 // ─────────────────────────────────────────────────────────────
 
-/// Raw YAML frontmatter from an OpenClaw `SKILL.md`.
+/// Raw YAML frontmatter from a legacy `SKILL.md`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct OpenClawFrontmatter {
     pub name: Option<String>,
@@ -180,7 +180,7 @@ pub struct OpenClawFrontmatter {
     pub user_invocable: Option<bool>,
 }
 
-/// Resolved OpenClaw metadata from the `metadata.openclaw` block.
+/// Resolved legacy metadata from the `metadata.openclaw` block.
 #[derive(Debug, Clone, Default)]
 pub struct OpenClawMetadata {
     pub always: bool,
@@ -394,7 +394,7 @@ pub struct AdaptedSkill {
     pub skill: Skill,
     pub tier: AdaptationTier,
     pub warnings: Vec<String>,
-    /// Original OpenClaw metadata for reference.
+    /// Original legacy metadata for reference.
     pub openclaw_meta: OpenClawMetadata,
 }
 
@@ -443,7 +443,7 @@ impl Default for AdapterConfig {
     }
 }
 
-/// Convert an OpenClaw skill (frontmatter + body) into a ClawDesk `Skill`.
+/// Convert an legacy skill (frontmatter + body) into a ClawDesk `Skill`.
 pub fn adapt_skill(
     frontmatter: &OpenClawFrontmatter,
     body: &str,
@@ -490,7 +490,7 @@ pub fn adapt_skill(
         vec![SkillTrigger::Always]
     } else {
         // Map name to keyword trigger + always fallback.
-        // OpenClaw gating is load-time (requirements); in ClawDesk we use
+        // Legacy gating is load-time (requirements); in ClawDesk we use
         // keyword matching on the skill name so it activates contextually.
         let keywords: Vec<String> = name
             .split('-')
@@ -534,7 +534,7 @@ pub fn adapt_skill(
         description.to_string()
     } else {
         format!(
-            "<!-- Ported from OpenClaw skill '{}' (MIT) -->\n\n{}",
+            "<!-- Ported from legacy skill '{}' (MIT) -->\n\n{}",
             name, body
         )
     };
@@ -647,7 +647,7 @@ fn classify_tier(
 // Directory-level adapter
 // ─────────────────────────────────────────────────────────────
 
-/// Load an OpenClaw skill from a directory containing `SKILL.md`.
+/// Load an legacy skill from a directory containing `SKILL.md`.
 pub async fn load_openclaw_skill(
     dir: &Path,
     config: &AdapterConfig,
@@ -675,13 +675,13 @@ pub async fn load_openclaw_skill(
         tier = %adapted.tier,
         tokens = adapted.skill.manifest.estimated_tokens,
         warnings = adapted.warnings.len(),
-        "adapted OpenClaw skill"
+        "adapted legacy skill"
     );
 
     Ok(adapted)
 }
 
-/// Batch-load all OpenClaw skills from a directory tree.
+/// Batch-load all legacy skills from a directory tree.
 ///
 /// Scans `root_dir` for subdirectories containing `SKILL.md` and adapts
 /// each one. Returns results partitioned by tier.
@@ -694,7 +694,7 @@ pub async fn load_all_openclaw_skills(
     let entries = match std::fs::read_dir(root_dir) {
         Ok(e) => e,
         Err(e) => {
-            warn!(dir = %root_dir.display(), error = %e, "failed to read OpenClaw skills dir");
+            warn!(dir = %root_dir.display(), error = %e, "failed to read legacy skills dir");
             result.errors.push(format!("{}: {}", root_dir.display(), e));
             return result;
         }
@@ -728,13 +728,13 @@ pub async fn load_all_openclaw_skills(
         context_patch = result.context_patch,
         needs_rewrite = result.needs_rewrite,
         errors = result.errors.len(),
-        "batch-loaded OpenClaw skills"
+        "batch-loaded legacy skills"
     );
 
     result
 }
 
-/// Result of batch-loading OpenClaw skills.
+/// Result of batch-loading legacy skills.
 #[derive(Debug, Default)]
 pub struct BatchAdaptResult {
     pub total: usize,
@@ -750,7 +750,7 @@ impl BatchAdaptResult {
     pub fn triage_report(&self) -> String {
         let mut report = String::new();
 
-        report.push_str("# OpenClaw → ClawDesk Skill Triage Report\n\n");
+        report.push_str("# Legacy → ClawDesk Skill Triage Report\n\n");
         report.push_str(&format!(
             "**Total:** {} | **Direct:** {} ({:.0}%) | **Context-patch:** {} ({:.0}%) | **Needs-rewrite:** {} ({:.0}%)\n\n",
             self.total,
@@ -823,7 +823,7 @@ pub async fn export_to_clawdesk_format(
     debug!(
         skill = %adapted.skill.manifest.id,
         dir = %skill_dir.display(),
-        "exported OpenClaw skill to ClawDesk format"
+        "exported legacy skill to ClawDesk format"
     );
 
     Ok(())
@@ -833,7 +833,7 @@ pub async fn export_to_clawdesk_format(
 // Error types
 // ─────────────────────────────────────────────────────────────
 
-/// Errors from the OpenClaw adapter.
+/// Errors from the legacy adapter.
 #[derive(Debug, Clone)]
 pub enum AdapterError {
     /// No YAML frontmatter found in the file.

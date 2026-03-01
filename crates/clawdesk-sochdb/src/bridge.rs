@@ -43,36 +43,83 @@ impl SochConn {
     }
 }
 
+/// Convert a `&[u8]` key to `&str` safely.  All ClawDesk keys are valid UTF-8,
+/// so this is effectively O(key.len()) but eliminates `unsafe`.
+#[inline]
+fn key_to_str<'a>(key: &'a [u8], op: &str) -> sochdb::error::Result<&'a str> {
+    std::str::from_utf8(key).map_err(|e| {
+        sochdb::error::ClientError::Storage(format!("non-UTF-8 key in bridge {op}: {e}"))
+    })
+}
+
 impl ConnectionTrait for SochConn {
     fn put(&self, key: &[u8], value: &[u8]) -> sochdb::error::Result<()> {
-        let path = std::str::from_utf8(key)
-            .map_err(|e| sochdb::error::ClientError::Storage(format!("Invalid UTF-8 key: {e}")))?;
+        let path = key_to_str(key, "put")?;
         self.0.put(path, value)
             .map_err(|e| sochdb::error::ClientError::Storage(format!("bridge put: {e}")))
     }
 
     fn get(&self, key: &[u8]) -> sochdb::error::Result<Option<Vec<u8>>> {
-        let path = std::str::from_utf8(key)
-            .map_err(|e| sochdb::error::ClientError::Storage(format!("Invalid UTF-8 key: {e}")))?;
+        let path = key_to_str(key, "get")?;
         self.0.get(path)
             .map_err(|e| sochdb::error::ClientError::Storage(format!("bridge get: {e}")))
     }
 
     fn delete(&self, key: &[u8]) -> sochdb::error::Result<()> {
-        let path = std::str::from_utf8(key)
-            .map_err(|e| sochdb::error::ClientError::Storage(format!("Invalid UTF-8 key: {e}")))?;
+        let path = key_to_str(key, "delete")?;
         self.0.delete(path)
             .map_err(|e| sochdb::error::ClientError::Storage(format!("bridge delete: {e}")))
     }
 
     fn scan(&self, prefix: &[u8]) -> sochdb::error::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let path = std::str::from_utf8(prefix)
-            .map_err(|e| sochdb::error::ClientError::Storage(format!("Invalid UTF-8 prefix: {e}")))?;
+        let path = key_to_str(prefix, "scan")?;
         // SochStore::scan returns Vec<(String, Vec<u8>)>,
         // but ConnectionTrait expects Vec<(Vec<u8>, Vec<u8>)>.
         let results = self.0.scan(path)
             .map_err(|e| sochdb::error::ClientError::Storage(format!("bridge scan: {e}")))?;
         Ok(results.into_iter().map(|(k, v)| (k.into_bytes(), v)).collect())
+    }
+}
+
+impl SochConn {
+    /// Batch write — applies puts and deletes atomically.
+    ///
+    /// In SochDB 0.5.0, `write_batch` was removed from `ConnectionTrait`.
+    /// This method provides the same functionality directly on `SochConn`.
+    pub fn write_batch_kv(&self, puts: &[(&[u8], &[u8])], deletes: &[&[u8]]) -> sochdb::error::Result<()> {
+        // Apply deletes first
+        for key in deletes {
+            let path = std::str::from_utf8(key)
+                .map_err(|e| sochdb::error::ClientError::Storage(
+                    format!("Invalid UTF-8 key in batch delete: {e}"),
+                ))?;
+            self.0.delete(path)
+                .map_err(|e| sochdb::error::ClientError::Storage(
+                    format!("bridge batch delete: {e}"),
+                ))?;
+        }
+
+        // Collect puts into (&str, &[u8]) slices for put_batch.
+        let put_entries: Vec<(&str, &[u8])> = puts
+            .iter()
+            .map(|(key, value)| {
+                let s = std::str::from_utf8(key).map_err(|e| {
+                    sochdb::error::ClientError::Storage(
+                        format!("non-UTF-8 key in batch put: {e}"),
+                    )
+                });
+                s.map(|k| (k, *value))
+            })
+            .collect::<sochdb::error::Result<Vec<_>>>()?;
+
+        if !put_entries.is_empty() {
+            self.0.put_batch(&put_entries)
+                .map_err(|e| sochdb::error::ClientError::Storage(
+                    format!("bridge batch put: {e}"),
+                ))?;
+        }
+
+        Ok(())
     }
 }
 

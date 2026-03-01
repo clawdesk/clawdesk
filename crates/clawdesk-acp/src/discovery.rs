@@ -57,7 +57,7 @@ impl Default for DiscoveryCacheConfig {
 }
 
 /// Cached agent card with adaptive TTL tracking.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CachedAgentCard {
     /// The agent card.
     pub card: AgentCard,
@@ -74,7 +74,29 @@ pub struct CachedAgentCard {
     /// Estimated change rate for this specific agent (Bayesian update).
     pub estimated_change_rate: f64,
     /// Number of times this entry has been accessed since last refresh.
-    pub access_count: u64,
+    ///
+    /// Atomic so `get()` can increment without `&mut self`.
+    pub access_count: std::sync::atomic::AtomicU64,
+    /// Monotonic LRU clock value — higher = more recently accessed.
+    /// Used for O(1) promotion and O(n) eviction (eviction is rare).
+    pub lru_clock: std::sync::atomic::AtomicU64,
+}
+
+impl Clone for CachedAgentCard {
+    fn clone(&self) -> Self {
+        use std::sync::atomic::Ordering::Relaxed;
+        Self {
+            card: self.card.clone(),
+            fetched_at: self.fetched_at,
+            etag: self.etag.clone(),
+            ttl: self.ttl,
+            refresh_count: self.refresh_count,
+            unchanged_count: self.unchanged_count,
+            estimated_change_rate: self.estimated_change_rate,
+            access_count: std::sync::atomic::AtomicU64::new(self.access_count.load(Relaxed)),
+            lru_clock: std::sync::atomic::AtomicU64::new(self.lru_clock.load(Relaxed)),
+        }
+    }
 }
 
 impl CachedAgentCard {
@@ -100,23 +122,46 @@ impl CachedAgentCard {
 }
 
 /// Agent discovery cache with adaptive TTL.
+///
+/// `get()` takes `&self` — LRU promotion is O(1) via a global
+/// monotonic clock stored per-entry (atomic), enabling concurrent reads.
 pub struct DiscoveryCache {
     config: DiscoveryCacheConfig,
     /// Agent ID → cached card.
     entries: HashMap<String, CachedAgentCard>,
-    /// Global stats.
+    /// Global monotonic clock for O(1) LRU promotion.
+    /// Incremented on every `get()` / `put()` — entries store their last clock value.
+    global_clock: std::sync::atomic::AtomicU64,
+    /// Global stats (atomic — no lock needed for reads).
     pub stats: DiscoveryCacheStats,
 }
 
 /// Cache statistics.
-#[derive(Debug, Clone, Default)]
+///
+/// All counters are `AtomicU64` so that `get()` can take `&self`
+/// instead of `&mut self`, enabling concurrent reads behind `RwLock`.
+#[derive(Debug, Default)]
 pub struct DiscoveryCacheStats {
-    pub total_lookups: u64,
-    pub cache_hits: u64,
-    pub cache_misses: u64,
-    pub conditional_gets: u64,
-    pub not_modified_responses: u64,
-    pub stale_entries_served: u64,
+    pub total_lookups: std::sync::atomic::AtomicU64,
+    pub cache_hits: std::sync::atomic::AtomicU64,
+    pub cache_misses: std::sync::atomic::AtomicU64,
+    pub conditional_gets: std::sync::atomic::AtomicU64,
+    pub not_modified_responses: std::sync::atomic::AtomicU64,
+    pub stale_entries_served: std::sync::atomic::AtomicU64,
+}
+
+impl Clone for DiscoveryCacheStats {
+    fn clone(&self) -> Self {
+        use std::sync::atomic::Ordering::Relaxed;
+        Self {
+            total_lookups: std::sync::atomic::AtomicU64::new(self.total_lookups.load(Relaxed)),
+            cache_hits: std::sync::atomic::AtomicU64::new(self.cache_hits.load(Relaxed)),
+            cache_misses: std::sync::atomic::AtomicU64::new(self.cache_misses.load(Relaxed)),
+            conditional_gets: std::sync::atomic::AtomicU64::new(self.conditional_gets.load(Relaxed)),
+            not_modified_responses: std::sync::atomic::AtomicU64::new(self.not_modified_responses.load(Relaxed)),
+            stale_entries_served: std::sync::atomic::AtomicU64::new(self.stale_entries_served.load(Relaxed)),
+        }
+    }
 }
 
 /// Free function computing optimal TTL from config and change rate.
@@ -135,6 +180,7 @@ impl DiscoveryCache {
     pub fn new(config: DiscoveryCacheConfig) -> Self {
         Self {
             entries: HashMap::with_capacity(config.max_entries / 4),
+            global_clock: std::sync::atomic::AtomicU64::new(0),
             stats: DiscoveryCacheStats::default(),
             config,
         }
@@ -152,25 +198,32 @@ impl DiscoveryCache {
     ///
     /// Returns the cached card if present and not expired.
     /// If expired, returns `None` (caller should re-fetch).
-    pub fn get(&mut self, agent_id: &str) -> Option<&AgentCard> {
-        self.stats.total_lookups += 1;
+    ///
+    /// Takes `&self` — stats are atomic, LRU behind Mutex.
+    pub fn get(&self, agent_id: &str) -> Option<&AgentCard> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.stats.total_lookups.fetch_add(1, Relaxed);
 
-        if let Some(entry) = self.entries.get_mut(agent_id) {
-            entry.access_count += 1;
+        if let Some(entry) = self.entries.get(agent_id) {
+            entry.access_count.fetch_add(1, Relaxed);
+
+            // O(1) LRU promotion — just bump the clock.
+            let tick = self.global_clock.fetch_add(1, Relaxed);
+            entry.lru_clock.store(tick, Relaxed);
 
             if !entry.is_expired() {
-                self.stats.cache_hits += 1;
+                self.stats.cache_hits.fetch_add(1, Relaxed);
                 return Some(&entry.card);
             }
 
             // Expired but present — check if within max_staleness for soft serving.
             if entry.staleness() < self.config.max_staleness {
-                self.stats.stale_entries_served += 1;
+                self.stats.stale_entries_served.fetch_add(1, Relaxed);
                 return Some(&entry.card);
             }
         }
 
-        self.stats.cache_misses += 1;
+        self.stats.cache_misses.fetch_add(1, Relaxed);
         None
     }
 
@@ -183,7 +236,7 @@ impl DiscoveryCache {
 
     /// Insert or update a cached agent card after a successful fetch.
     pub fn put(&mut self, agent_id: &str, card: AgentCard, etag: Option<String>) {
-        // Enforce max entries via LRU-like eviction of oldest.
+        // Enforce max entries via LRU eviction.
         if self.entries.len() >= self.config.max_entries && !self.entries.contains_key(agent_id) {
             self.evict_oldest();
         }
@@ -196,6 +249,9 @@ impl DiscoveryCache {
 
         let ttl = self.compute_ttl(change_rate);
 
+        // O(1) LRU promotion — just assign a fresh clock tick.
+        let tick = self.global_clock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let entry = self.entries.entry(agent_id.to_string()).or_insert_with(|| {
             CachedAgentCard {
                 card: card.clone(),
@@ -205,7 +261,8 @@ impl DiscoveryCache {
                 refresh_count: 0,
                 unchanged_count: 0,
                 estimated_change_rate: change_rate,
-                access_count: 0,
+                access_count: std::sync::atomic::AtomicU64::new(0),
+                lru_clock: std::sync::atomic::AtomicU64::new(tick),
             }
         });
 
@@ -214,7 +271,8 @@ impl DiscoveryCache {
         entry.etag = etag;
         entry.ttl = ttl;
         entry.refresh_count += 1;
-        entry.access_count = 0;
+        entry.access_count.store(0, std::sync::atomic::Ordering::Relaxed);
+        entry.lru_clock.store(tick, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Record a "304 Not Modified" response — card has not changed.
@@ -222,8 +280,9 @@ impl DiscoveryCache {
     /// This updates the change rate estimate (Bayesian: more unchanged responses
     /// → lower change rate → longer TTL).
     pub fn record_not_modified(&mut self, agent_id: &str) {
-        self.stats.conditional_gets += 1;
-        self.stats.not_modified_responses += 1;
+        use std::sync::atomic::Ordering::Relaxed;
+        self.stats.conditional_gets.fetch_add(1, Relaxed);
+        self.stats.not_modified_responses.fetch_add(1, Relaxed);
 
         if let Some(entry) = self.entries.get_mut(agent_id) {
             entry.unchanged_count += 1;
@@ -261,6 +320,47 @@ impl DiscoveryCache {
         }
     }
 
+    /// Content-addressed put: only triggers a full re-index if the card's
+    /// structural fingerprint (capabilities + skills + endpoint) actually changed.
+    ///
+    /// Returns `true` if the card was structurally modified and re-cached,
+    /// `false` if only cosmetic fields changed (description, metadata) — in
+    /// which case the cached card is updated in-place without bumping the
+    /// change rate estimate.
+    ///
+    /// This is the recommended replacement for `put()` in hot paths:
+    /// `put()` always counts as a change; `put_if_changed()` differentiates
+    /// structural vs. cosmetic changes for accurate TTL adaptation.
+    pub fn put_if_changed(&mut self, agent_id: &str, card: AgentCard, etag: Option<String>) -> bool {
+        let new_fp = card.structural_fingerprint();
+
+        if let Some(existing) = self.entries.get_mut(agent_id) {
+            let old_fp = existing.card.structural_fingerprint();
+            if old_fp == new_fp {
+                // Cosmetic change only — update card in-place, treat as not-modified.
+                existing.card = card;
+                existing.fetched_at = std::time::Instant::now();
+                existing.etag = etag;
+                existing.unchanged_count += 1;
+                existing.refresh_count += 1;
+
+                // Bayesian update: decrease change rate (treated as unchanged).
+                let observed_rate = 1.0 - (existing.unchanged_count as f64 / existing.refresh_count as f64);
+                let alpha = 0.1;
+                existing.estimated_change_rate =
+                    existing.estimated_change_rate * (1.0 - alpha) + observed_rate * alpha;
+                existing.ttl = compute_ttl_with_config(&self.config, existing.estimated_change_rate);
+
+                return false; // No structural change.
+            }
+        }
+
+        // Structural change — full put + mark as changed.
+        self.put(agent_id, card, etag);
+        self.record_changed(agent_id);
+        true
+    }
+
     /// Invalidate a specific agent's cache entry.
     pub fn invalidate(&mut self, agent_id: &str) -> Option<CachedAgentCard> {
         self.entries.remove(agent_id)
@@ -285,12 +385,16 @@ impl DiscoveryCache {
         self.entries.is_empty()
     }
 
-    /// Evict the oldest entry.
+    /// Evict the least recently used entry.
+    ///
+    /// O(n) scan over entries — acceptable because eviction only fires when the
+    /// cache is full, and `max_entries` is typically small (hundreds).
     fn evict_oldest(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
         if let Some(oldest_id) = self
             .entries
             .iter()
-            .min_by_key(|(_, e)| e.fetched_at)
+            .min_by_key(|(_, e)| e.lru_clock.load(Relaxed))
             .map(|(id, _)| id.clone())
         {
             self.entries.remove(&oldest_id);
@@ -393,15 +497,16 @@ mod tests {
 
     #[test]
     fn cache_stats_tracking() {
+        use std::sync::atomic::Ordering::Relaxed;
         let mut cache = DiscoveryCache::new(DiscoveryCacheConfig::default());
         cache.put("a", make_card("a"), None);
 
         cache.get("a"); // hit
         cache.get("b"); // miss
 
-        assert_eq!(cache.stats.cache_hits, 1);
-        assert_eq!(cache.stats.cache_misses, 1);
-        assert_eq!(cache.stats.total_lookups, 2);
+        assert_eq!(cache.stats.cache_hits.load(Relaxed), 1);
+        assert_eq!(cache.stats.cache_misses.load(Relaxed), 1);
+        assert_eq!(cache.stats.total_lookups.load(Relaxed), 2);
     }
 
     #[test]
@@ -428,5 +533,101 @@ mod tests {
 
         cache.invalidate("a");
         assert!(cache.get("a").is_none());
+    }
+
+    #[test]
+    fn structural_fingerprint_stable() {
+        use crate::capability::CapabilityId;
+
+        let card1 = AgentCard::new("a", "Agent A", "http://a.local")
+            .with_capability(CapabilityId::TextGeneration)
+            .with_capability(CapabilityId::WebSearch);
+
+        let card2 = AgentCard::new("a", "Agent A", "http://a.local")
+            .with_capability(CapabilityId::TextGeneration)
+            .with_capability(CapabilityId::WebSearch);
+
+        assert_eq!(card1.structural_fingerprint(), card2.structural_fingerprint());
+    }
+
+    #[test]
+    fn structural_fingerprint_ignores_metadata() {
+        use crate::capability::CapabilityId;
+
+        let mut card1 = AgentCard::new("a", "Agent A", "http://a.local")
+            .with_capability(CapabilityId::TextGeneration);
+        card1.description = "Version 1".into();
+        card1.metadata = serde_json::json!({"env": "dev"});
+
+        let mut card2 = AgentCard::new("a", "Agent A", "http://a.local")
+            .with_capability(CapabilityId::TextGeneration);
+        card2.description = "Version 2 — totally different description".into();
+        card2.metadata = serde_json::json!({"env": "prod", "region": "us-east-1"});
+
+        assert_eq!(
+            card1.structural_fingerprint(),
+            card2.structural_fingerprint(),
+            "metadata-only changes should not alter structural fingerprint"
+        );
+    }
+
+    #[test]
+    fn structural_fingerprint_changes_with_capabilities() {
+        use crate::capability::CapabilityId;
+
+        let card1 = AgentCard::new("a", "A", "http://a.local")
+            .with_capability(CapabilityId::TextGeneration);
+
+        let card2 = AgentCard::new("a", "A", "http://a.local")
+            .with_capability(CapabilityId::TextGeneration)
+            .with_capability(CapabilityId::WebSearch);
+
+        assert_ne!(
+            card1.structural_fingerprint(),
+            card2.structural_fingerprint(),
+            "adding a capability must change the fingerprint"
+        );
+    }
+
+    #[test]
+    fn put_if_changed_cosmetic_update() {
+        use crate::capability::CapabilityId;
+
+        let mut cache = DiscoveryCache::new(DiscoveryCacheConfig::default());
+
+        let card1 = AgentCard::new("a", "Agent A", "http://a.local")
+            .with_capability(CapabilityId::TextGeneration);
+        cache.put("a", card1, None);
+
+        // Update only description — cosmetic change.
+        let mut card2 = AgentCard::new("a", "Agent A", "http://a.local")
+            .with_capability(CapabilityId::TextGeneration);
+        card2.description = "Updated description".into();
+
+        let changed = cache.put_if_changed("a", card2, None);
+        assert!(!changed, "cosmetic change should return false");
+
+        // Description was updated in cache.
+        let cached = cache.get("a").unwrap();
+        assert_eq!(cached.description, "Updated description");
+    }
+
+    #[test]
+    fn put_if_changed_structural_update() {
+        use crate::capability::CapabilityId;
+
+        let mut cache = DiscoveryCache::new(DiscoveryCacheConfig::default());
+
+        let card1 = AgentCard::new("a", "Agent A", "http://a.local")
+            .with_capability(CapabilityId::TextGeneration);
+        cache.put("a", card1, None);
+
+        // Add a new capability — structural change.
+        let card2 = AgentCard::new("a", "Agent A", "http://a.local")
+            .with_capability(CapabilityId::TextGeneration)
+            .with_capability(CapabilityId::WebSearch);
+
+        let changed = cache.put_if_changed("a", card2, None);
+        assert!(changed, "structural change should return true");
     }
 }

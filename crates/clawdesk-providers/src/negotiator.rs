@@ -205,10 +205,19 @@ pub enum FallbackState {
 ///    ↑                    │                      │
 ///    └────(recover)───────┴──────(recover)────────┘
 /// ```
+/// FSM state is guarded by a `std::sync::Mutex` so concurrent
+/// requests cannot race on `record_success()` / `record_failure()`.
+/// The Mutex protects the inner mutable fields; the chain (immutable after
+/// construction) is stored outside.
 pub struct FallbackFsm {
-    state: FallbackState,
+    inner: std::sync::Mutex<FallbackFsmInner>,
     /// Ordered list of fallback provider names (primary first).
     chain: Vec<String>,
+}
+
+/// Interior mutable state for the FSM, protected by Mutex.
+struct FallbackFsmInner {
+    state: FallbackState,
     /// Number of consecutive failures for current provider.
     consecutive_failures: usize,
     /// Maximum failures before switching to next fallback.
@@ -225,35 +234,38 @@ impl FallbackFsm {
         let mut chain = vec![primary.to_string()];
         chain.extend(fallbacks.iter().map(|s| s.to_string()));
         Self {
-            state: FallbackState::Primary,
+            inner: std::sync::Mutex::new(FallbackFsmInner {
+                state: FallbackState::Primary,
+                consecutive_failures: 0,
+                max_failures: 3,
+                last_failure: None,
+                cooldown: std::time::Duration::from_secs(60),
+            }),
             chain,
-            consecutive_failures: 0,
-            max_failures: 3,
-            last_failure: None,
-            cooldown: std::time::Duration::from_secs(60),
         }
     }
 
     /// Set the maximum consecutive failures before fallback.
-    pub fn with_max_failures(mut self, n: usize) -> Self {
-        self.max_failures = n;
+    pub fn with_max_failures(self, n: usize) -> Self {
+        self.inner.lock().unwrap().max_failures = n;
         self
     }
 
     /// Set the recovery cool-down period.
-    pub fn with_cooldown(mut self, d: std::time::Duration) -> Self {
-        self.cooldown = d;
+    pub fn with_cooldown(self, d: std::time::Duration) -> Self {
+        self.inner.lock().unwrap().cooldown = d;
         self
     }
 
     /// Get the current state.
     pub fn state(&self) -> FallbackState {
-        self.state
+        self.inner.lock().unwrap().state
     }
 
     /// Get the name of the currently selected provider.
     pub fn current_provider(&self) -> Option<&str> {
-        match self.state {
+        let inner = self.inner.lock().unwrap();
+        match inner.state {
             FallbackState::Primary | FallbackState::Recovered => {
                 self.chain.first().map(|s| s.as_str())
             }
@@ -265,77 +277,78 @@ impl FallbackFsm {
     }
 
     /// Record a successful request — resets failure count.
-    pub fn record_success(&mut self) {
-        self.consecutive_failures = 0;
-        // If we're in a fallback state and the primary has cooled down, try recovery.
-        if self.state != FallbackState::Primary {
-            if let Some(last) = self.last_failure {
-                if last.elapsed() >= self.cooldown {
-                    self.state = FallbackState::Recovered;
-                    self.last_failure = None;
+    /// Atomic via Mutex — concurrent calls cannot interleave.
+    pub fn record_success(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.consecutive_failures = 0;
+        if inner.state != FallbackState::Primary {
+            if let Some(last) = inner.last_failure {
+                if last.elapsed() >= inner.cooldown {
+                    inner.state = FallbackState::Recovered;
+                    inner.last_failure = None;
                 }
             }
         }
     }
 
     /// Record a request failure — may trigger state transition.
-    pub fn record_failure(&mut self) {
-        self.consecutive_failures += 1;
-        self.last_failure = Some(std::time::Instant::now());
+    /// Atomic via Mutex — concurrent calls see consistent state.
+    pub fn record_failure(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.consecutive_failures += 1;
+        inner.last_failure = Some(std::time::Instant::now());
 
-        if self.consecutive_failures >= self.max_failures {
-            self.consecutive_failures = 0;
-            self.advance_fallback();
+        if inner.consecutive_failures >= inner.max_failures {
+            inner.consecutive_failures = 0;
+            Self::advance_fallback_inner(&mut inner, &self.chain);
         }
     }
 
-    /// Advance to the next fallback provider.
-    fn advance_fallback(&mut self) {
-        match self.state {
+    /// Advance to the next fallback provider (inner helper).
+    fn advance_fallback_inner(inner: &mut FallbackFsmInner, chain: &[String]) {
+        match inner.state {
             FallbackState::Primary => {
-                if self.chain.len() > 1 {
-                    self.state = FallbackState::Falling { attempt: 0 };
+                if chain.len() > 1 {
+                    inner.state = FallbackState::Falling { attempt: 0 };
                     info!(
-                        next = %self.chain.get(1).unwrap_or(&String::new()),
+                        next = %chain.get(1).unwrap_or(&String::new()),
                         "fallback: switching from primary"
                     );
                 } else {
-                    self.state = FallbackState::Exhausted;
+                    inner.state = FallbackState::Exhausted;
                     warn!("fallback: no fallback providers configured");
                 }
             }
             FallbackState::Falling { attempt } => {
                 let next = attempt + 1;
-                if next + 1 < self.chain.len() {
-                    self.state = FallbackState::Falling { attempt: next };
+                if next + 1 < chain.len() {
+                    inner.state = FallbackState::Falling { attempt: next };
                     info!(
-                        next = %self.chain.get(next + 1).unwrap_or(&String::new()),
+                        next = %chain.get(next + 1).unwrap_or(&String::new()),
                         "fallback: advancing to next"
                     );
                 } else {
-                    self.state = FallbackState::Exhausted;
+                    inner.state = FallbackState::Exhausted;
                     warn!("fallback: all providers exhausted");
                 }
             }
             FallbackState::Recovered => {
-                // Recovered provider failed again — go to fallback
-                if self.chain.len() > 1 {
-                    self.state = FallbackState::Falling { attempt: 0 };
+                if chain.len() > 1 {
+                    inner.state = FallbackState::Falling { attempt: 0 };
                 } else {
-                    self.state = FallbackState::Exhausted;
+                    inner.state = FallbackState::Exhausted;
                 }
             }
-            FallbackState::Exhausted => {
-                // Already exhausted — nothing to do
-            }
+            FallbackState::Exhausted => {}
         }
     }
 
     /// Force recovery to primary (e.g., after a config change).
-    pub fn reset(&mut self) {
-        self.state = FallbackState::Primary;
-        self.consecutive_failures = 0;
-        self.last_failure = None;
+    pub fn reset(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.state = FallbackState::Primary;
+        inner.consecutive_failures = 0;
+        inner.last_failure = None;
     }
 }
 

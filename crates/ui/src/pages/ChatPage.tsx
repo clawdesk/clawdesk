@@ -86,7 +86,7 @@ export interface ChatPageProps {
 // ── Agentic Components ────────────────────────────────────────
 
 function ThinkingBlock({ text, duration }: { text: string; duration?: number }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   return (
     <div className={`agentic-thought ${expanded ? "expanded" : ""}`}>
       <button className="thought-header" onClick={() => setExpanded(!expanded)}>
@@ -496,6 +496,16 @@ export function ChatPage({
     api.listSessions().then((s) => {
       if (gen === sessionsGenRef.current) setSessions(s);
     }).catch(() => { });
+
+    // Diagnostic: dump SochDB session state to DevTools console on mount
+    api.debugSessionStorage().then((dump) => {
+      console.log("[DIAGNOSTIC] SochDB session storage dump:", JSON.stringify(dump, null, 2));
+      console.log("[DIAGNOSTIC] Total sessions in SochDB:", dump.length);
+      dump.forEach((s, i) => {
+        console.log(`  [${i}] chat_id=${s.chat_id} agent=${s.agent_id} title="${s.title}" created=${s.created_at} updated=${s.updated_at} msgs=${s.message_count} in_cache=${s.in_lru_cache}`);
+      });
+    }).catch((e) => console.warn("[DIAGNOSTIC] debug_session_storage failed:", e));
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -619,8 +629,13 @@ export function ChatPage({
         }
       }
       const agentChats = allSessions.filter((s) => s.agent_id === selectedAgentId);
+      console.log("[EFFECT:selectedAgentId] agentChats for", selectedAgentId, ":", agentChats.length, "total sessions:", allSessions.length);
       if (agentChats.length > 0) {
+        agentChats.forEach((s, i) => {
+          console.log(`  [${i}] chat_id=${s.chat_id} title="${s.title}" created=${s.created_at} last_activity=${s.last_activity} msgs=${s.message_count}`);
+        });
         const latest = agentChats[0];
+        console.log("[EFFECT:selectedAgentId] selecting latest chat:", latest.chat_id, latest.title);
         setActiveChatId(latest.chat_id);
       } else {
         setActiveChatId(null);
@@ -1063,10 +1078,12 @@ export function ChatPage({
             agent_id: agentId,
             title: response.chat_title || content.slice(0, 60),
             message_count: 2,
+            created_at: new Date().toISOString(),
             last_activity: new Date().toISOString(),
             pending_approvals: 0,
             routine_generated: false,
             has_proof_outputs: false,
+            first_message_preview: content.slice(0, 80) || null,
           };
           return [newSession, ...prev];
         });
@@ -1302,8 +1319,16 @@ export function ChatPage({
                           </button>
                         </div>
                         <div className="chat-thread-sidebar-item-meta">
-                          {s.message_count} msgs · {new Date(s.last_activity).toLocaleDateString([], { month: "short", day: "numeric" })}
+                          {s.message_count} msgs · started {new Date(s.created_at).toLocaleDateString([], { month: "short", day: "numeric" })}
+                          {s.created_at !== s.last_activity && (
+                            <> · last {new Date(s.last_activity).toLocaleDateString([], { month: "short", day: "numeric" })}</>
+                          )}
                         </div>
+                        {s.first_message_preview && (
+                          <div className="chat-thread-sidebar-item-preview" title={s.first_message_preview}>
+                            {s.first_message_preview}
+                          </div>
+                        )}
                       </div>
                     </div>
                   );

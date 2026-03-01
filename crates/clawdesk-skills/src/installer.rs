@@ -2,14 +2,14 @@
 //!
 //! ## Install Pipeline (P3)
 //!
-//! OpenClaw skills declare their binary dependencies via `install` specs in
+//! legacy skills declare their binary dependencies via `install` specs in
 //! SKILL.md frontmatter. This module provides the plumbing to:
 //! 1. Parse install specifications
 //! 2. Check if binaries are already installed
 //! 3. Generate install commands for missing deps
 //! 4. Execute installations with sandboxing
 //!
-//! ## Install spec kinds (from OpenClaw)
+//! ## Install spec kinds 
 //!
 //! | Kind     | Count | Example                                    |
 //! |----------|-------|--------------------------------------------|
@@ -200,9 +200,9 @@ impl InstallSpec {
     }
 }
 
-/// Parse install specs from OpenClaw frontmatter install section.
+/// Parse install specs frontmatter install section.
 ///
-/// OpenClaw format (from SKILL.md):
+/// legacy format (from SKILL.md):
 /// ```yaml
 /// install:
 ///   - kind: brew

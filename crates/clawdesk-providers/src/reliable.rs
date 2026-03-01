@@ -74,22 +74,25 @@ impl ReliableConfig {
 
 /// Classify whether an error is retryable.
 fn is_retryable(err: &ProviderError) -> bool {
-    matches!(err, ProviderError::RateLimit { .. } | ProviderError::Timeout { .. })
-        || matches!(err, ProviderError::ServerError { status, .. } if *status >= 500)
+    use clawdesk_types::error::ProviderErrorKind;
+    matches!(err.kind, ProviderErrorKind::RateLimit { .. } | ProviderErrorKind::Timeout { .. })
+        || matches!(err.kind, ProviderErrorKind::ServerError { status } if status >= 500)
 }
 
 /// Classify whether an error should abort ALL retries and fallbacks.
 fn is_abort_all(err: &ProviderError) -> bool {
-    matches!(err, ProviderError::ContextLengthExceeded { .. })
+    use clawdesk_types::error::ProviderErrorKind;
+    matches!(err.kind, ProviderErrorKind::ContextLengthExceeded { .. })
 }
 
 /// Classify whether an error should skip to the next provider.
 fn is_skip_provider(err: &ProviderError) -> bool {
+    use clawdesk_types::error::ProviderErrorKind;
     matches!(
-        err,
-        ProviderError::AuthFailure { .. }
-            | ProviderError::Billing { .. }
-            | ProviderError::ModelNotFound { .. }
+        err.kind,
+        ProviderErrorKind::AuthFailure { .. }
+            | ProviderErrorKind::Billing
+            | ProviderErrorKind::ModelNotFound { .. }
     )
 }
 
@@ -180,13 +183,17 @@ impl ReliableProvider {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| ProviderError::ServerError {
-            provider: provider.name().to_string(),
-            status: 500,
-        }))
+        Err(last_err.unwrap_or_else(|| ProviderError::server_error(provider.name().to_string(), 500)))
     }
 
     /// Try a streaming request against a single provider with retries.
+    ///
+    /// Each retry uses an isolated per-attempt channel so partial
+    /// chunks from a failed attempt are never forwarded to `chunk_tx`. A spawned
+    /// forwarding task streams chunks in real-time. If the attempt fails after
+    /// chunks have already been forwarded, we skip further retries (to avoid
+    /// duplicate content). Retries only proceed when zero chunks have reached
+    /// the caller.
     async fn try_stream_with_retries(
         &self,
         provider: &dyn Provider,
@@ -196,10 +203,46 @@ impl ReliableProvider {
         let mut last_err = None;
 
         for attempt in 0..=self.config.max_retries {
-            match provider.stream(request, chunk_tx.clone()).await {
-                Ok(()) => return Ok(()),
+            // Create a per-attempt channel to isolate partial chunks.
+            let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::channel::<StreamChunk>(64);
+            let forwarded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let forwarded_flag = forwarded.clone();
+            let outer_tx = chunk_tx.clone();
+
+            // Forward chunks from attempt channel → outer channel in real time.
+            let fwd_handle = tokio::spawn(async move {
+                while let Some(chunk) = attempt_rx.recv().await {
+                    forwarded_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if outer_tx.send(chunk).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            match provider.stream(request, attempt_tx).await {
+                Ok(()) => {
+                    // stream() completed — all chunks sent to attempt_tx.
+                    // attempt_tx is dropped, so fwd_handle will drain and finish.
+                    let _ = fwd_handle.await;
+                    return Ok(());
+                }
                 Err(err) => {
+                    // Abort forwarding to minimize partial-chunk leakage.
+                    fwd_handle.abort();
+
                     if is_abort_all(&err) {
+                        return Err(err);
+                    }
+
+                    // If any chunks were already forwarded, do NOT retry —
+                    // a retry would send duplicate content to the caller.
+                    if forwarded.load(std::sync::atomic::Ordering::Relaxed) {
+                        warn!(
+                            provider = %provider.name(),
+                            attempt = attempt + 1,
+                            error = %err,
+                            "stream failed after partial delivery, skipping retry to avoid duplicates"
+                        );
                         return Err(err);
                     }
 
@@ -214,7 +257,7 @@ impl ReliableProvider {
                         attempt = attempt + 1,
                         backoff_ms = %backoff.as_millis(),
                         error = %err,
-                        "retrying stream after transient error"
+                        "retrying stream after transient error (no chunks delivered yet)"
                     );
                     tokio::time::sleep(backoff).await;
                     last_err = Some(err);
@@ -222,10 +265,7 @@ impl ReliableProvider {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| ProviderError::ServerError {
-            provider: provider.name().to_string(),
-            status: 500,
-        }))
+        Err(last_err.unwrap_or_else(|| ProviderError::server_error(provider.name().to_string(), 500)))
     }
 
     /// Get the model chain: primary model + fallbacks.
@@ -264,8 +304,17 @@ impl Provider for ReliableProvider {
 
         // Outer loop: model fallback chain
         for model in &models {
-            let mut model_request = request.clone();
-            model_request.model = model.to_string();
+            // Skip O(N) clone when model matches the request.
+            let model_request_owned;
+            let model_request: &ProviderRequest = if *model == request.model.as_str() {
+                request
+            } else {
+                model_request_owned = ProviderRequest {
+                    model: model.to_string(),
+                    ..request.clone()
+                };
+                &model_request_owned
+            };
 
             // Middle loop: provider chain
             for (name, provider) in &self.providers {
@@ -275,7 +324,7 @@ impl Provider for ReliableProvider {
                     "attempting completion"
                 );
 
-                match self.try_with_retries(provider.as_ref(), &model_request).await {
+                match self.try_with_retries(provider.as_ref(), model_request).await {
                     Ok(resp) => return Ok(resp),
                     Err(err) => {
                         if is_abort_all(&err) {
@@ -296,10 +345,7 @@ impl Provider for ReliableProvider {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| ProviderError::ServerError {
-            provider: "reliable".into(),
-            status: 503,
-        }))
+        Err(last_err.unwrap_or_else(|| ProviderError::server_error("reliable", 503)))
     }
 
     async fn stream(
@@ -311,8 +357,17 @@ impl Provider for ReliableProvider {
         let mut last_err = None;
 
         for model in &models {
-            let mut model_request = request.clone();
-            model_request.model = model.to_string();
+            // Skip O(N) clone when model matches the request.
+            let model_request_owned;
+            let model_request: &ProviderRequest = if *model == request.model.as_str() {
+                request
+            } else {
+                model_request_owned = ProviderRequest {
+                    model: model.to_string(),
+                    ..request.clone()
+                };
+                &model_request_owned
+            };
 
             for (name, provider) in &self.providers {
                 debug!(
@@ -324,7 +379,7 @@ impl Provider for ReliableProvider {
                 match self
                     .try_stream_with_retries(
                         provider.as_ref(),
-                        &model_request,
+                        model_request,
                         chunk_tx.clone(),
                     )
                     .await
@@ -340,10 +395,7 @@ impl Provider for ReliableProvider {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| ProviderError::ServerError {
-            provider: "reliable".into(),
-            status: 503,
-        }))
+        Err(last_err.unwrap_or_else(|| ProviderError::server_error("reliable", 503)))
     }
 
     async fn health_check(&self) -> Result<(), ProviderError> {
@@ -362,10 +414,7 @@ impl Provider for ReliableProvider {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| ProviderError::ServerError {
-            provider: "reliable".into(),
-            status: 503,
-        }))
+        Err(last_err.unwrap_or_else(|| ProviderError::server_error("reliable", 503)))
     }
 }
 
@@ -379,35 +428,17 @@ mod tests {
 
     #[test]
     fn test_error_classification() {
-        assert!(is_retryable(&ProviderError::RateLimit {
-            provider: "test".into(),
-            retry_after: None,
-        }));
+        assert!(is_retryable(&ProviderError::rate_limit("test", None)));
 
-        assert!(is_retryable(&ProviderError::Timeout {
-            provider: "test".into(),
-            model: "m".into(),
-            after: Duration::from_secs(1),
-        }));
+        assert!(is_retryable(&ProviderError::timeout("test", "m", Duration::from_secs(1))));
 
-        assert!(is_retryable(&ProviderError::ServerError {
-            provider: "test".into(),
-            status: 500,
-        }));
+        assert!(is_retryable(&ProviderError::server_error("test", 500)));
 
-        assert!(!is_retryable(&ProviderError::AuthFailure {
-            provider: "test".into(),
-            profile_id: String::new(),
-        }));
+        assert!(!is_retryable(&ProviderError::auth_failure("test", String::new())));
 
-        assert!(is_abort_all(&ProviderError::ContextLengthExceeded {
-            model: "m".into(),
-            detail: "too long".into(),
-        }));
+        assert!(is_abort_all(&ProviderError::context_length_exceeded("test", "m", "too long")));
 
-        assert!(is_skip_provider(&ProviderError::Billing {
-            provider: "test".into(),
-        }));
+        assert!(is_skip_provider(&ProviderError::billing("test")));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! T7 FIX: Per-session serialization with lane-based concurrency control.
+//! Per-session serialization with lane-based concurrency control.
 //!
 //! Ensures only one agent run per session at a time. Additional requests
 //! queue behind the active run. A watchdog timer detects hung sessions
@@ -174,16 +174,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_serialization() {
-        let mgr = SessionLaneManager::new();
+        let mgr = Arc::new(SessionLaneManager::new());
         let counter = Arc::new(AtomicU32::new(0));
 
         // Two concurrent tasks for the same session should serialize
-        let mgr1 = &mgr;
         let counter1 = counter.clone();
         let counter2 = counter.clone();
 
         let t1 = tokio::spawn({
-            let mgr = unsafe { &*(mgr1 as *const SessionLaneManager) };
+            let mgr = Arc::clone(&mgr);
             async move {
                 let _guard = mgr.acquire("session-1").await.unwrap();
                 assert_eq!(counter1.fetch_add(1, Ordering::SeqCst), 0);
@@ -196,7 +195,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         let t2 = tokio::spawn({
-            let mgr = unsafe { &*(mgr1 as *const SessionLaneManager) };
+            let mgr = Arc::clone(&mgr);
             async move {
                 let _guard = mgr.acquire("session-1").await.unwrap();
                 assert_eq!(counter2.fetch_add(1, Ordering::SeqCst), 1); // t1 already done

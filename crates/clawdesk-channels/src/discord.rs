@@ -31,7 +31,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -65,6 +65,16 @@ pub struct DiscordChannel {
     listen_to_bots: bool,
     /// When true, only respond to messages that @mention the bot.
     mention_only: bool,
+    /// Explicit default channel ID for cross-channel sends.
+    /// If set, `default_origin()` uses this instead of requiring an inbound message first.
+    default_channel_id: Option<u64>,
+    /// Auto-discovered channel ID from the first inbound message.
+    /// Populated lazily when no `default_channel_id` is configured.
+    /// Used by `default_origin()` as fallback — enables cross-channel sends
+    /// once any Discord message has been received.
+    discovered_channel_id: AtomicU64,
+    /// Auto-discovered guild ID from the first inbound message.
+    discovered_guild_id: AtomicU64,
     /// Shutdown flag.
     running: AtomicBool,
     shutdown: Notify,
@@ -80,7 +90,11 @@ impl DiscordChannel {
         allowed_users: Vec<String>,
         listen_to_bots: bool,
         mention_only: bool,
+        default_channel_id: Option<u64>,
     ) -> Self {
+        if let Some(ch_id) = default_channel_id {
+            info!(default_channel_id = ch_id, "Discord: explicit default channel configured for cross-channel sends");
+        }
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -92,6 +106,9 @@ impl DiscordChannel {
             allowed_users,
             listen_to_bots,
             mention_only,
+            default_channel_id,
+            discovered_channel_id: AtomicU64::new(0),
+            discovered_guild_id: AtomicU64::new(0),
             running: AtomicBool::new(false),
             shutdown: Notify::new(),
             typing_handles: Mutex::new(HashMap::new()),
@@ -206,6 +223,7 @@ impl DiscordChannel {
             body_for_agent: None,
             sender,
             media: vec![],
+            artifact_refs: vec![],
             reply_context: None,
             origin,
             timestamp: chrono::Utc::now(),
@@ -549,6 +567,23 @@ impl DiscordChannel {
                         });
                     }
 
+                    // Auto-discover channel/guild from first inbound message
+                    // so default_origin() works for cross-channel sends.
+                    if let clawdesk_types::message::MessageOrigin::Discord {
+                        guild_id, channel_id, ..
+                    } = &normalized.origin {
+                        let prev = self.discovered_channel_id.load(Ordering::Relaxed);
+                        if prev == 0 {
+                            self.discovered_channel_id.store(*channel_id, Ordering::Relaxed);
+                            self.discovered_guild_id.store(*guild_id, Ordering::Relaxed);
+                            info!(
+                                channel_id = channel_id,
+                                guild_id = guild_id,
+                                "Discord: auto-discovered default channel from first inbound message"
+                            );
+                        }
+                    }
+
                     // Dispatch to message sink
                     sink.on_message(normalized).await;
                 }
@@ -617,10 +652,11 @@ impl Channel for DiscordChannel {
             self.allowed_users.clone(),
             self.listen_to_bots,
             self.mention_only,
+            self.default_channel_id,
         );
         gw_channel.running.store(true, Ordering::Relaxed);
 
-        // Supervised listener with exponential backoff (modeled after zeroclaw).
+        // Supervised listener with exponential backoff.
         // Always reconnects unless `running` is set to false via stop().
         // Backoff: 2s → 5s → 10s → 20s → 40s → 80s → 120s cap.
         tokio::spawn(async move {
@@ -763,6 +799,33 @@ impl Channel for DiscordChannel {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn default_origin(&self) -> Option<clawdesk_types::message::MessageOrigin> {
+        // Priority: explicit default_channel_id config → auto-discovered channel_id
+        let channel_id = self.default_channel_id
+            .or_else(|| {
+                let discovered = self.discovered_channel_id.load(Ordering::Relaxed);
+                if discovered != 0 { Some(discovered) } else { None }
+            })?;
+
+        let guild_id = self.allowed_guild_ids.first().copied()
+            .unwrap_or_else(|| self.discovered_guild_id.load(Ordering::Relaxed));
+
+        info!(
+            channel_id = channel_id,
+            guild_id = guild_id,
+            source = if self.default_channel_id.is_some() { "config" } else { "discovered" },
+            "Discord: providing default_origin for cross-channel send"
+        );
+
+        Some(clawdesk_types::message::MessageOrigin::Discord {
+            guild_id,
+            channel_id,
+            message_id: 0,
+            is_dm: false,
+            thread_id: None,
+        })
     }
 }
 
@@ -1153,6 +1216,7 @@ mod tests {
             vec!["*".into()],
             false,
             false,
+            None,
         )
     }
 
@@ -1190,6 +1254,7 @@ mod tests {
             vec![],
             false,
             false,
+            None,
         );
         assert!(!ch.is_user_allowed("12345"));
     }
@@ -1210,6 +1275,7 @@ mod tests {
             vec!["111".into(), "222".into()],
             false,
             false,
+            None,
         );
         assert!(ch.is_user_allowed("111"));
         assert!(ch.is_user_allowed("222"));
@@ -1231,6 +1297,7 @@ mod tests {
             vec!["*".into()],
             false,
             false,
+            None,
         );
         assert!(ch.is_allowed_guild(100));
         assert!(ch.is_allowed_guild(200));

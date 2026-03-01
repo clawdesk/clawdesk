@@ -109,6 +109,8 @@ export interface DesktopAgent {
   token_budget: number;
   tokens_used: number;
   source: string;
+  /** Channels this agent is assigned to (e.g. ["telegram","discord"]). Empty = any/all. */
+  channels?: string[];
 }
 
 export interface CreateAgentRequest {
@@ -119,6 +121,7 @@ export interface CreateAgentRequest {
   skills: string[];
   model: string;
   source?: string;
+  channels?: string[];
 }
 
 export interface ImportResult {
@@ -177,11 +180,13 @@ export interface SessionSummary {
   chat_id: string;
   agent_id: string;
   title: string;
+  created_at: string;
   last_activity: string;
   message_count: number;
   pending_approvals: number;
   routine_generated: boolean;
   has_proof_outputs: boolean;
+  first_message_preview: string | null;
 }
 
 export interface SkillDescriptor {
@@ -1037,3 +1042,195 @@ export type ViewId =
   | "flows"
   | "chat"
   | "monitor";
+
+// ══════════════════════════════════════════════════════════════
+// Sandbox (commands_sandbox.rs)
+// ══════════════════════════════════════════════════════════════
+
+export interface SandboxStatusInfo {
+  available: boolean;
+  max_isolation: string;
+  available_levels: string[];
+  default_limits: ResourceLimitsInfo;
+}
+
+export interface ResourceLimitsInfo {
+  cpu_time_secs: number;
+  wall_time_secs: number;
+  memory_bytes: number;
+  max_fds: number;
+  max_output_bytes: number;
+  max_processes: number;
+}
+
+export interface SandboxExecResult {
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+  duration_ms: number;
+  resource_usage: SandboxResourceUsage;
+}
+
+export interface SandboxResourceUsage {
+  cpu_time_ms: number;
+  wall_time_ms: number;
+  peak_memory_bytes: number;
+  output_bytes: number;
+}
+
+export interface SandboxBackendInfo {
+  name: string;
+  isolation_level: string;
+  available: boolean;
+}
+
+// ══════════════════════════════════════════════════════════════
+// MCP — Model Context Protocol (commands_mcp.rs)
+// ══════════════════════════════════════════════════════════════
+
+export interface McpServerInfo {
+  name: string;
+  transport: string;
+  connected: boolean;
+  tool_count: number;
+}
+
+export interface McpToolInfo {
+  name: string;
+  description: string;
+  input_schema: any;
+  server: string;
+}
+
+export interface McpToolCallResult {
+  content: McpContentItem[];
+  is_error: boolean;
+}
+
+export interface McpContentItem {
+  content_type: string;
+  text?: string;
+  data?: string;
+  mime_type?: string;
+}
+
+export interface McpBundledTemplate {
+  name: string;
+  category: string;
+  description: string;
+}
+
+export interface McpConnectRequest {
+  name: string;
+  transport: string;
+  command?: string;
+  args?: string[];
+  url?: string;
+  env?: Record<string, string>;
+}
+
+// ══════════════════════════════════════════════════════════════
+// Extensions (commands_extensions.rs)
+// ══════════════════════════════════════════════════════════════
+
+export interface IntegrationInfo {
+  name: string;
+  description: string;
+  category: string;
+  icon: string;
+  enabled: boolean;
+  credentials_required: CredentialRequirementInfo[];
+  has_oauth: boolean;
+  health_check_url?: string;
+}
+
+export interface CredentialRequirementInfo {
+  name: string;
+  description: string;
+  env_var?: string;
+  required: boolean;
+}
+
+export interface IntegrationCategoryInfo {
+  name: string;
+  count: number;
+}
+
+export interface VaultStatusInfo {
+  exists: boolean;
+  unlocked: boolean;
+  credential_count: number;
+}
+
+export interface HealthStatusInfo {
+  name: string;
+  state: string;
+  last_check?: string;
+  last_success?: string;
+  consecutive_failures: number;
+  latency_ms?: number;
+}
+
+export interface OAuthFlowInfo {
+  auth_url: string;
+  state: string;
+}
+
+export interface IntegrationStatsInfo {
+  total: number;
+  enabled: number;
+  disabled: number;
+}
+
+// ══════════════════════════════════════════════════════════════
+// Migration (commands_migrate.rs)
+// ══════════════════════════════════════════════════════════════
+
+export interface MigrationSourceInfo {
+  name: string;
+  label: string;
+  supported_items: string[];
+}
+
+export interface MigrationReportInfo {
+  source: string;
+  source_path: string;
+  dry_run: boolean;
+  success: boolean;
+  summary: MigrationSummaryInfo;
+  items: MigrationItemInfo[];
+  warnings: string[];
+  errors: string[];
+}
+
+export interface MigrationSummaryInfo {
+  total: number;
+  migrated: number;
+  skipped: number;
+  failed: number;
+  dry_run: number;
+}
+
+export interface MigrationItemInfo {
+  category: string;
+  source_name: string;
+  dest_path: string;
+  status: string;
+  note: string;
+}
+
+export interface MigrationRequest {
+  source: string;
+  source_path: string;
+  dest_path?: string;
+  dry_run: boolean;
+  overwrite: boolean;
+  include?: string[];
+}
+
+export interface ValidateSourceResult {
+  valid: boolean;
+  source: string;
+  found_items: string[];
+  error?: string;
+}

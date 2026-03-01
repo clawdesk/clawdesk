@@ -385,7 +385,7 @@ pub trait AfterToolHook: Send + Sync {
 
 /// Hook runner — executes before/after hooks with timeout.
 ///
-/// **DEPRECATED (T1):** Use `clawdesk_plugin::hooks::HookManager` with
+/// **DEPRECATED:** Use `clawdesk_plugin::hooks::HookManager` with
 /// `Phase::AfterToolCall` instead. This struct is retained for backward
 /// compatibility but is no longer instantiated by the agent runner.
 /// The `HookManager` provides full chain-of-responsibility semantics

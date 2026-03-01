@@ -1,0 +1,5 @@
+# ClawDesk Memory Benchmark
+# MemoryAgentBench-style evaluation of ClawDesk's memory system via Rust FFI bridge
+
+numpy
+rouge-score

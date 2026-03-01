@@ -119,21 +119,35 @@ export function AutomationsPage({
     }
     try {
       const result = await api.runPipeline(pipelineId);
-      pushToast("Pipeline run completed. Check Logs for details.");
-      // Update execution overlay with results
+      // Build step-level status for the execution overlay
       if (result && result.steps) {
         const evMap = new Map<number, PipelineStepEvent>();
-        result.steps.forEach((s) => {
+        let failedLabels: string[] = [];
+        let skippedCount = 0;
+        result.steps.forEach((s: any) => {
+          const isSkipped = s.skipped === true;
+          const isFailed = !s.success && !isSkipped;
           evMap.set(s.step_index, {
             pipeline_id: pipelineId,
             step_index: s.step_index,
-            status: s.success ? "completed" : "failed",
+            status: isSkipped ? "completed" : s.success ? "completed" : "failed",
             timestamp: new Date().toISOString(),
-            output_preview: s.output_preview,
+            output_preview: s.output_preview ?? s.output,
             error: s.error,
           });
+          if (isFailed) failedLabels.push(s.label ?? `Step ${s.step_index}`);
+          if (isSkipped) skippedCount++;
         });
         setExecutionEvents(evMap);
+        if (failedLabels.length > 0) {
+          pushToast(`Pipeline finished — ${failedLabels.join(", ")} failed.`);
+        } else if (skippedCount > 0) {
+          pushToast(`Pipeline completed (${skippedCount} step${skippedCount > 1 ? "s" : ""} skipped by gate).`);
+        } else {
+          pushToast("Pipeline completed successfully.");
+        }
+      } else {
+        pushToast("Pipeline run completed.");
       }
     } catch {
       pushToast("Pipeline run failed.");

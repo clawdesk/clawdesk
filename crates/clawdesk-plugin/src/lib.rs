@@ -22,6 +22,6 @@ pub mod sdk;
 pub use host::{PluginFactory, PluginHandle, PluginHost, PluginInstance};
 pub use resolver::DependencyResolver;
 pub use sandbox::PluginSandbox;
-pub use hooks::{Hook, HookContext, HookManager, HookOverrides, HookResult, Phase};
+pub use hooks::{Hook, HookContext, HookManager, HookOverrides, HookResult, Phase, ProactiveMemoryHook};
 pub use registry::PluginRegistry;
 pub use sdk::{ClawDeskPlugin, PluginContext, PluginEvent, PluginManifest, PluginResponse, PluginSdkError};

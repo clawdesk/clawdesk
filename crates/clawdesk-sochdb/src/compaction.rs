@@ -1,5 +1,5 @@
 //! Cross-system conversation compaction — bridges ClawDesk's two-tier
-//! retention model with OpenClaw's single-tier session storage.
+//! retention model with the single-tier session storage.
 //!
 //! ## Compaction Port (P2)
 //!
@@ -7,7 +7,7 @@
 //! implements HOT_TIER_SIZE=200 compaction. This module adds:
 //!
 //! 1. **Compaction scheduling**: Policy-driven automatic compaction.
-//! 2. **Cross-system sync**: Export compacted summaries for OpenClaw consumption.
+//! 2. **Cross-system sync**: Export compacted summaries for legacy consumption.
 //! 3. **Compaction statistics**: Track compaction events for observability.
 //!
 //! ## Architecture
@@ -19,7 +19,7 @@
 //!                        ↓ (if count > threshold)
 //!              compact_session() → summary stored
 //!                        ↓
-//!              CompactionNotifier → emit event for OpenClaw sync
+//!              CompactionNotifier → emit event for legacy sync
 //! ```
 
 use chrono::{DateTime, Utc};
@@ -89,7 +89,7 @@ pub struct CompactionStats {
 
 /// Notification sink for compaction events (cross-system sync).
 pub trait CompactionNotifier: Send + Sync + 'static {
-    /// Called after a compaction completes — allows OpenClaw to receive
+    /// Called after a compaction completes — allows the legacy system to receive
     /// the summary for its own session state.
     fn on_compaction(&self, event: &CompactionEvent, summary: &str);
 }

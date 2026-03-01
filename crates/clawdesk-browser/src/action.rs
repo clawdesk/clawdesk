@@ -59,6 +59,21 @@ impl ScreenshotFormat {
     }
 }
 
+/// Element targeting strategy.
+///
+/// Index-based (preferred): Uses data-ci attribute stamped by DOM intelligence.
+/// Selector-based (fallback): CSS selector for backward compatibility.
+/// Coordinate-based (vision): For canvas/custom UI fallback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ElementTarget {
+    /// Element index from DOM intelligence observation (preferred).
+    Index(u32),
+    /// CSS selector (fallback for backward compatibility).
+    Selector(String),
+    /// Screen coordinates for vision-based interaction.
+    Coordinates { x: u32, y: u32 },
+}
+
 /// Scroll direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScrollDirection {
@@ -188,6 +203,244 @@ pub fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<BrowserAc
             Some(BrowserAction::EvalJs { expression })
         }
         _ => None,
+    }
+}
+
+// ─── Execution Bridge ────────────────────────────────────────────────────────
+
+/// Execute a `BrowserAction` against a live `CdpSession`.
+///
+/// Maps each high-level action variant to the appropriate CDP commands,
+/// measures elapsed time, and returns a structured `ActionResult`.
+pub async fn execute_action(
+    session: &crate::cdp::CdpSession,
+    action: BrowserAction,
+) -> ActionResult {
+    use std::time::Instant;
+
+    let start = Instant::now();
+
+    match action {
+        BrowserAction::Navigate { url } => {
+            let cmd = session.navigate(&url);
+            match session.send(cmd).await {
+                Ok(_) => ActionResult::ok(
+                    "navigate",
+                    ActionData::Url(url),
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("navigate", e),
+            }
+        }
+        BrowserAction::Click { selector } => {
+            let cmd = session.click(&selector);
+            match session.send(cmd).await {
+                Ok(_) => ActionResult::ok(
+                    "click",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("click", e),
+            }
+        }
+        BrowserAction::Type { selector, text } => {
+            let cmd = session.type_text(&selector, &text);
+            match session.send(cmd).await {
+                Ok(_) => ActionResult::ok(
+                    "type",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("type", e),
+            }
+        }
+        BrowserAction::Screenshot { format: _ } => match session.take_screenshot().await {
+            Ok(base64_data) => ActionResult::ok(
+                "screenshot",
+                ActionData::Text(base64_data),
+                start.elapsed().as_millis() as u64,
+            ),
+            Err(e) => ActionResult::err("screenshot", e),
+        },
+        BrowserAction::ExtractText { selector } => {
+            let js = match selector {
+                Some(sel) => format!(
+                    "document.querySelector('{}')?.innerText || ''",
+                    sel.replace('\'', "\\'")
+                ),
+                None => "document.body?.innerText || ''".to_string(),
+            };
+            match session.eval(&js).await {
+                Ok(val) => {
+                    let text = val.as_str().unwrap_or("").to_string();
+                    ActionResult::ok(
+                        "extract_text",
+                        ActionData::Text(text),
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Err(e) => ActionResult::err("extract_text", e),
+            }
+        }
+        BrowserAction::GetTitle => {
+            let cmd = session.get_title();
+            match session.send(cmd).await {
+                Ok(resp) => {
+                    let title = resp
+                        .result
+                        .as_ref()
+                        .and_then(|r| r.get("result"))
+                        .and_then(|r| r.get("value"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    ActionResult::ok(
+                        "get_title",
+                        ActionData::Text(title),
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Err(e) => ActionResult::err("get_title", e),
+            }
+        }
+        BrowserAction::GetUrl => {
+            let cmd = session.get_url();
+            match session.send(cmd).await {
+                Ok(resp) => {
+                    let url = resp
+                        .result
+                        .as_ref()
+                        .and_then(|r| r.get("result"))
+                        .and_then(|r| r.get("value"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    ActionResult::ok(
+                        "get_url",
+                        ActionData::Url(url),
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Err(e) => ActionResult::err("get_url", e),
+            }
+        }
+        BrowserAction::WaitForSelector {
+            selector,
+            timeout_ms,
+        } => {
+            let js = format!(
+                r#"new Promise((resolve, reject) => {{
+                    const start = Date.now();
+                    const check = () => {{
+                        if (document.querySelector('{}')) return resolve(true);
+                        if (Date.now() - start > {}) return reject('timeout');
+                        requestAnimationFrame(check);
+                    }};
+                    check();
+                }})"#,
+                selector.replace('\'', "\\'"),
+                timeout_ms
+            );
+            match session.eval(&js).await {
+                Ok(_) => ActionResult::ok(
+                    "wait_for_selector",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("wait_for_selector", e),
+            }
+        }
+        BrowserAction::EvalJs { expression } => match session.eval(&expression).await {
+            Ok(val) => ActionResult::ok(
+                "eval_js",
+                ActionData::JsResult(val),
+                start.elapsed().as_millis() as u64,
+            ),
+            Err(e) => ActionResult::err("eval_js", e),
+        },
+        BrowserAction::Scroll { direction, amount } => {
+            let (x, y) = match direction {
+                ScrollDirection::Up => (0, -(amount as i64)),
+                ScrollDirection::Down => (0, amount as i64),
+                ScrollDirection::Left => (-(amount as i64), 0),
+                ScrollDirection::Right => (amount as i64, 0),
+            };
+            let js = format!("window.scrollBy({}, {})", x, y);
+            match session.eval(&js).await {
+                Ok(_) => ActionResult::ok(
+                    "scroll",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("scroll", e),
+            }
+        }
+        BrowserAction::Back => {
+            match session.eval("history.back()").await {
+                Ok(_) => ActionResult::ok(
+                    "back",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("back", e),
+            }
+        }
+        BrowserAction::Forward => {
+            match session.eval("history.forward()").await {
+                Ok(_) => ActionResult::ok(
+                    "forward",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("forward", e),
+            }
+        }
+        BrowserAction::Reload => {
+            match session.eval("location.reload()").await {
+                Ok(_) => ActionResult::ok(
+                    "reload",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("reload", e),
+            }
+        }
+    }
+}
+
+/// Execute a browser tool call end-to-end: parse → execute → format result.
+///
+/// Convenience function for integrations that receive raw tool call names
+/// and JSON arguments (e.g., from an LLM tool-use response).
+///
+/// Returns a human-readable result string suitable for feeding back to the LLM.
+pub async fn execute_tool_call(
+    session: &crate::cdp::CdpSession,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let action = parse_tool_call(tool_name, args)
+        .ok_or_else(|| format!("unknown browser tool: {}", tool_name))?;
+
+    let result = execute_action(session, action).await;
+
+    if result.success {
+        match result.data {
+            ActionData::None => Ok(format!("[{}] success ({}ms)", result.action, result.duration_ms)),
+            ActionData::Text(t) => Ok(t),
+            ActionData::Screenshot(ref _bytes) => Ok(format!(
+                "[screenshot] captured ({}ms)",
+                result.duration_ms
+            )),
+            ActionData::Url(u) => Ok(u),
+            ActionData::JsResult(v) => Ok(serde_json::to_string_pretty(&v).unwrap_or_default()),
+            ActionData::Error(e) => Err(e),
+        }
+    } else {
+        match result.data {
+            ActionData::Error(e) => Err(format!("[{}] failed: {}", result.action, e)),
+            _ => Err(format!("[{}] failed", result.action)),
+        }
     }
 }
 

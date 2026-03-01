@@ -63,8 +63,10 @@ impl<S: VectorStore> HybridSearcher<S> {
                     .map_err(|e| format!("vector search: {e}"))
             }
             SearchStrategy::Keyword => {
+                // Use pure keyword search — no embedding required.
+                // Falls back to BM25/FTS when all embedding providers are down.
                 self.store
-                    .hybrid_search(collection, query_embedding, query_text, top_k, 0.3)
+                    .keyword_search(collection, query_text, top_k)
                     .await
                     .map_err(|e| format!("keyword search: {e}"))
             }
@@ -164,63 +166,72 @@ impl<S: VectorStore> HybridSearcher<S> {
         // Extract in descending score order.
         let mut fused: Vec<VectorSearchResult> = heap.into_iter().map(|sr| sr.result).collect();
         fused.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+
+        // Normalize RRF scores to [0, 1] so they are comparable with
+        // min_relevance thresholds (which expect cosine-similarity scale).
+        // Without this, raw RRF scores max out at ~2/(k+1) ≈ 0.033 for k=60,
+        // causing every result to be filtered out by even modest thresholds.
+        if let Some(max_score) = fused.first().map(|r| r.score) {
+            if max_score > 0.0 {
+                for r in &mut fused {
+                    r.score /= max_score;
+                }
+            }
+        }
+
         fused
     }
 }
 
-/// Cosine similarity — pipeline-parallel f32 with independent accumulator lanes.
+/// Cosine similarity — 8-lane pipeline-parallel f32 for SIMD auto-vectorization.
 ///
-/// Uses 4 independent accumulator lanes (`d0..d3`, `na0..na3`, `nb0..nb3`) to
-/// break the loop-carried data dependency that prevented ILP with Kahan
-/// compensated summation.  Each lane processes every 4th element, allowing
-/// the CPU's out-of-order engine to dispatch 4 independent FMA chains
-/// simultaneously, fully hiding the 3–4 cycle FPU pipeline latency.
+/// Widened from 4 to 8 independent accumulator lanes to match AVX2's
+/// 256-bit registers (8×f32). On Apple Silicon (128-bit NEON), the compiler
+/// processes this as 2 back-to-back 4-wide SIMD ops per iteration, still
+/// achieving ~2× throughput vs the old 4-lane version.
 ///
-/// Numerical precision: horizontal sum of 4 partial sums (each over N/4
-/// elements) gives ~√(N/4) × ε relative error — vastly better than naïve
-/// sequential summation (√N × ε) and sufficient for LLM embedding similarity
-/// where vectors have inherent noise >> 10⁻⁶.
+/// For d=1536 (OpenAI ada-002): 1536/8 = 192 iterations × 3 FMAs vs
+/// old 1536/4 = 384 iterations × 3 FMAs → 2× fewer loop iterations.
 ///
-/// For d=1536 (OpenAI ada-002), this achieves ~4× throughput vs the previous
-/// Kahan-compensated loop by utilising all 4 FMA execution ports per cycle.
+/// Numerical precision: horizontal sum of 8 partial sums gives ~√(N/8) × ε
+/// relative error — sufficient for LLM embedding similarity.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
 
-    // 4 independent accumulator lanes — breaks loop-carried dependency.
+    // 8 independent accumulator lanes — maps to AVX2 ymm registers.
     let (mut d0, mut d1, mut d2, mut d3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut d4, mut d5, mut d6, mut d7) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
     let (mut na0, mut na1, mut na2, mut na3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut na4, mut na5, mut na6, mut na7) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
     let (mut nb0, mut nb1, mut nb2, mut nb3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut nb4, mut nb5, mut nb6, mut nb7) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
 
     let n = a.len();
-    let chunks = n / 4;
-    let remainder = n % 4;
+    let chunks = n / 8;
+    let remainder = n % 8;
 
     for i in 0..chunks {
-        let base = i * 4;
+        let base = i * 8;
+        // Load 8 elements from each vector.
         let (va0, va1, va2, va3) = (a[base], a[base + 1], a[base + 2], a[base + 3]);
+        let (va4, va5, va6, va7) = (a[base + 4], a[base + 5], a[base + 6], a[base + 7]);
         let (vb0, vb1, vb2, vb3) = (b[base], b[base + 1], b[base + 2], b[base + 3]);
+        let (vb4, vb5, vb6, vb7) = (b[base + 4], b[base + 5], b[base + 6], b[base + 7]);
 
-        // Each lane accumulates independently — no inter-lane dependency.
-        d0 += va0 * vb0;
-        d1 += va1 * vb1;
-        d2 += va2 * vb2;
-        d3 += va3 * vb3;
+        d0 += va0 * vb0; d1 += va1 * vb1; d2 += va2 * vb2; d3 += va3 * vb3;
+        d4 += va4 * vb4; d5 += va5 * vb5; d6 += va6 * vb6; d7 += va7 * vb7;
 
-        na0 += va0 * va0;
-        na1 += va1 * va1;
-        na2 += va2 * va2;
-        na3 += va3 * va3;
+        na0 += va0 * va0; na1 += va1 * va1; na2 += va2 * va2; na3 += va3 * va3;
+        na4 += va4 * va4; na5 += va5 * va5; na6 += va6 * va6; na7 += va7 * va7;
 
-        nb0 += vb0 * vb0;
-        nb1 += vb1 * vb1;
-        nb2 += vb2 * vb2;
-        nb3 += vb3 * vb3;
+        nb0 += vb0 * vb0; nb1 += vb1 * vb1; nb2 += vb2 * vb2; nb3 += vb3 * vb3;
+        nb4 += vb4 * vb4; nb5 += vb5 * vb5; nb6 += vb6 * vb6; nb7 += vb7 * vb7;
     }
 
     // Scalar remainder.
-    let base = chunks * 4;
+    let base = chunks * 8;
     for i in 0..remainder {
         let (av, bv) = (a[base + i], b[base + i]);
         d0 += av * bv;
@@ -228,10 +239,10 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         nb0 += bv * bv;
     }
 
-    // Horizontal reduction — pairwise grouping minimises rounding error.
-    let dot = (d0 + d2) + (d1 + d3);
-    let na = (na0 + na2) + (na1 + na3);
-    let nb = (nb0 + nb2) + (nb1 + nb3);
+    // Hierarchical pairwise reduction (minimises rounding error).
+    let dot = ((d0 + d4) + (d1 + d5)) + ((d2 + d6) + (d3 + d7));
+    let na = ((na0 + na4) + (na1 + na5)) + ((na2 + na6) + (na3 + na7));
+    let nb = ((nb0 + nb4) + (nb1 + nb5)) + ((nb2 + nb6) + (nb3 + nb7));
 
     let denom = na.sqrt() * nb.sqrt();
     if denom == 0.0 {

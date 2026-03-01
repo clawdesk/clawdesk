@@ -162,16 +162,9 @@ impl Provider for AzureOpenAiProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    ProviderError::Timeout {
-                        provider: "azure_openai".into(),
-                        model: model.clone(),
-                        after: start.elapsed(),
-                    }
+                    ProviderError::timeout("azure_openai", model.clone(), start.elapsed())
                 } else {
-                    ProviderError::NetworkError {
-                        provider: "azure_openai".into(),
-                        detail: e.to_string(),
-                    }
+                    ProviderError::network_error("azure_openai", e.to_string())
                 }
             })?;
 
@@ -184,34 +177,22 @@ impl Provider for AzureOpenAiProvider {
             let body_str = String::from_utf8_lossy(&body_bytes);
             
             if status_code == 429 {
-                return Err(ProviderError::RateLimit {
-                    provider: "azure_openai".into(),
-                    retry_after: None,
-                });
+                return Err(ProviderError::rate_limit("azure_openai", None));
             }
 
             // For Azure, 400, 401, 403, 404 usually contain a precise JSON error explaining what is wrong 
             // (e.g. invalid key, invalid deployment name, invalid location). Bubble this up to the user.
-            return Err(ProviderError::FormatError {
-                provider: "azure_openai".into(),
-                detail: format!("HTTP {}: {}", status_code, body_str),
-            });
+            return Err(ProviderError::format_error("azure_openai", format!("HTTP {}: {}", status_code, body_str)));
         }
 
         let api_response: AzureResponse =
-            response.json().await.map_err(|e| ProviderError::FormatError {
-                provider: "azure_openai".into(),
-                detail: e.to_string(),
-            })?;
+            response.json().await.map_err(|e| ProviderError::format_error("azure_openai", e.to_string()))?;
 
         let choice = api_response
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| ProviderError::FormatError {
-                provider: "azure_openai".into(),
-                detail: "no choices in response".into(),
-            })?;
+            .ok_or_else(|| ProviderError::format_error("azure_openai", "no choices in response"))?;
 
         let tool_calls = choice
             .message
@@ -305,10 +286,7 @@ impl Provider for AzureOpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::NetworkError {
-                provider: "azure_openai".into(),
-                detail: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::network_error("azure_openai", e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -316,26 +294,17 @@ impl Provider for AzureOpenAiProvider {
             let body_str = String::from_utf8_lossy(&body_bytes);
 
             if status == 429 {
-                return Err(ProviderError::RateLimit {
-                    provider: "azure_openai".into(),
-                    retry_after: None,
-                });
+                return Err(ProviderError::rate_limit("azure_openai", None));
             }
 
-            return Err(ProviderError::FormatError {
-                provider: "azure_openai".into(),
-                detail: format!("HTTP {}: {}", status, body_str),
-            });
+            return Err(ProviderError::format_error("azure_openai", format!("HTTP {}: {}", status, body_str)));
         }
 
         // Parse SSE event stream (Identical to OpenAI streaming logic)
         let mut buffer = String::new();
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(|e| {
-            ProviderError::NetworkError {
-                provider: "azure_openai".into(),
-                detail: e.to_string(),
-            }
+            ProviderError::network_error("azure_openai", e.to_string())
         })? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 

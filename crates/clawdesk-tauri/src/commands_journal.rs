@@ -1,4 +1,4 @@
-//! T9: Journal Store — IPC commands for journaling with SochDB persistence.
+//! Journal Store — IPC commands for journaling with SochDB persistence.
 //!
 //! Wires [`clawdesk_skills::journal`] domain model to Tauri IPC layer with
 //! hot-cache in `AppState` + write-through to SochDB (`journal/{id}`).

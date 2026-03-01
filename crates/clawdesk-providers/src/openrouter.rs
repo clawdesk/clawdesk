@@ -14,7 +14,7 @@
 //! header injection.
 
 use async_trait::async_trait;
-use clawdesk_types::error::ProviderError;
+use clawdesk_types::error::{ProviderError, ProviderErrorKind};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -355,16 +355,16 @@ impl OpenRouterProvider {
     fn classify_error(&self, status: u16, body: &str) -> ProviderError {
         let provider = "openrouter".to_string();
         match status {
-            429 => ProviderError::RateLimit { provider, retry_after: None },
-            401 | 403 => ProviderError::AuthFailure { provider, profile_id: String::new() },
-            404 => ProviderError::ModelNotFound { provider, model: String::new() },
-            s if s >= 500 => ProviderError::ServerError { provider, status: s },
+            429 => ProviderError::rate_limit(provider, None),
+            401 | 403 => ProviderError::auth_failure(provider, String::new()),
+            404 => ProviderError::model_not_found(provider, String::new()),
+            s if s >= 500 => ProviderError::server_error(provider, s),
             _ => {
                 let lower = body.to_lowercase();
                 if lower.contains("billing") || lower.contains("credits") {
-                    ProviderError::Billing { provider }
+                    ProviderError::billing(provider)
                 } else {
-                    ProviderError::FormatError { provider, detail: format!("HTTP {status}: {body}") }
+                    ProviderError::format_error(provider, format!("HTTP {status}: {body}"))
                 }
             }
         }
@@ -434,16 +434,9 @@ impl Provider for OpenRouterProvider {
         let builder = self.apply_auth(self.client.post(&url).json(&body));
         let resp = builder.send().await.map_err(|e| {
             if e.is_timeout() {
-                ProviderError::Timeout {
-                    provider: "openrouter".into(),
-                    model: model.to_string(),
-                    after: std::time::Duration::from_secs(120),
-                }
+                ProviderError::timeout("openrouter", model.to_string(), std::time::Duration::from_secs(120))
             } else {
-                ProviderError::NetworkError {
-                    provider: "openrouter".into(),
-                    detail: e.to_string(),
-                }
+                ProviderError::network_error("openrouter", e.to_string())
             }
         })?;
 
@@ -454,20 +447,14 @@ impl Provider for OpenRouterProvider {
         }
 
         let resp_body: CompletionResponse = resp.json().await.map_err(|e| {
-            ProviderError::FormatError {
-                provider: "openrouter".into(),
-                detail: format!("JSON parse error: {e}"),
-            }
+            ProviderError::format_error("openrouter", format!("JSON parse error: {e}"))
         })?;
 
         let choice = resp_body
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| ProviderError::FormatError {
-                provider: "openrouter".into(),
-                detail: "no choices in response".into(),
-            })?;
+            .ok_or_else(|| ProviderError::format_error("openrouter", "no choices in response"))?;
 
         let content = Self::effective_content(&choice.message);
         let finish_reason = Self::parse_finish_reason(choice.finish_reason.as_deref());
@@ -533,10 +520,7 @@ impl Provider for OpenRouterProvider {
         let url = format!("{OPENROUTER_BASE_URL}/chat/completions");
         let builder = self.apply_auth(self.client.post(&url).json(&body));
         let resp = builder.send().await.map_err(|e| {
-            ProviderError::NetworkError {
-                provider: "openrouter".into(),
-                detail: e.to_string(),
-            }
+            ProviderError::network_error("openrouter", e.to_string())
         })?;
 
         let status = resp.status().as_u16();
@@ -552,10 +536,7 @@ impl Provider for OpenRouterProvider {
         let mut last_usage: Option<TokenUsage> = None;
 
         while let Some(chunk_result) = stream.next().await {
-            let bytes = chunk_result.map_err(|e| ProviderError::NetworkError {
-                provider: "openrouter".into(),
-                detail: e.to_string(),
-            })?;
+            let bytes = chunk_result.map_err(|e| ProviderError::network_error("openrouter", e.to_string()))?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
             while let Some(line_end) = buffer.find('\n') {
@@ -677,16 +658,10 @@ impl Provider for OpenRouterProvider {
     async fn health_check(&self) -> Result<(), ProviderError> {
         let url = format!("{OPENROUTER_BASE_URL}/models");
         let builder = self.apply_auth(self.client.get(&url));
-        let resp = builder.send().await.map_err(|e| ProviderError::NetworkError {
-            provider: "openrouter".into(),
-            detail: e.to_string(),
-        })?;
+        let resp = builder.send().await.map_err(|e| ProviderError::network_error("openrouter", e.to_string()))?;
 
         if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 {
-            return Err(ProviderError::AuthFailure {
-                provider: "openrouter".into(),
-                profile_id: String::new(),
-            });
+            return Err(ProviderError::auth_failure("openrouter", String::new()));
         }
 
         debug!("openrouter health check passed");
@@ -713,9 +688,9 @@ mod tests {
     #[test]
     fn test_classify_error() {
         let provider = OpenRouterProvider::new("test-key");
-        match provider.classify_error(429, "rate limited") {
-            ProviderError::RateLimit { .. } => {}
-            other => panic!("expected RateLimit, got {other:?}"),
+        match provider.classify_error(429, "rate limited").kind {
+            ProviderErrorKind::RateLimit { .. } => {}
+            ref other => panic!("expected RateLimit, got {other:?}"),
         }
     }
 

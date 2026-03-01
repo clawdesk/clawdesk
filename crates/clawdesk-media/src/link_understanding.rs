@@ -9,11 +9,10 @@
 //! Results are cached by URL with configurable TTL.
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// Extracted metadata from a URL.
@@ -157,7 +156,7 @@ struct CacheEntry {
 pub struct LinkUnderstanding {
     config: LinkConfig,
     fetcher: Arc<dyn HttpFetcher>,
-    cache: Arc<RwLock<HashMap<String, CacheEntry>>>,
+    cache: Arc<DashMap<String, CacheEntry>>,
 }
 
 impl LinkUnderstanding {
@@ -165,7 +164,7 @@ impl LinkUnderstanding {
         Self {
             config,
             fetcher,
-            cache: Arc::new(RwLock::new(HashMap::new())),
+            cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -210,14 +209,11 @@ impl LinkUnderstanding {
     /// Get a link preview, using cache if available.
     pub async fn get_preview(&self, url: &str) -> Result<LinkPreview, LinkError> {
         // Check cache
-        {
-            let cache = self.cache.read().await;
-            if let Some(entry) = cache.get(url) {
-                let ttl = Duration::from_secs(self.config.cache_ttl_secs);
-                if entry.inserted_at.elapsed() < ttl {
-                    debug!(url, "cache hit for link preview");
-                    return Ok(entry.preview.clone());
-                }
+        if let Some(entry) = self.cache.get(url) {
+            let ttl = Duration::from_secs(self.config.cache_ttl_secs);
+            if entry.inserted_at.elapsed() < ttl {
+                debug!(url, "cache hit for link preview");
+                return Ok(entry.preview.clone());
             }
         }
 
@@ -226,19 +222,18 @@ impl LinkUnderstanding {
 
         // Update cache
         {
-            let mut cache = self.cache.write().await;
             // Evict if over limit
-            if cache.len() >= self.config.max_cache_entries {
+            if self.cache.len() >= self.config.max_cache_entries {
                 // Remove oldest entry
-                let oldest_key = cache
+                let oldest_key = self.cache
                     .iter()
-                    .min_by_key(|(_, v)| v.inserted_at)
-                    .map(|(k, _)| k.clone());
+                    .min_by_key(|e| e.value().inserted_at)
+                    .map(|e| e.key().clone());
                 if let Some(key) = oldest_key {
-                    cache.remove(&key);
+                    self.cache.remove(&key);
                 }
             }
-            cache.insert(
+            self.cache.insert(
                 url.to_string(),
                 CacheEntry {
                     preview: preview.clone(),
@@ -388,19 +383,17 @@ impl LinkUnderstanding {
 
     /// Clear the cache.
     pub async fn clear_cache(&self) {
-        let mut cache = self.cache.write().await;
-        cache.clear();
+        self.cache.clear();
         info!("link preview cache cleared");
     }
 
     /// Get cache statistics.
     pub async fn cache_stats(&self) -> (usize, usize) {
-        let cache = self.cache.read().await;
-        let total = cache.len();
+        let total = self.cache.len();
         let ttl = Duration::from_secs(self.config.cache_ttl_secs);
-        let expired = cache
-            .values()
-            .filter(|e| e.inserted_at.elapsed() >= ttl)
+        let expired = self.cache
+            .iter()
+            .filter(|e| e.value().inserted_at.elapsed() >= ttl)
             .count();
         (total, expired)
     }

@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::{debug, info, warn};
 
 use chrono::{DateTime, Utc};
@@ -69,6 +69,9 @@ const MAX_DISTRIBUTED_LOCKS: usize = 10_000;
 /// this struct. On drop, uncommitted writes are rolled back.
 pub struct TransactionalLaneGuard {
     session_id: String,
+    /// The owned mutex guard — held for the lifetime of the transaction.
+    /// Dropped when the guard is dropped, releasing the session lane.
+    _lock: OwnedMutexGuard<()>,
     /// Buffered writes — (key, value) pairs waiting for commit.
     write_buffer: Vec<(Vec<u8>, Vec<u8>)>,
     /// Buffered deletes.
@@ -79,9 +82,10 @@ pub struct TransactionalLaneGuard {
 
 impl TransactionalLaneGuard {
     /// Create a new transactional guard for a session.
-    fn new(session_id: String) -> Self {
+    fn new(session_id: String, lock: OwnedMutexGuard<()>) -> Self {
         Self {
             session_id,
+            _lock: lock,
             write_buffer: Vec::new(),
             delete_buffer: Vec::new(),
             committed: false,
@@ -142,6 +146,54 @@ impl TransactionalLaneGuard {
             puts,
             deletes,
             "transactional lane committed"
+        );
+
+        Ok(CommitSummary { puts, deletes })
+    }
+
+    /// Commit all buffered operations atomically via a batch writer.
+    ///
+    /// Unlike `commit_with` which applies ops sequentially (partial writes
+    /// on crash), this method collects all ops into a single `Vec<WriteOp>`
+    /// and hands them to `batch_writer` for all-or-nothing commit.
+    ///
+    /// Callers should pass a closure that delegates to
+    /// `TransactionalConn::commit()` or `ConnectionTrait::write_batch()`
+    /// for true WAL-backed atomicity.
+    ///
+    /// # Example
+    /// ```ignore
+    /// guard.commit_batch(|ops| {
+    ///     let kv_ops: Vec<KvBatchOp> = ops.into_iter().map(|op| match op {
+    ///         WriteOp::Put { key, value } => KvBatchOp::Put { key, value },
+    ///         WriteOp::Delete { key } => KvBatchOp::Delete { key },
+    ///     }).collect();
+    ///     conn.write_batch(&kv_ops)
+    /// })?;
+    /// ```
+    pub fn commit_batch<F, E>(&mut self, batch_writer: F) -> Result<CommitSummary, E>
+    where
+        F: FnOnce(Vec<WriteOp>) -> Result<(), E>,
+    {
+        let puts = self.write_buffer.len();
+        let deletes = self.delete_buffer.len();
+
+        let mut ops = Vec::with_capacity(puts + deletes);
+        for (key, value) in self.write_buffer.drain(..) {
+            ops.push(WriteOp::Put { key, value });
+        }
+        for key in self.delete_buffer.drain(..) {
+            ops.push(WriteOp::Delete { key });
+        }
+
+        batch_writer(ops)?;
+
+        self.committed = true;
+        info!(
+            session = %self.session_id,
+            puts,
+            deletes,
+            "transactional lane committed (atomic batch)"
         );
 
         Ok(CommitSummary { puts, deletes })
@@ -235,9 +287,9 @@ impl TransactionalLaneManager {
         };
 
         match tokio::time::timeout(self.watchdog_timeout, mutex.lock_owned()).await {
-            Ok(_guard) => {
+            Ok(guard) => {
                 info!(session_id, "transactional lane acquired");
-                Ok(TransactionalLaneGuard::new(session_id.to_string()))
+                Ok(TransactionalLaneGuard::new(session_id.to_string(), guard))
             }
             Err(_) => {
                 warn!(
@@ -582,9 +634,15 @@ pub fn validate_fencing_token(
 mod tests {
     use super::*;
 
-    #[test]
-    fn transactional_guard_buffers_writes() {
-        let mut guard = TransactionalLaneGuard::new("test-session".into());
+    /// Create a dummy OwnedMutexGuard for unit tests that only exercise
+    /// buffering / commit / rollback (not contention).
+    async fn dummy_guard() -> OwnedMutexGuard<()> {
+        Arc::new(Mutex::new(())).lock_owned().await
+    }
+
+    #[tokio::test]
+    async fn transactional_guard_buffers_writes() {
+        let mut guard = TransactionalLaneGuard::new("test-session".into(), dummy_guard().await);
 
         guard.write(b"key1", b"val1");
         guard.write(b"key2", b"val2");
@@ -594,9 +652,9 @@ mod tests {
         assert!(!guard.is_committed());
     }
 
-    #[test]
-    fn transactional_guard_commit() {
-        let mut guard = TransactionalLaneGuard::new("test-session".into());
+    #[tokio::test]
+    async fn transactional_guard_commit() {
+        let mut guard = TransactionalLaneGuard::new("test-session".into(), dummy_guard().await);
 
         guard.write(b"key1", b"val1");
         guard.write(b"key2", b"val2");
@@ -618,9 +676,9 @@ mod tests {
         assert_eq!(ops, vec!["put", "put", "delete"]);
     }
 
-    #[test]
-    fn transactional_guard_rollback() {
-        let mut guard = TransactionalLaneGuard::new("test-session".into());
+    #[tokio::test]
+    async fn transactional_guard_rollback() {
+        let mut guard = TransactionalLaneGuard::new("test-session".into(), dummy_guard().await);
 
         guard.write(b"key1", b"val1");
         guard.write(b"key2", b"val2");
@@ -675,9 +733,9 @@ mod tests {
         assert_eq!(parsed.fencing_token, 42);
     }
 
-    #[test]
-    fn commit_with_failure_stops_early() {
-        let mut guard = TransactionalLaneGuard::new("s1".into());
+    #[tokio::test]
+    async fn commit_with_failure_stops_early() {
+        let mut guard = TransactionalLaneGuard::new("s1".into(), dummy_guard().await);
 
         guard.write(b"k1", b"v1");
         guard.write(b"k2", b"v2");

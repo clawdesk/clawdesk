@@ -69,6 +69,21 @@ pub trait VectorStore: Send + Sync + 'static {
         vector_weight: f32,
     ) -> Result<Vec<VectorSearchResult>, StorageError>;
 
+    /// Pure keyword/BM25 search — no embedding vector required.
+    ///
+    /// This is the FTS-only fallback when all embedding providers are
+    /// degraded. Default implementation returns an empty vec (no FTS
+    /// support); SochDB's `SochVectorStore` overrides with real BM25.
+    async fn keyword_search(
+        &self,
+        collection: &str,
+        query_text: &str,
+        k: usize,
+    ) -> Result<Vec<VectorSearchResult>, StorageError> {
+        let _ = (collection, query_text, k);
+        Ok(Vec::new())
+    }
+
     /// Delete a vector by ID.
     async fn delete(
         &self,

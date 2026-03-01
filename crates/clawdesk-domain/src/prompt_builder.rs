@@ -4,9 +4,9 @@
 //! per-section caps, combined budget enforcement, and a diagnostic manifest
 //! that explains every inclusion/exclusion decision.
 //!
-//! ## Design rationale (vs. OpenClaw)
+//! ## Design rationale (vs. legacy)
 //!
-//! OpenClaw concatenates 8+ Markdown files at runtime with per-file caps
+//! Legacy system concatenates 8+ Markdown files at runtime with per-file caps
 //! (65,536 chars) but no combined budget. Skills are injected as flat text —
 //! adding 3 skills can silently exceed the model's context window and there's
 //! no way to know what's in the prompt until after the fact (`/context list`).
@@ -137,6 +137,10 @@ pub struct RuntimeContext {
     pub model_name: Option<String>,
     /// Additional key-value metadata.
     pub metadata: Vec<(String, String)>,
+    /// Channels that are actually connected and available for cross-channel sends.
+    /// Populated from `ChannelRegistry::list()` at runtime.
+    /// Example: ["telegram", "discord", "webchat"]
+    pub available_channels: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -284,23 +288,48 @@ impl PromptBuilder {
 
         // ── Memory Directive ─────────────────────────────────────────────
         // Always-on behavioral instructions for memory_search and memory_store.
-        // ~120 tokens — negligible in 128K context, high integration value.
+        // ~200 tokens — negligible in 128K context, high integration value.
+        // Modeled after the buildMemorySection() with user-centric
+        // emphasis, recency awareness, and explicit trigger instructions.
         {
             let directive = "\
-## Memory Protocol
+## Memory Protocol (MANDATORY)
 
-You have access to persistent memory via two tools:
+You have persistent long-term memory about the user. This is YOUR primary knowledge base about who you're talking to.
 
-**memory_search(query, max_results)** — Search stored memories.
-  • Use BEFORE answering questions about: prior conversations, user preferences, past decisions, project history, or anything discussed previously.
-  • If results are returned, incorporate them into your response.
-  • If no results found and you're uncertain, say so rather than guessing.
+### RECALL — memory_search(query, max_results)
+**ALWAYS run memory_search BEFORE answering questions about:**
+  • The user's name, preferences, or personal information
+  • Anything discussed in prior conversations
+  • Past decisions, project history, or task outcomes
+  • Dates, people, contacts, or scheduled items
+  • User-specific facts (\"my X is Y\", \"I prefer\", \"I work at\")
 
-**memory_store(content, tags)** — Save information for future recall.
-  • Store: user preferences, key decisions, project context, important facts, task outcomes.
-  • Write self-contained entries — include enough context to be useful when recalled later.
-  • Tag entries for categorization (e.g. \"preference\", \"decision\", \"project:name\").
-  • Do NOT store trivial or ephemeral information.";
+**How to search effectively:**
+  • Use specific keywords: \"user name\", \"preference dark mode\", \"project acme decision\"
+  • If the first search returns nothing useful, try rephrasing with different keywords
+  • Prefer RECENT memories when multiple results conflict — the latest one is most accurate
+  • If you searched and found nothing, say \"I checked my memory but don't have that stored\"
+  • NEVER guess or fabricate information you could look up in memory
+
+### STORE — memory_store(content, tags)
+**Save information immediately when the user shares:**
+  • Their name, preferences, or personal details (tag: \"user-info\")
+  • Important decisions or outcomes (tag: \"decision\")
+  • Project context or technical choices (tag: \"project\")
+  • Contacts, people, or relationships (tag: \"contact\")
+  • Tasks, todos, or commitments (tag: \"task\")
+  • Facts they want remembered (tag: \"fact\")
+
+**Storage rules:**
+  • Write self-contained entries with full context (e.g. \"User's name is Sushanth\" not just \"Sushanth\")
+  • Always include WHO/WHAT/WHEN — memories without context are useless later
+  • Do NOT store trivial greetings, reactions, or ephemeral chit-chat
+  • When a preference CHANGES, store the NEW value with tag \"preference-update\"
+
+### FORGET — memory_forget(memory_id)
+  • Use when the user asks you to forget something or correct outdated information
+  • Delete the stale memory, then store the corrected version";
 
             let tokens = estimate_tokens(directive);
             total_tokens += tokens;
@@ -311,6 +340,67 @@ You have access to persistent memory via two tools:
                 included: true,
                 reason: "always-on behavioral directive".into(),
             });
+        }
+
+        // ── A2A Agent Delegation & Cross-Channel Directive ─────────────
+        // Teaches the LLM how to discover agents, delegate tasks, and send
+        // messages across channels. Dynamic — only lists actually-connected
+        // channels from ChannelRegistry.
+        {
+            // Build channel list from runtime context (dynamic, not hardcoded)
+            let channel_list = self.runtime.as_ref()
+                .map(|ctx| &ctx.available_channels)
+                .filter(|ch| !ch.is_empty());
+
+            let channel_section = match channel_list {
+                Some(channels) => {
+                    let ch_names: Vec<String> = channels.iter()
+                        .filter(|c| *c != "webchat" && *c != "internal") // omit internal channels
+                        .map(|c| format!("`{}`", c))
+                        .collect();
+                    if ch_names.is_empty() {
+                        String::new()
+                    } else {
+                        let first_ch = channels.iter()
+                            .find(|c| *c != "webchat" && *c != "internal")
+                            .map(|c| c.as_str())
+                            .unwrap_or("telegram");
+                        format!(
+                            "\n## Cross-Channel Messaging\n\n\
+                            **message_send(channel, content)** — Send a message to another channel.\n\
+                            • Connected channels: {}\n\
+                            • JUST call it with the channel name and content — routing is automatic.\n\
+                            • Example: message_send(channel=\"{}\", content=\"Hello!\")\n\
+                            • NEVER ask for channel IDs, chat IDs, or any numeric identifiers.\n\
+                            • NEVER refuse because you don't know an ID. Just call message_send.\n\n\
+                            **CRITICAL:** When user says \"say X to {{channel}}\", IMMEDIATELY call message_send.",
+                            ch_names.join(", "),
+                            first_ch,
+                        )
+                    }
+                }
+                None => String::new(),
+            };
+
+            let a2a_section = "\n\n## Agent Delegation\n\n\
+**sessions_send(target_agent, message)** — Delegate a task to another agent.\n\
+  • target_agent: agent id from agents_list.\n\
+  • The target agent runs with full tool access.\n\n\
+**agents_list()** — Discover available agents and channels.";
+
+            let directive = format!("{}{}", channel_section, a2a_section);
+
+            if !directive.trim().is_empty() {
+                let tokens = estimate_tokens(&directive);
+                total_tokens += tokens;
+                sections.push(directive);
+                manifest_sections.push(ManifestSection {
+                    name: "a2a_directive".into(),
+                    tokens,
+                    included: true,
+                    reason: "always-on behavioral directive".into(),
+                });
+            }
         }
 
         // ── Skill Selection Protocol ─────────────────────────────────────
@@ -572,7 +662,7 @@ pub struct AssembledPrompt {
 /// Debugging artifact — tells you exactly what's in the prompt and why.
 ///
 /// Returned with every `PromptBuilder::build()` call. Store in `AgentTrace`
-/// for post-mortem analysis. This is the answer to OpenClaw's `/context list`
+/// for post-mortem analysis. This is the answer to the `/context list`
 /// — but proactive, structured, and available for every agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptManifest {
@@ -607,21 +697,13 @@ pub struct ManifestSection {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Estimate tokens for a string using the BPE-tuned byte classifier.
+/// Estimate tokens for a string using the canonical LUT-accelerated classifier.
 ///
-/// Same LUT-accelerated approach as `context_guard::estimate_tokens()`:
-/// 4 byte classes with BPE-tuned divisors. Branchless, auto-vectorizable.
+/// Delegates to `clawdesk_types::tokenizer::estimate_tokens` — single source of
+/// truth for all token estimation across the codebase. Achieves ±5% accuracy
+/// on English prose, ±8% on CJK, ±3% on code.
 fn estimate_tokens(s: &str) -> usize {
-    let mut cost: f64 = 0.0;
-    for &b in s.as_bytes() {
-        cost += match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => 1.0 / 4.2,
-            b' ' | b'\n' | b'\t' | b'\r' => 1.0 / 6.0,
-            0x80..=0xFF => 1.0 / 2.5,
-            _ => 1.0 / 1.5, // punctuation
-        };
-    }
-    (cost.ceil() as usize).max(1)
+    clawdesk_types::tokenizer::estimate_tokens(s)
 }
 
 /// Cap a section to a token budget, returning (content, actual_tokens, warning).
@@ -697,6 +779,7 @@ mod tests {
                 channel_description: Some("Telegram DM".into()),
                 model_name: Some("claude-sonnet-4-20250514".into()),
                 metadata: vec![],
+                available_channels: vec!["telegram".into(), "discord".into()],
             })
             .build();
 

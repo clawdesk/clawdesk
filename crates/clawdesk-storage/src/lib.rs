@@ -12,6 +12,7 @@
 //! - `VectorStore`: Vector similarity search for memory/RAG
 //! - `GraphStore`: Graph overlay for relationship tracking
 
+pub mod artifact_store;
 pub mod config_store;
 pub mod conversation_store;
 pub mod graph_store;
@@ -20,6 +21,7 @@ pub mod replay_store;
 pub mod session_store;
 pub mod vector_store;
 
+pub use artifact_store::{ArtifactStore, ArtifactStoreError, ArtifactStoreStats};
 pub use config_store::ConfigStore;
 pub use conversation_store::ConversationStore;
 pub use graph_store::GraphStore;

@@ -201,24 +201,54 @@ pub fn annotate_oversized(oversized: &[(usize, ChatMessage)]) -> Vec<ChatMessage
 ///
 /// Algorithm: O(n) forward scan with O(k) `HashSet` for tool_use_ids.
 ///
+/// Uses targeted `#[derive(Deserialize)]` structs instead of full
+/// `serde_json::Value` DOM parse. Only the `tool_call_id`, `tool_calls[].id`,
+/// and `type` fields are deserialized — all other content is skipped via
+/// `#[serde(deny_unknown_fields)]` avoidance (default: skip unknown fields).
+/// This avoids allocating a full DOM tree for every message.
+///
 /// Uses `Vec::retain_mut` pattern to avoid reallocation.
 pub fn repair_tool_pairing(messages: &mut Vec<ChatMessage>) -> usize {
+    /// Targeted struct: top-level message envelope with only the fields we need.
+    #[derive(serde::Deserialize)]
+    struct ToolEnvelope {
+        #[serde(default)]
+        tool_call_id: Option<String>,
+        #[serde(default)]
+        tool_calls: Option<Vec<ToolCallRef>>,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(rename = "type", default)]
+        item_type: Option<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ToolCallRef {
+        #[serde(default)]
+        id: Option<String>,
+    }
+
     // First pass: collect all tool_use_ids from assistant messages with tool calls
     let mut tool_use_ids: HashSet<String> = HashSet::new();
 
     for msg in messages.iter() {
         if msg.role == MessageRole::Assistant {
-            // Parse tool calls from content (JSON-encoded tool_call_id)
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&msg.content) {
-                if let Some(id) = val.get("tool_call_id").and_then(|v| v.as_str()) {
-                    tool_use_ids.insert(id.to_string());
+            // Targeted deserialization — only extracts tool_call_id and tool_calls[].id
+            if let Ok(env) = serde_json::from_str::<ToolEnvelope>(&msg.content) {
+                if let Some(id) = env.tool_call_id {
+                    tool_use_ids.insert(id);
                 }
-                // Also check for tool_calls array
-                if let Some(calls) = val.get("tool_calls").and_then(|v| v.as_array()) {
+                if let Some(calls) = env.tool_calls {
                     for call in calls {
-                        if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
-                            tool_use_ids.insert(id.to_string());
+                        if let Some(id) = call.id {
+                            tool_use_ids.insert(id);
                         }
+                    }
+                }
+                // tool_use block with type + id
+                if env.item_type.as_deref() == Some("tool_use") {
+                    if let Some(id) = env.id {
+                        tool_use_ids.insert(id);
                     }
                 }
             }
@@ -230,6 +260,13 @@ pub fn repair_tool_pairing(messages: &mut Vec<ChatMessage>) -> usize {
         }
     }
 
+    /// Targeted struct for tool_result content — only need tool_call_id.
+    #[derive(serde::Deserialize)]
+    struct ToolResultRef {
+        #[serde(default)]
+        tool_call_id: Option<String>,
+    }
+
     // Second pass: remove tool_result messages whose tool_use_id is not in the set
     let initial_len = messages.len();
     messages.retain(|msg| {
@@ -237,9 +274,9 @@ pub fn repair_tool_pairing(messages: &mut Vec<ChatMessage>) -> usize {
             return true;
         }
 
-        // Try to extract tool_call_id from the tool result
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&msg.content) {
-            if let Some(id) = val.get("tool_call_id").and_then(|v| v.as_str()) {
+        // Targeted deserialization — only extracts tool_call_id
+        if let Ok(tr) = serde_json::from_str::<ToolResultRef>(&msg.content) {
+            if let Some(ref id) = tr.tool_call_id {
                 if !tool_use_ids.contains(id) {
                     debug!(tool_call_id = id, "removing orphaned tool_result");
                     return false;
@@ -253,49 +290,60 @@ pub fn repair_tool_pairing(messages: &mut Vec<ChatMessage>) -> usize {
 }
 
 /// Extract tool_use IDs from message content (handles various formats).
+///
+/// Uses targeted deserialization instead of full DOM parse.
 fn extract_tool_use_ids(content: &str, ids: &mut HashSet<String>) {
-    // Try JSON parse
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
-        extract_ids_from_json(&val, ids);
+    #[derive(serde::Deserialize)]
+    struct ToolUseBlock {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(rename = "type", default)]
+        item_type: Option<String>,
+        #[serde(default)]
+        tool_call_id: Option<String>,
     }
-    // Also try for content that contains multiple JSON objects
+
+    // Try targeted deserialization — single object
+    if let Ok(block) = serde_json::from_str::<ToolUseBlock>(content) {
+        if let Some(ref id) = block.id {
+            if block.item_type.as_deref() == Some("tool_use") {
+                ids.insert(id.clone());
+            }
+        }
+        if let Some(id) = block.tool_call_id {
+            ids.insert(id);
+        }
+    }
+
+    // Also try as array of tool_use blocks
+    if let Ok(blocks) = serde_json::from_str::<Vec<ToolUseBlock>>(content) {
+        for block in blocks {
+            if let Some(ref id) = block.id {
+                if block.item_type.as_deref() == Some("tool_use") {
+                    ids.insert(id.clone());
+                }
+            }
+            if let Some(id) = block.tool_call_id {
+                ids.insert(id);
+            }
+        }
+    }
+
+    // Try line-delimited JSON objects
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('{') {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                extract_ids_from_json(&val, ids);
-            }
-        }
-    }
-}
-
-fn extract_ids_from_json(val: &serde_json::Value, ids: &mut HashSet<String>) {
-    match val {
-        serde_json::Value::Object(map) => {
-            // Check for tool_call_id or id field
-            if let Some(id) = map.get("id").and_then(|v| v.as_str()) {
-                if map
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .map_or(false, |t| t == "tool_use")
-                {
-                    ids.insert(id.to_string());
+            if let Ok(block) = serde_json::from_str::<ToolUseBlock>(trimmed) {
+                if let Some(ref id) = block.id {
+                    if block.item_type.as_deref() == Some("tool_use") {
+                        ids.insert(id.clone());
+                    }
+                }
+                if let Some(id) = block.tool_call_id {
+                    ids.insert(id);
                 }
             }
-            if let Some(id) = map.get("tool_call_id").and_then(|v| v.as_str()) {
-                ids.insert(id.to_string());
-            }
-            // Recurse into nested values
-            for v in map.values() {
-                extract_ids_from_json(v, ids);
-            }
         }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                extract_ids_from_json(v, ids);
-            }
-        }
-        _ => {}
     }
 }
 

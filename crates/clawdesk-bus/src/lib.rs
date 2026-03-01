@@ -23,3 +23,4 @@ pub mod priority;
 pub mod skill_events;
 pub mod subscription;
 pub mod topic;
+pub mod typed_event;

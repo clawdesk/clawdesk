@@ -22,7 +22,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use clawdesk_types::error::{
-    AgentError, ClawDeskError, GatewayError, ProviderError, SecurityError, StorageError,
+    AgentError, ClawDeskError, GatewayError, ProviderError, ProviderErrorKind, SecurityError, StorageError,
 };
 use serde::Serialize;
 
@@ -68,12 +68,12 @@ impl ApiError {
     fn status_code(&self) -> StatusCode {
         match self {
             ApiError::Domain(e) => match e {
-                ClawDeskError::Provider(pe) => match pe {
-                    ProviderError::RateLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
-                    ProviderError::AuthFailure { .. } => StatusCode::UNAUTHORIZED,
-                    ProviderError::Timeout { .. } => StatusCode::GATEWAY_TIMEOUT,
-                    ProviderError::ModelNotFound { .. } => StatusCode::NOT_FOUND,
-                    ProviderError::ContextLengthExceeded { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+                ClawDeskError::Provider(pe) => match &pe.kind {
+                    ProviderErrorKind::RateLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
+                    ProviderErrorKind::AuthFailure { .. } => StatusCode::UNAUTHORIZED,
+                    ProviderErrorKind::Timeout { .. } => StatusCode::GATEWAY_TIMEOUT,
+                    ProviderErrorKind::ModelNotFound { .. } => StatusCode::NOT_FOUND,
+                    ProviderErrorKind::ContextLengthExceeded { .. } => StatusCode::PAYLOAD_TOO_LARGE,
                     _ => StatusCode::BAD_GATEWAY,
                 },
                 ClawDeskError::Storage(StorageError::NotFound { .. }) => StatusCode::NOT_FOUND,
@@ -86,6 +86,10 @@ impl ApiError {
                 ClawDeskError::Gateway(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 ClawDeskError::Config(_) => StatusCode::BAD_REQUEST,
                 ClawDeskError::Channel { .. } => StatusCode::BAD_GATEWAY,
+                ClawDeskError::Plugin(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                ClawDeskError::Media(_) => StatusCode::UNPROCESSABLE_ENTITY,
+                ClawDeskError::Cron(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                ClawDeskError::Memory(_) => StatusCode::INTERNAL_SERVER_ERROR,
             },
             ApiError::NotFound { .. } => StatusCode::NOT_FOUND,
             ApiError::ThreadBusy { .. } => StatusCode::CONFLICT,
@@ -147,10 +151,10 @@ mod tests {
 
     #[test]
     fn rate_limit_maps_to_429() {
-        let err = ApiError::Domain(ClawDeskError::Provider(ProviderError::RateLimit {
-            provider: "anthropic".into(),
-            retry_after: Some(std::time::Duration::from_secs(30)),
-        }));
+        let err = ApiError::Domain(ClawDeskError::Provider(ProviderError::rate_limit(
+            "anthropic",
+            Some(std::time::Duration::from_secs(30)),
+        )));
         assert_eq!(err.status_code(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(err.error_code(), "RATE_LIMITED");
         assert!(err.is_retryable());

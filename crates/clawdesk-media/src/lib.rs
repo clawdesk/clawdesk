@@ -13,6 +13,7 @@
 //! - **TtsProcessor**: Text-to-speech synthesis
 //! - **MediaCache**: Content-addressed cache with SHA256 keys
 
+pub mod artifact_pipeline;
 pub mod audio;
 pub mod cache;
 pub mod cache_pro;
@@ -36,6 +37,7 @@ pub use pipeline::MediaPipeline;
 pub use processor::{MediaProcessor, ProcessorResult};
 pub use selector::AdaptiveSelector;
 pub use cache::MediaCache;
+pub use artifact_pipeline::{ArtifactPipeline, AcpArtifactInput, AcpDataInput};
 pub use video::{VideoProcessor, VideoMetadata, VideoFormat};
 pub use voice::{VoicePipeline, VoiceActivityDetector, VoicePipelineConfig, VoiceEvent};
 pub use link_understanding::{LinkUnderstanding, LinkPreview, LinkConfig};

@@ -9,6 +9,7 @@
 //! configuration, enabling zero-config agent-to-agent communication.
 
 use serde::{Deserialize, Serialize};
+use crate::capability::{CapabilityId, CapSet};
 
 /// The Agent Card — a self-describing capability advertisement.
 ///
@@ -27,8 +28,12 @@ pub struct AgentCard {
     pub endpoint: AgentEndpoint,
     /// Authentication requirements.
     pub auth: AgentAuth,
-    /// Capabilities this agent offers.
-    pub capabilities: Vec<AgentCapability>,
+    /// Capabilities this agent offers (typed capability IDs).
+    pub capabilities: Vec<CapabilityId>,
+    /// Precomputed capability bitset with hierarchical closure.
+    /// Call `rebuild_capset()` after directly mutating `capabilities`.
+    #[serde(skip)]
+    pub cap_set: CapSet,
     /// Skills this agent can perform (more granular than capabilities).
     pub skills: Vec<AgentSkill>,
     /// Supported protocol versions.
@@ -70,76 +75,6 @@ pub enum AgentAuth {
     },
     /// Mutual TLS.
     Mtls,
-}
-
-/// A high-level capability category.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentCapability {
-    /// Can process text messages and generate responses.
-    TextGeneration,
-    /// Can execute code in a sandbox.
-    CodeExecution,
-    /// Can search the web.
-    WebSearch,
-    /// Can read and process files.
-    FileProcessing,
-    /// Can generate or analyze images.
-    ImageProcessing,
-    /// Can process audio (transcription, TTS).
-    AudioProcessing,
-    /// Can interact with external APIs.
-    ApiIntegration,
-    /// Can manage and query databases.
-    DataManagement,
-    /// Can perform mathematical computations.
-    Mathematics,
-    /// Can manage scheduling and reminders.
-    Scheduling,
-    /// Can send messages to external channels.
-    Messaging,
-    /// Custom capability with a string identifier.
-    Custom(String),
-}
-
-impl AgentCapability {
-    /// Map a capability to a bit position in a u16 bitset.
-    /// `Custom` variants get bit 15 (catch-all) — two Custom capabilities
-    /// are considered equal for bitset purposes but distinguished by string
-    /// comparison in the fallback path.
-    #[inline]
-    fn bit_index(&self) -> u16 {
-        match self {
-            Self::TextGeneration => 0,
-            Self::CodeExecution => 1,
-            Self::WebSearch => 2,
-            Self::FileProcessing => 3,
-            Self::ImageProcessing => 4,
-            Self::AudioProcessing => 5,
-            Self::ApiIntegration => 6,
-            Self::DataManagement => 7,
-            Self::Mathematics => 8,
-            Self::Scheduling => 9,
-            Self::Messaging => 10,
-            Self::Custom(_) => 15, // catch-all bit
-        }
-    }
-
-    /// Convert to a single-bit mask.
-    #[inline]
-    fn to_bit(&self) -> u16 {
-        1u16 << self.bit_index()
-    }
-}
-
-/// Convert a slice of capabilities into a u16 bitset.
-/// O(n) where n = number of capabilities.
-fn capabilities_to_bitset(caps: &[AgentCapability]) -> u16 {
-    let mut bits: u16 = 0;
-    for cap in caps {
-        bits |= cap.to_bit();
-    }
-    bits
 }
 
 /// A specific skill the agent can perform — more granular than capabilities.
@@ -187,6 +122,7 @@ impl AgentCard {
             },
             auth: AgentAuth::None,
             capabilities: vec![],
+            cap_set: CapSet::empty(),
             skills: vec![],
             protocol_versions: vec!["1.0".into()],
             max_concurrent_tasks: Some(10),
@@ -194,10 +130,20 @@ impl AgentCard {
         }
     }
 
-    /// Add a capability.
-    pub fn with_capability(mut self, cap: AgentCapability) -> Self {
-        self.capabilities.push(cap);
+    /// Add a capability, rebuilding the closed capset.
+    pub fn with_capability(mut self, cap: CapabilityId) -> Self {
+        if !self.capabilities.contains(&cap) {
+            self.capabilities.push(cap);
+        }
+        self.rebuild_capset();
         self
+    }
+
+    /// Rebuild the cached capset with hierarchical closure.
+    /// Call after directly mutating `capabilities`.
+    pub fn rebuild_capset(&mut self) {
+        let raw: CapSet = self.capabilities.iter().copied().collect();
+        self.cap_set = raw.close();
     }
 
     /// Add a skill.
@@ -208,57 +154,107 @@ impl AgentCard {
 
     /// Check if this agent has a specific capability.
     ///
-    /// Uses bitset for O(1) check on known capabilities; falls back to
-    /// linear scan only for `Custom` variants.
-    pub fn has_capability(&self, cap: &AgentCapability) -> bool {
-        if !matches!(cap, AgentCapability::Custom(_)) {
-            let bits = capabilities_to_bitset(&self.capabilities);
-            return bits & cap.to_bit() != 0;
+    /// Uses the closed CapSet for O(1) check, including hierarchical
+    /// implication (e.g., `AudioProcessing` implies `MediaProcessing`).
+    pub fn has_capability(&self, cap: CapabilityId) -> bool {
+        let set = if self.cap_set.is_empty() && !self.capabilities.is_empty() {
+            // Lazy rebuild: capset not yet computed (e.g., after deserialization).
+            let raw: CapSet = self.capabilities.iter().copied().collect();
+            raw.close()
+        } else {
+            self.cap_set
+        };
+        set.contains(cap)
+    }
+
+    /// Content-addressed structural fingerprint.
+    ///
+    /// Hashes: capabilities (sorted) + skills (IDs + tags) + endpoint URL +
+    /// max_concurrent_tasks + protocol_versions. Excludes description, metadata,
+    /// and version string — those are "cosmetic" changes that don't affect routing.
+    ///
+    /// Returns a 64-bit FNV-1a hash as hex ETag (e.g., `"W/\"a3f7c20b1e4d9851\""`).
+    /// Use with `DiscoveryCache::put_if_changed()` to skip re-indexing when only
+    /// metadata changed.
+    pub fn structural_fingerprint(&self) -> u64 {
+        let mut h = 0xcbf29ce484222325u64; // FNV-1a offset basis
+
+        #[inline(always)]
+        fn fnv_bytes(h: &mut u64, bytes: &[u8]) {
+            for &b in bytes {
+                *h ^= b as u64;
+                *h = h.wrapping_mul(0x100000001b3);
+            }
         }
-        self.capabilities.contains(cap)
+
+        // Capabilities (sorted for determinism).
+        let mut caps: Vec<u8> = self.capabilities.iter().map(|c| *c as u8).collect();
+        caps.sort_unstable();
+        fnv_bytes(&mut h, &caps);
+
+        // Skill IDs + tags (sorted).
+        let mut skill_keys: Vec<String> = self.skills.iter().map(|s| {
+            let mut key = s.id.clone();
+            let mut tags = s.tags.clone();
+            tags.sort_unstable();
+            key.push(':');
+            key.push_str(&tags.join(","));
+            key
+        }).collect();
+        skill_keys.sort_unstable();
+        for sk in &skill_keys {
+            fnv_bytes(&mut h, sk.as_bytes());
+        }
+
+        // Endpoint URL.
+        fnv_bytes(&mut h, self.endpoint.url.as_bytes());
+
+        // Max concurrent tasks.
+        let max_tasks = self.max_concurrent_tasks.unwrap_or(0);
+        fnv_bytes(&mut h, &max_tasks.to_le_bytes());
+
+        // Protocol versions (sorted).
+        let mut pvs = self.protocol_versions.clone();
+        pvs.sort_unstable();
+        for pv in &pvs {
+            fnv_bytes(&mut h, pv.as_bytes());
+        }
+
+        h
+    }
+
+    /// Generate a weak ETag from the structural fingerprint.
+    /// Format: `W/"<16-hex-digits>"` per RFC 7232.
+    pub fn structural_etag(&self) -> String {
+        format!("W/\"{:016x}\"", self.structural_fingerprint())
     }
 
     /// Compute capability overlap score with a set of required capabilities.
     ///
-    /// Returns a value in [0.0, 1.0]:
-    /// - 1.0 = all required capabilities are present
+    /// Returns a value in `[0.0, 1.0]`:
+    /// - 1.0 = all required capabilities are present (after hierarchical closure)
     /// - 0.0 = no overlap
     ///
-    /// Score = |required ∩ offered| / |required|
+    /// Score = `|close(offered) ∩ close(required)| / |close(required)|`
     ///
-    /// Uses u16 bitset + POPCNT for O(1) intersection of known capability
-    /// variants. Falls back to linear scan for `Custom` variants only.
-    pub fn capability_score(&self, required: &[AgentCapability]) -> f64 {
+    /// Uses POPCNT on 64-bit words for O(1) computation.
+    /// Hierarchical implication closure ensures `AudioProcessing → MediaProcessing`.
+    pub fn capability_score(&self, required: &[CapabilityId]) -> f64 {
         if required.is_empty() {
             return 1.0;
         }
 
-        let offered_bits = capabilities_to_bitset(&self.capabilities);
-        let required_bits = capabilities_to_bitset(required);
+        let offered = if self.cap_set.is_empty() && !self.capabilities.is_empty() {
+            let raw: CapSet = self.capabilities.iter().copied().collect();
+            raw.close()
+        } else {
+            self.cap_set
+        };
 
-        // Fast path: count intersection via bitwise AND + popcount
-        let intersection_bits = offered_bits & required_bits;
-        let mut fast_matched = intersection_bits.count_ones() as usize;
-        let mut total_required = required.len();
+        let required_set: CapSet = required.iter().copied().collect();
+        let required_closed = required_set.close();
 
-        // If Custom bit is set in the intersection, we can't trust the
-        // count — different Custom strings map to the same bit. Do a
-        // precise count for Custom entries only.
-        let has_custom_required = required.iter().any(|r| matches!(r, AgentCapability::Custom(_)));
-        if has_custom_required {
-            // Subtract the fast-path Custom bit contribution and recount precisely.
-            let custom_in_intersection = (intersection_bits >> 15) & 1;
-            fast_matched -= custom_in_intersection as usize;
-
-            let custom_matched = required
-                .iter()
-                .filter(|r| matches!(r, AgentCapability::Custom(_)))
-                .filter(|r| self.capabilities.contains(r))
-                .count();
-            fast_matched += custom_matched;
-        }
-
-        fast_matched as f64 / total_required as f64
+        offered.overlap_score(&required_closed)
     }
 }
 
@@ -269,28 +265,50 @@ mod tests {
     #[test]
     fn capability_score_full_match() {
         let card = AgentCard::new("test", "Test Agent", "http://localhost:8080")
-            .with_capability(AgentCapability::TextGeneration)
-            .with_capability(AgentCapability::WebSearch);
+            .with_capability(CapabilityId::TextGeneration)
+            .with_capability(CapabilityId::WebSearch);
 
-        let required = vec![AgentCapability::TextGeneration, AgentCapability::WebSearch];
+        let required = vec![CapabilityId::TextGeneration, CapabilityId::WebSearch];
         assert_eq!(card.capability_score(&required), 1.0);
     }
 
     #[test]
     fn capability_score_partial_match() {
         let card = AgentCard::new("test", "Test Agent", "http://localhost:8080")
-            .with_capability(AgentCapability::TextGeneration);
+            .with_capability(CapabilityId::TextGeneration);
 
-        let required = vec![AgentCapability::TextGeneration, AgentCapability::WebSearch];
+        let required = vec![CapabilityId::TextGeneration, CapabilityId::WebSearch];
         assert_eq!(card.capability_score(&required), 0.5);
     }
 
     #[test]
     fn capability_score_no_match() {
         let card = AgentCard::new("test", "Test Agent", "http://localhost:8080")
-            .with_capability(AgentCapability::Mathematics);
+            .with_capability(CapabilityId::Mathematics);
 
-        let required = vec![AgentCapability::TextGeneration];
+        let required = vec![CapabilityId::TextGeneration];
         assert_eq!(card.capability_score(&required), 0.0);
+    }
+
+    #[test]
+    fn hierarchical_match_audio_implies_media() {
+        // An agent advertising AudioProcessing should match MediaProcessing
+        // requirement via hierarchical closure.
+        let card = AgentCard::new("audio", "Audio Agent", "http://localhost:8080")
+            .with_capability(CapabilityId::AudioProcessing);
+
+        let required = vec![CapabilityId::MediaProcessing];
+        // After closure: AudioProcessing implies MediaProcessing → match
+        assert_eq!(card.capability_score(&required), 1.0);
+    }
+
+    #[test]
+    fn hierarchical_match_voice_implies_audio_and_media() {
+        let card = AgentCard::new("voice", "Voice Agent", "http://localhost:8080")
+            .with_capability(CapabilityId::VoiceUnderstanding);
+
+        // VoiceUnderstanding → AudioProcessing → MediaProcessing
+        assert!(card.has_capability(CapabilityId::AudioProcessing));
+        assert!(card.has_capability(CapabilityId::MediaProcessing));
     }
 }

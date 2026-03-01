@@ -3865,6 +3865,17 @@ h6.md-heading {
   color: var(--text-soft);
 }
 
+.chat-thread-sidebar-item-preview {
+  font-size: 11px;
+  color: var(--text-soft);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+  max-width: 100%;
+}
+
 @media (max-width: 768px) {
   .chat-thread-sidebar {
     display: none;
@@ -5393,6 +5404,67 @@ h6.md-heading {
   border: 1px solid #d1d1d6 !important;
 }
 
+/* Force light-mode tokens inside the designer so automation elements look correct even in dark mode */
+.skill-designer .automation-step-kind-btn {
+  background: #f5f5f7;
+  border-color: #d1d1d6;
+  color: #111111;
+}
+
+.skill-designer .automation-step-kind-btn:hover {
+  border-color: #E8612C;
+  background: rgba(232, 97, 44, 0.06);
+}
+
+.skill-designer .automation-step-kind-desc {
+  color: #666;
+}
+
+.skill-designer .automation-step-card {
+  border-color: #d1d1d6;
+}
+
+.skill-designer .automation-step-card.selected {
+  border-color: #E8612C;
+}
+
+.skill-designer .automation-step-card-header {
+  background: #f0f0f2;
+  border-bottom-color: #d1d1d6;
+  color: #111111;
+}
+
+.skill-designer .automation-step-card-name {
+  color: #111111 !important;
+  background: transparent !important;
+  border: none !important;
+}
+
+.skill-designer .automation-step-card-name:focus {
+  outline: 2px solid #E8612C;
+}
+
+.skill-designer .automation-step-card-actions button {
+  color: #444;
+}
+
+.skill-designer .automation-step-card-body {
+  color: #111111;
+}
+
+.skill-designer .automation-step-card-body label {
+  color: #666;
+}
+
+.skill-designer .automation-empty-canvas {
+  border-color: #d1d1d6;
+  color: #888;
+}
+
+.skill-designer .automation-step-connector {
+  background: #d1d1d6;
+}
+
 .skill-designer label,
 .skill-designer h2,
 .skill-designer h3,
@@ -5646,6 +5718,7 @@ h6.md-heading {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  padding: 0 20px;
   margin-bottom: 16px;
 }
 

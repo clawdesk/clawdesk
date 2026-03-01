@@ -277,6 +277,7 @@ impl EmailChannel {
             body_for_agent: Some(format!("Subject: {}\n\n{}", email.subject, email.body_text)),
             sender,
             media,
+            artifact_refs: vec![],
             reply_context,
             origin,
             timestamp: chrono::Utc::now(),
