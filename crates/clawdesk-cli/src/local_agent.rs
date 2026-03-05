@@ -11,13 +11,14 @@
 //! The agent reads from stdin, executes tools locally, and streams responses
 //! to stdout. No gateway, no HTTP, no Tauri dependency.
 
+use crate::agent_compose::{self, AgentDefinition};
 use crate::cli_approval::CliApprovalGate;
 use crate::permission_modes::{PermissionConfig, PermissionDecision, PermissionEngine, PermissionMode};
 use clawdesk_agents::runner::{AgentConfig, AgentEvent, AgentRunner, ApprovalDecision, ApprovalGate};
 use clawdesk_agents::tools::ToolPolicy;
 use clawdesk_agents::ToolRegistry;
 use clawdesk_providers::Provider;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,6 +42,8 @@ pub struct LocalAgentConfig {
     pub context_limit: usize,
     /// Permission configuration (from config.toml).
     pub permission_config: PermissionConfig,
+    /// Optional team directory containing agent.toml files for multi-agent mode.
+    pub team_dir: Option<PathBuf>,
 }
 
 impl Default for LocalAgentConfig {
@@ -53,6 +56,7 @@ impl Default for LocalAgentConfig {
             max_tool_rounds: 25,
             context_limit: 128_000,
             permission_config: PermissionConfig::default(),
+            team_dir: None,
         }
     }
 }
@@ -206,19 +210,142 @@ pub async fn run_local_agent(
         &mut tool_registry,
         config.workspace.clone(),
     );
+
+    // ── Team agent loading & spawn_subagent registration ──────────────
+    // If --team-dir is set, load agent.toml files, build a team roster
+    // system prompt, and register spawn_subagent so the LLM can delegate.
+    let mut team_roster_prompt = String::new();
+    if let Some(ref team_dir) = config.team_dir {
+        match agent_compose::load_all_agents(team_dir) {
+            Ok(agents) if !agents.is_empty() => {
+                let agent_map: HashMap<String, AgentDefinition> = agents
+                    .iter()
+                    .map(|(_, def)| (def.agent.id.clone(), def.clone()))
+                    .collect();
+                info!(
+                    team_dir = %team_dir.display(),
+                    count = agent_map.len(),
+                    "loaded team agents"
+                );
+
+                // Build the team roster system prompt section
+                team_roster_prompt.push_str(
+                    "\n\n## Your Team — Agentic Delegation\n\n\
+**MANDATORY**: You MUST use the `spawn_subagent` tool to delegate to specialists below. \
+NEVER write specialist content yourself. For EVERY user request, your workflow is:\n\n\
+1. **Analyze** the request and identify which specialist(s) are needed.\n\
+2. **Delegate** by calling `spawn_subagent` for each specialist with a SPECIFIC, DETAILED task.\n\
+   - Include expected deliverables, format, depth, and scope in each task.\n\
+   - You can call `spawn_subagent` multiple times in a SINGLE response to run specialists in parallel.\n\
+3. **Review** the results — if a result is incomplete, delegate again with more specifics.\n\
+4. **Synthesize** a polished, unified response combining all specialist outputs.\n\n\
+**CRITICAL RULES**:\n\
+- You MUST call `spawn_subagent` at least once per user request\n\
+- You are FORBIDDEN from writing business plans, marketing strategies, code, or other specialist content directly\n\
+- If you find yourself writing content that a specialist could produce, STOP and delegate instead\n\n\
+### Team Members\n\n"
+                );
+                for (_, def) in &agent_map {
+                    let a = &def.agent;
+                    team_roster_prompt.push_str(&format!(
+                        "- **{}** — agent_id: `{}`\n",
+                        a.display_name, a.id,
+                    ));
+                    if !a.persona.soul.is_empty() {
+                        let hint: String = a.persona.soul.chars().take(300).collect();
+                        team_roster_prompt.push_str(&format!("  Expertise: {}\n", hint.trim()));
+                    }
+                }
+                team_roster_prompt.push('\n');
+
+                // Register spawn_subagent tool with closure that spawns sub-agent runners
+                let provider_ref = Arc::clone(&provider);
+                let sub_workspace = config.workspace.clone();
+                let cancel_ref = cancel.clone();
+                let agent_map = Arc::new(agent_map);
+
+                let spawn_fn: Arc<
+                    dyn Fn(String, String, u64)
+                        -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+                        + Send + Sync,
+                > = Arc::new(move |agent_id: String, task: String, timeout_secs: u64| {
+                    let provider = Arc::clone(&provider_ref);
+                    let ws = sub_workspace.clone();
+                    let cancel = cancel_ref.clone();
+                    let agents = Arc::clone(&agent_map);
+                    Box::pin(async move {
+                        let def = agents.get(&agent_id)
+                            .ok_or_else(|| format!("Sub-agent '{}' not found in team directory", agent_id))?;
+                        let system_prompt = if def.agent.persona.soul.is_empty() {
+                            format!("You are {}. {}", def.agent.display_name, def.agent.persona.guidelines)
+                        } else {
+                            def.agent.persona.soul.clone()
+                        };
+                        // Create a fresh tool registry for the sub-agent
+                        let mut sub_tools = ToolRegistry::new();
+                        clawdesk_agents::builtin_tools::register_builtin_tools(&mut sub_tools, ws);
+                        let sub_config = AgentConfig {
+                            model: def.agent.model.clone(),
+                            system_prompt: String::new(),
+                            max_tool_rounds: 15,
+                            ..Default::default()
+                        };
+                        let runner = AgentRunner::new(provider, Arc::new(sub_tools), sub_config, cancel);
+                        let history = vec![
+                            clawdesk_providers::ChatMessage::new(
+                                clawdesk_providers::MessageRole::User,
+                                task.as_str(),
+                            ),
+                        ];
+                        let timeout = tokio::time::Duration::from_secs(timeout_secs);
+                        match tokio::time::timeout(timeout, runner.run(history, system_prompt)).await {
+                            Ok(Ok(response)) => Ok(response.content),
+                            Ok(Err(e)) => Err(format!("Sub-agent error: {e}")),
+                            Err(_) => Err(format!("Sub-agent timed out after {}s", timeout_secs)),
+                        }
+                    })
+                });
+                clawdesk_agents::builtin_tools::register_subagent_tool(&mut tool_registry, spawn_fn);
+                info!("registered spawn_subagent tool for team delegation");
+            }
+            Ok(_) => {
+                warn!(team_dir = %team_dir.display(), "team directory is empty — no agent.toml files found");
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to load team agents — running without team support");
+            }
+        }
+    }
+
     let tool_registry = Arc::new(tool_registry);
 
     // Build agent config
-    let agent_config = AgentConfig {
-        model: model.clone(),
-        system_prompt: config.system_prompt.clone().unwrap_or_else(|| {
+    let base_system_prompt = config.system_prompt.clone().unwrap_or_else(|| {
+        if !team_roster_prompt.is_empty() {
+            // When running in team mode, use a router-specific base prompt
+            "You are a team router agent. Your ONLY job is to delegate tasks to your team \
+             specialists using the `spawn_subagent` tool and then synthesize their results. \
+             You MUST call `spawn_subagent` for EVERY request — you are NOT allowed to write \
+             content yourself. Your value is orchestration, quality control, and synthesis."
+                .to_string()
+        } else {
             "You are a powerful AI assistant running in a local terminal. \
              You have access to tools for file reading/writing, shell command execution, \
              HTTP requests, and web search. Use tools proactively to accomplish tasks. \
              When the user asks you to do something, DO it — don't just describe what \
              you would do. Execute commands, write files, and take concrete actions."
                 .to_string()
-        }),
+        }
+    });
+    // Append team roster if team agents are loaded
+    let full_system_prompt = if team_roster_prompt.is_empty() {
+        base_system_prompt
+    } else {
+        format!("{}{}", base_system_prompt, team_roster_prompt)
+    };
+    let agent_config = AgentConfig {
+        model: model.clone(),
+        system_prompt: full_system_prompt,
         max_tool_rounds: config.max_tool_rounds,
         context_limit: config.context_limit,
         workspace_path: config.workspace.as_ref().map(|p| p.display().to_string()),

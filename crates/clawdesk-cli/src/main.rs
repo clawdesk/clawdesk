@@ -257,6 +257,9 @@ enum AgentAction {
         /// Maximum tool rounds per turn
         #[arg(long, default_value = "25")]
         max_tool_rounds: usize,
+        /// Directory containing agent.toml files for multi-agent team mode
+        #[arg(long)]
+        team_dir: Option<String>,
     },
     /// Add a new agent from TOML definition or interactive wizard
     #[command(name = "add")]
@@ -566,6 +569,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 system_prompt,
                 permission_mode,
                 max_tool_rounds,
+                team_dir,
             } => {
                 let perm_mode = match permission_mode.as_str() {
                     "allowlist" => permission_modes::PermissionMode::Allowlist,
@@ -584,6 +588,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     max_tool_rounds,
                     context_limit: 200_000,
                     permission_config: perm_config,
+                    team_dir: team_dir.map(std::path::PathBuf::from),
                 };
                 local_agent::run_local_agent(config, cancel).await?;
             }
