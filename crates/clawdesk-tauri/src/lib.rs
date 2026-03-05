@@ -29,6 +29,9 @@ pub mod commands_sandbox;
 pub mod commands_mcp;
 pub mod commands_extensions;
 pub mod commands_migrate;
+pub mod commands_tunnel;
+pub mod commands_browser;
+pub mod commands_skills_admin;
 pub mod deep_link;
 pub mod engine;
 pub mod error;
@@ -69,6 +72,7 @@ pub fn run() {
             commands::get_health,
             commands::create_agent,
             commands::list_agents,
+            commands::update_agent,
             commands::delete_agent,
             commands::import_openclaw_config,
             commands::send_message,
@@ -90,8 +94,13 @@ pub fn run() {
             commands::validate_skill_md,
             commands::list_pipelines,
             commands::create_pipeline,
+            commands::delete_pipeline,
+            commands::update_pipeline,
             commands::run_pipeline,
             commands::get_pipeline_runs,
+            commands::list_cron_tasks,
+            commands::trigger_cron_task,
+            commands::get_cron_logs,
             commands::get_metrics,
             commands::get_security_status,
             commands::get_agent_trace,
@@ -253,6 +262,20 @@ pub fn run() {
             commands_sochdb::registry_unregister_agent,
             commands_sochdb::sochdb_checkpoint,
             commands_sochdb::sochdb_sync,
+            // ── Storage health, lifecycle, structured tracing, session indexes ─
+            commands_sochdb::storage_health,
+            commands_sochdb::lifecycle_delete_session,
+            commands_sochdb::lifecycle_delete_thread,
+            commands_sochdb::lifecycle_delete_agent,
+            commands_sochdb::trace_set_span_attributes,
+            commands_sochdb::trace_add_span_event,
+            commands_sochdb::trace_get_span_attributes,
+            commands_sochdb::trace_query_spans_by_attribute,
+            commands_sochdb::trace_set_run_attributes,
+            commands_sochdb::sessions_by_activity,
+            commands_sochdb::sessions_by_channel,
+            commands_sochdb::sessions_by_agent,
+            commands_sochdb::sessions_rebuild_indexes,
             // ── Debug: storage diagnostics ───────────────────────
             commands_debug::toggle_debug_mode,
             commands_debug::get_debug_mode,
@@ -324,6 +347,11 @@ pub fn run() {
             commands_extensions::enable_integration,
             commands_extensions::disable_integration,
             commands_extensions::get_integration_stats,
+            commands_extensions::get_extension_config,
+            commands_extensions::save_extension_config,
+            commands_extensions::validate_extension_config,
+            commands_extensions::store_extension_credential,
+            commands_extensions::check_extension_credentials,
             commands_extensions::vault_status,
             commands_extensions::vault_initialize,
             commands_extensions::vault_unlock,
@@ -341,8 +369,27 @@ pub fn run() {
             commands_migrate::list_migration_sources,
             commands_migrate::validate_migration_source,
             commands_migrate::run_migration,
-            commands_migrate::preview_migration,
-        ])
+            commands_migrate::preview_migration,            // ── Tunnel: WireGuard remote access ───────────────────────
+            commands_tunnel::get_tunnel_detail,
+            commands_tunnel::start_tunnel,
+            commands_tunnel::stop_tunnel,
+            commands_tunnel::list_tunnel_peers,
+            commands_tunnel::add_tunnel_peer,
+            commands_tunnel::remove_tunnel_peer,
+            commands_tunnel::generate_tunnel_invite,
+            commands_tunnel::list_tunnel_invites,
+            commands_tunnel::prune_tunnel_invites,
+            commands_tunnel::validate_invite_code,
+            // ── Browser: CDP automation ────────────────────────────────
+            commands_browser::list_browser_tools,
+            commands_browser::get_browser_status,
+            commands_browser::execute_browser_action,
+            // ── Skills Admin: hot-reload, activate/deactivate ──────────
+            commands_skills_admin::admin_list_skills,
+            commands_skills_admin::admin_reload_skills,
+            commands_skills_admin::admin_activate_skill,
+            commands_skills_admin::admin_deactivate_skill,
+            commands_skills_admin::admin_get_skills_dir,        ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
@@ -564,6 +611,127 @@ pub fn run() {
                     }
                 });
                 info!("Periodic SochDB + ThreadStore checkpoint thread started (30s interval)");
+            }
+
+            // ── Initialize deferred AppHandle for CronAgentExecutor ───
+            // CronAgentExecutor routes through send_message which needs
+            // the AppHandle. It wasn't available during AppState::new(),
+            // so we set it here.
+            let _ = state.cron_app_handle.set(app.handle().clone());
+
+            // ── Restore cron schedules from persisted pipelines ───────
+            // On startup we do a two-phase restore:
+            //  1. load_persisted() — rehydrate all cron tasks from SochDB
+            //     (preserves user edits like enabled/disabled, custom timeout).
+            //  2. Merge pipeline-derived tasks — update schedule/prompt from
+            //     pipeline definitions (which may have changed), but preserve
+            //     persisted `enabled` and `timeout_secs` states.
+            //
+            // Collect scheduled pipelines synchronously here; the actual
+            // upsert_task calls happen in the cron-manager thread where
+            // an async runtime is available.
+            let cron_restore_tasks: Vec<clawdesk_types::cron::CronTask> = {
+                let p = state.pipelines.read().expect("pipelines lock");
+                p.iter()
+                    .filter_map(|desc| {
+                        let schedule = desc.schedule.as_deref()?;
+                        // Build prompt from pipeline steps (same logic as sync_pipeline_cron_schedule)
+                        let step_instructions: Vec<String> = desc.steps.iter()
+                            .enumerate()
+                            .filter(|(_, s)| s.node_type == "agent")
+                            .map(|(i, step)| {
+                                let custom_prompt = step.config.get("prompt").cloned().unwrap_or_default();
+                                if !custom_prompt.is_empty() {
+                                    format!("Step {}: {} — {}", i + 1, step.label, custom_prompt)
+                                } else {
+                                    format!("Step {}: {}", i + 1, step.label)
+                                }
+                            })
+                            .collect();
+
+                        let prompt = if step_instructions.is_empty() {
+                            format!(
+                                "Execute the scheduled pipeline '{}'. {}",
+                                desc.name, desc.description
+                            )
+                        } else {
+                            format!(
+                                "Execute the scheduled pipeline '{}'. {}\n\nSteps to perform:\n{}",
+                                desc.name, desc.description, step_instructions.join("\n")
+                            )
+                        };
+
+                        let now = chrono::Utc::now();
+                        Some(clawdesk_types::cron::CronTask {
+                            id: format!("pipeline:{}", desc.id),
+                            name: format!("Pipeline: {}", desc.name),
+                            schedule: schedule.to_string(),
+                            enabled: true,
+                            prompt,
+                            agent_id: Some(format!("pipeline:{}", desc.id)),
+                            delivery_targets: vec![],
+                            skip_if_running: true,
+                            timeout_secs: 600,
+                            created_at: now,
+                            updated_at: now,
+                            depends_on: vec![],
+                            chain_mode: Default::default(),
+                            max_retained_logs: 0,
+                        })
+                    })
+                    .collect()
+            };
+            if !cron_restore_tasks.is_empty() {
+                info!(count = cron_restore_tasks.len(), "Collected {} pipeline schedule(s) for cron restoration", cron_restore_tasks.len());
+            }
+
+            // ── Spawn CronManager tick loop ───────────────────────────
+            // The cron manager runs a 60-second tick loop checking for
+            // scheduled pipeline tasks. Without this spawn, cron schedules
+            // are registered but never actually fire.
+            {
+                let cron_mgr = std::sync::Arc::clone(&state.cron_manager);
+                std::thread::Builder::new()
+                    .name("cron-manager".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("cron-manager runtime");
+                        rt.block_on(async move {
+                            // Phase 1: Rehydrate persisted cron tasks from SochDB.
+                            // This restores user edits (enabled/disabled, timeouts, standalone tasks).
+                            match cron_mgr.load_persisted().await {
+                                Ok(count) => info!(count, "Loaded persisted cron tasks from SochDB"),
+                                Err(e) => warn!(error = %e, "Failed to load persisted cron tasks"),
+                            }
+
+                            // Phase 2: Merge pipeline-derived tasks.
+                            // For each pipeline task, check if a persisted version exists.
+                            // If so, update schedule/prompt/name from pipeline but preserve
+                            // the persisted `enabled` and `timeout_secs` values.
+                            for mut task in cron_restore_tasks {
+                                if let Some(persisted) = cron_mgr.get_task(&task.id).await {
+                                    // Preserve user-editable fields from persisted state.
+                                    task.enabled = persisted.enabled;
+                                    task.timeout_secs = persisted.timeout_secs;
+                                    task.depends_on = persisted.depends_on;
+                                    task.created_at = persisted.created_at;
+                                    // Keep the pipeline-derived schedule, prompt, name
+                                    // (they reflect the latest pipeline definition).
+                                }
+                                let tid = task.id.clone();
+                                match cron_mgr.upsert_task(task).await {
+                                    Ok(()) => info!(task_id = %tid, "Restored cron schedule"),
+                                    Err(e) => warn!(task_id = %tid, error = %e, "Failed to restore cron schedule"),
+                                }
+                            }
+                            info!("CronManager tick loop started");
+                            cron_mgr.run().await;
+                        });
+                    })
+                    .expect("failed to spawn cron-manager thread");
+                info!("CronManager tick loop thread spawned (60s interval)");
             }
 
             // ── Launch enabled MCP integrations + health monitor ──

@@ -23,6 +23,7 @@ pub mod config;
 pub mod cron;
 pub mod error;
 pub mod failover;
+pub mod isolation;
 pub mod media;
 pub mod message;
 pub mod ordered_lock;
@@ -33,6 +34,7 @@ pub mod ring;
 pub mod security;
 pub mod session;
 pub mod taint;
+pub mod token_usage;
 pub mod tokenizer;
 
 // Re-export key types at crate root
@@ -41,6 +43,8 @@ pub use config::{ClawDeskConfig, ValidatedConfig};
 pub use error::{ClawDeskError, ProviderError, ProviderErrorKind};
 pub use ring::DropOldest;
 pub use tokenizer::estimate_tokens;
+pub use token_usage::TokenUsage;
+pub use isolation::IsolationLevel;
 pub use message::{
     InboundMessage, MediaAttachment, MessageOrigin, NormalizedMessage, OutboundMessage,
     ReplyContext, SenderIdentity,

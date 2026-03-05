@@ -1382,6 +1382,7 @@ dependencies = [
  "clawdesk-skills",
  "clawdesk-sochdb",
  "clawdesk-storage",
+ "clawdesk-tui",
  "clawdesk-types",
  "hex",
  "regex",
@@ -1570,6 +1571,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
  "whisper-rs",
 ]
 
@@ -1775,6 +1777,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clawdesk-storage",
+ "clawdesk-threads",
  "clawdesk-types",
  "parking_lot",
  "rustc-hash 2.1.1",
@@ -1804,6 +1807,7 @@ dependencies = [
 name = "clawdesk-tauri"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "async-trait",
  "base64 0.22.1",
  "chrono",
@@ -1860,6 +1864,7 @@ name = "clawdesk-telemetry"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clawdesk-types",
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry-otlp",

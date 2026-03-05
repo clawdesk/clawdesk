@@ -181,8 +181,318 @@ pub enum VideoError {
     CodecError(String),
 }
 
+/// FFmpeg-based video processor that shells out to `ffprobe` and `ffmpeg`.
+///
+/// Falls back to `StubVideoProcessor` behaviour if FFmpeg is not installed.
+/// This replaces the previous stub-only implementation.
+pub struct FfmpegVideoProcessor;
+
+impl FfmpegVideoProcessor {
+    /// Check if FFmpeg is available on the system PATH.
+    pub fn is_available() -> bool {
+        std::process::Command::new("ffprobe")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
+#[async_trait]
+impl VideoProcessor for FfmpegVideoProcessor {
+    async fn extract_metadata(&self, data: &[u8]) -> Result<VideoMetadata, VideoError> {
+        let format = detect_format_from_header(data);
+
+        // Write data to a temp file for ffprobe
+        let tmp_dir = std::env::temp_dir().join("clawdesk-video");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let tmp_path = tmp_dir.join(format!("probe_{}.tmp", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp_path, data)
+            .map_err(|e| VideoError::ProcessingFailed(format!("write temp: {e}")))?;
+
+        let output = tokio::process::Command::new("ffprobe")
+            .args([
+                "-v", "quiet",
+                "-print_format", "json",
+                "-show_format",
+                "-show_streams",
+            ])
+            .arg(&tmp_path)
+            .output()
+            .await
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                VideoError::ProcessingFailed(format!("ffprobe exec: {e}"))
+            })?;
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        if !output.status.success() {
+            // Fall back to header-only detection
+            info!(format = ?format, size = data.len(), "ffprobe failed, using header detection");
+            return Ok(VideoMetadata {
+                duration_seconds: 0.0,
+                width: 0,
+                height: 0,
+                fps: 0.0,
+                codec: None,
+                audio_codec: None,
+                bitrate_kbps: None,
+                file_size_bytes: data.len() as u64,
+                format,
+                has_audio: false,
+            });
+        }
+
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| VideoError::ProcessingFailed(format!("parse ffprobe json: {e}")))?;
+
+        // Extract from ffprobe JSON
+        let duration = json["format"]["duration"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let bitrate = json["format"]["bit_rate"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|b| (b / 1000) as u32);
+
+        let streams = json["streams"].as_array();
+
+        let (mut width, mut height, mut fps, mut codec, mut audio_codec, mut has_audio) =
+            (0u32, 0u32, 0.0f32, None, None, false);
+
+        if let Some(streams) = streams {
+            for stream in streams {
+                let codec_type = stream["codec_type"].as_str().unwrap_or("");
+                match codec_type {
+                    "video" if codec.is_none() => {
+                        width = stream["width"].as_u64().unwrap_or(0) as u32;
+                        height = stream["height"].as_u64().unwrap_or(0) as u32;
+                        codec = stream["codec_name"].as_str().map(String::from);
+                        // Parse fps from r_frame_rate (e.g., "30000/1001")
+                        if let Some(rate) = stream["r_frame_rate"].as_str() {
+                            let parts: Vec<&str> = rate.split('/').collect();
+                            if parts.len() == 2 {
+                                let num: f32 = parts[0].parse().unwrap_or(0.0);
+                                let den: f32 = parts[1].parse().unwrap_or(1.0);
+                                if den > 0.0 {
+                                    fps = num / den;
+                                }
+                            }
+                        }
+                    }
+                    "audio" if audio_codec.is_none() => {
+                        audio_codec = stream["codec_name"].as_str().map(String::from);
+                        has_audio = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        info!(
+            format = ?format,
+            duration,
+            width,
+            height,
+            fps,
+            codec = ?codec,
+            "ffprobe metadata extracted"
+        );
+
+        Ok(VideoMetadata {
+            duration_seconds: duration,
+            width,
+            height,
+            fps,
+            codec,
+            audio_codec,
+            bitrate_kbps: bitrate,
+            file_size_bytes: data.len() as u64,
+            format,
+            has_audio,
+        })
+    }
+
+    async fn extract_frames(
+        &self,
+        data: &[u8],
+        strategy: &FrameStrategy,
+    ) -> Result<Vec<VideoFrame>, VideoError> {
+        let tmp_dir = std::env::temp_dir().join("clawdesk-video");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let session_id = uuid::Uuid::new_v4();
+        let tmp_path = tmp_dir.join(format!("frames_{session_id}.tmp"));
+        let out_pattern = tmp_dir.join(format!("frame_{session_id}_%04d.raw"));
+
+        std::fs::write(&tmp_path, data)
+            .map_err(|e| VideoError::ProcessingFailed(format!("write temp: {e}")))?;
+
+        // Build ffmpeg args based on strategy
+        let mut args = vec![
+            "-i".to_string(),
+            tmp_path.to_string_lossy().to_string(),
+            "-f".to_string(),
+            "rawvideo".to_string(),
+            "-pix_fmt".to_string(),
+            "rgba".to_string(),
+        ];
+
+        match strategy {
+            FrameStrategy::Thumbnail { position } => {
+                // Get metadata first to know duration
+                let meta = self.extract_metadata(data).await?;
+                let seek = meta.duration_seconds * (*position as f64);
+                args.insert(0, "-ss".to_string());
+                args.insert(1, format!("{seek:.2}"));
+                args.push("-frames:v".to_string());
+                args.push("1".to_string());
+            }
+            FrameStrategy::EvenlySpaced { count } => {
+                let meta = self.extract_metadata(data).await?;
+                let interval = meta.duration_seconds / (*count as f64);
+                args.push("-vf".to_string());
+                args.push(format!("fps=1/{interval:.2}"));
+                args.push("-frames:v".to_string());
+                args.push(count.to_string());
+            }
+            FrameStrategy::Keyframes { max } => {
+                args.push("-vf".to_string());
+                args.push("select=eq(pict_type\\,I)".to_string());
+                args.push("-vsync".to_string());
+                args.push("vfr".to_string());
+                args.push("-frames:v".to_string());
+                args.push(max.to_string());
+            }
+            FrameStrategy::EveryNth { n, max } => {
+                args.push("-vf".to_string());
+                args.push(format!("select=not(mod(n\\,{n}))"));
+                args.push("-vsync".to_string());
+                args.push("vfr".to_string());
+                args.push("-frames:v".to_string());
+                args.push(max.to_string());
+            }
+            FrameStrategy::AtTimestamps(timestamps) => {
+                // For specific timestamps, use select filter
+                let select_expr: Vec<String> = timestamps
+                    .iter()
+                    .map(|t| format!("between(t,{t},{:.2})", t + 0.04))
+                    .collect();
+                args.push("-vf".to_string());
+                args.push(format!("select='{}'", select_expr.join("+")));
+                args.push("-vsync".to_string());
+                args.push("vfr".to_string());
+            }
+        }
+
+        args.push(out_pattern.to_string_lossy().to_string());
+
+        let output = tokio::process::Command::new("ffmpeg")
+            .arg("-y") // overwrite
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                VideoError::ProcessingFailed(format!("ffmpeg exec: {e}"))
+            })?;
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        if !output.status.success() {
+            return Err(VideoError::ProcessingFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        // Read extracted frames (raw RGBA files)
+        let mut frames = Vec::new();
+        for i in 1..10000 {
+            let frame_path = tmp_dir.join(format!("frame_{session_id}_{i:04}.raw"));
+            if !frame_path.exists() {
+                break;
+            }
+            let raw_data = std::fs::read(&frame_path).unwrap_or_default();
+            let _ = std::fs::remove_file(&frame_path);
+            if !raw_data.is_empty() {
+                frames.push(VideoFrame {
+                    data: raw_data,
+                    width: 0,  // Would need ffprobe to get actual resolution
+                    height: 0,
+                    timestamp_seconds: i as f64, // Approximate
+                });
+            }
+        }
+
+        if frames.is_empty() {
+            return Err(VideoError::NoFrames);
+        }
+
+        Ok(frames)
+    }
+
+    async fn thumbnail(
+        &self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        position: f32,
+    ) -> Result<Vec<u8>, VideoError> {
+        let tmp_dir = std::env::temp_dir().join("clawdesk-video");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let session_id = uuid::Uuid::new_v4();
+        let tmp_path = tmp_dir.join(format!("thumb_{session_id}.tmp"));
+        let out_path = tmp_dir.join(format!("thumb_{session_id}.png"));
+
+        std::fs::write(&tmp_path, data)
+            .map_err(|e| VideoError::ProcessingFailed(format!("write temp: {e}")))?;
+
+        // Calculate seek position
+        let meta = self.extract_metadata(data).await?;
+        let seek = meta.duration_seconds * (position as f64);
+
+        let output = tokio::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-ss", &format!("{seek:.2}"),
+                "-i", &tmp_path.to_string_lossy(),
+                "-vf", &format!("scale={width}:{height}:force_original_aspect_ratio=decrease"),
+                "-frames:v", "1",
+                "-f", "image2",
+            ])
+            .arg(&out_path)
+            .output()
+            .await
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                VideoError::ProcessingFailed(format!("ffmpeg thumbnail: {e}"))
+            })?;
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        if !output.status.success() {
+            return Err(VideoError::ProcessingFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        let png_data = std::fs::read(&out_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&out_path);
+
+        if png_data.is_empty() {
+            return Err(VideoError::NoFrames);
+        }
+
+        Ok(png_data)
+    }
+}
+
 /// Stub video processor for environments without FFmpeg.
-/// Returns metadata based on file header detection.
+/// Returns metadata based on file header detection only.
+/// Use `FfmpegVideoProcessor` for full capabilities.
 pub struct StubVideoProcessor;
 
 #[async_trait]
@@ -210,7 +520,7 @@ impl VideoProcessor for StubVideoProcessor {
         _data: &[u8],
         _strategy: &FrameStrategy,
     ) -> Result<Vec<VideoFrame>, VideoError> {
-        // Stub: would call FFmpeg
+        // Stub: FFmpeg not available
         Ok(Vec::new())
     }
 
@@ -221,8 +531,22 @@ impl VideoProcessor for StubVideoProcessor {
         _height: u32,
         _position: f32,
     ) -> Result<Vec<u8>, VideoError> {
-        // Stub: would call FFmpeg
+        // Stub: FFmpeg not available
         Ok(Vec::new())
+    }
+}
+
+/// Create the best available video processor for this environment.
+///
+/// Returns `FfmpegVideoProcessor` if FFmpeg is installed, otherwise
+/// falls back to `StubVideoProcessor` with header-only detection.
+pub fn create_video_processor() -> Box<dyn VideoProcessor> {
+    if FfmpegVideoProcessor::is_available() {
+        info!("FFmpeg detected — using FfmpegVideoProcessor for video processing");
+        Box::new(FfmpegVideoProcessor)
+    } else {
+        info!("FFmpeg not found — using StubVideoProcessor (metadata only)");
+        Box::new(StubVideoProcessor)
     }
 }
 

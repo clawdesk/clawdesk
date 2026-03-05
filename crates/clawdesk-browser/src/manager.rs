@@ -80,8 +80,22 @@ impl BrowserManager {
             config,
             next_port: AtomicU16::new(base),
         });
-        mgr.start_reaper();
+        // Only start the idle-session reaper if we're inside a Tokio runtime.
+        // During Tauri's synchronous setup phase there is no reactor yet, so we
+        // defer the spawn and let callers invoke `start_reaper()` later if needed.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            mgr.start_reaper();
+        }
         mgr
+    }
+
+    /// Start the background idle-session reaper.
+    ///
+    /// Safe to call multiple times — each call spawns one additional reaper,
+    /// but in practice this should only be called once after construction
+    /// when a Tokio runtime is available.
+    pub fn ensure_reaper(self: &Arc<Self>) {
+        self.start_reaper();
     }
 
     /// Get or create a session for an agent.

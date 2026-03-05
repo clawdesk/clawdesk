@@ -168,7 +168,11 @@ pub fn thread_agent_card(
         },
         auth: AgentAuth::None,
         capabilities,
-        cap_set,
+        cap_set: {
+            let lock = std::sync::OnceLock::new();
+            let _ = lock.set(cap_set);
+            lock
+        },
         skills: vec![], // Skills are wired separately via SkillWiring
         protocol_versions: vec!["1.0".to_string()],
         max_concurrent_tasks: Some(max_tasks),

@@ -135,7 +135,7 @@ fn build_tool_policy(allow_all: bool) -> ToolPolicy {
 
 /// Resolve the LLM provider from environment variables.
 ///
-/// Priority: ANTHROPIC_API_KEY → OPENAI_API_KEY → OPENROUTER_API_KEY
+/// Priority: ANTHROPIC_API_KEY → OPENAI_API_KEY → AZURE_OPENAI_API_KEY → OPENROUTER_API_KEY
 fn resolve_provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     // Anthropic
     if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
@@ -148,10 +148,25 @@ fn resolve_provider(model: &str) -> Result<Arc<dyn Provider>, String> {
 
     // OpenAI
     if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        let base_url = std::env::var("OPENAI_BASE_URL").ok();
         info!(provider = "openai", "using OpenAI API");
         return Ok(Arc::new(clawdesk_providers::openai::OpenAiProvider::new(
             key,
-            None,
+            base_url,
+            Some(model.to_string()),
+        )));
+    }
+
+    // Azure OpenAI
+    if let Ok(key) = std::env::var("AZURE_OPENAI_API_KEY") {
+        let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT")
+            .map_err(|_| "AZURE_OPENAI_API_KEY is set but AZURE_OPENAI_ENDPOINT is missing")?;
+        let api_version = std::env::var("AZURE_OPENAI_API_VERSION").ok();
+        info!(provider = "azure_openai", "using Azure OpenAI API");
+        return Ok(Arc::new(clawdesk_providers::azure::AzureOpenAiProvider::new(
+            key,
+            endpoint,
+            api_version,
             Some(model.to_string()),
         )));
     }
@@ -165,7 +180,7 @@ fn resolve_provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     }
 
     Err(
-        "No API key found. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY"
+        "No API key found. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, AZURE_OPENAI_API_KEY, OPENROUTER_API_KEY"
             .to_string(),
     )
 }

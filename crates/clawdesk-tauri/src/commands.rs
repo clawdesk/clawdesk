@@ -112,6 +112,12 @@ pub struct CreateAgentRequest {
     /// Empty means the agent is a wildcard and handles any channel.
     #[serde(default)]
     pub channels: Vec<String>,
+    /// If this agent belongs to a team, the shared team identifier.
+    #[serde(default)]
+    pub team_id: Option<String>,
+    /// Role within the team (e.g. "router", "researcher", "developer").
+    #[serde(default)]
+    pub team_role: Option<String>,
 }
 
 /// Create a new agent with an IdentityContract.
@@ -188,6 +194,8 @@ pub async fn create_agent(
         source: request.source.unwrap_or_else(|| "clawdesk".to_string()),
         template_id,
         channels: request.channels,
+        team_id: request.team_id,
+        team_role: request.team_role,
     };
 
     {
@@ -246,6 +254,118 @@ pub async fn list_agents(state: State<'_, AppState>) -> Result<Vec<DesktopAgent>
     let agents = state.agents.read().map_err(|e| e.to_string())?;
     let mut result: Vec<DesktopAgent> = agents.values().cloned().collect();
     result.sort_by(|a, b| a.created.cmp(&b.created));
+    Ok(result)
+}
+
+/// Request to update an existing agent's properties.
+#[derive(Debug, Deserialize)]
+pub struct UpdateAgentRequest {
+    pub name: Option<String>,
+    pub icon: Option<String>,
+    pub color: Option<String>,
+    pub persona: Option<String>,
+    pub skills: Option<Vec<String>>,
+    pub model: Option<String>,
+    pub channels: Option<Vec<String>>,
+    #[serde(default)]
+    pub team_id: Option<String>,
+    #[serde(default)]
+    pub team_role: Option<String>,
+}
+
+/// Update an existing agent's properties.
+///
+/// Re-scans persona through CascadeScanner, re-hashes the identity contract,
+/// and persists the updated agent to SochDB.
+#[tauri::command]
+pub async fn update_agent(
+    agent_id: String,
+    request: UpdateAgentRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<DesktopAgent, String> {
+    // Pull the existing agent
+    let mut agent = {
+        let agents = state.agents.read().map_err(|e| e.to_string())?;
+        agents
+            .get(&agent_id)
+            .cloned()
+            .ok_or_else(|| format!("Agent {} not found", agent_id))?
+    };
+
+    // Apply updates
+    if let Some(name) = request.name { agent.name = name; }
+    if let Some(icon) = request.icon { agent.icon = icon; }
+    if let Some(color) = request.color { agent.color = color; }
+    if let Some(model) = request.model { agent.model = model; }
+    if let Some(skills) = request.skills { agent.skills = skills; }
+    if let Some(channels) = request.channels { agent.channels = channels; }
+    if let Some(team_id) = request.team_id { agent.team_id = Some(team_id); }
+    if let Some(team_role) = request.team_role { agent.team_role = Some(team_role); }
+
+    // If persona changed, re-scan and re-hash
+    if let Some(persona) = request.persona {
+        let scan_result = state.scanner.scan(&persona);
+        if !scan_result.passed {
+            let findings: Vec<String> = scan_result
+                .findings
+                .iter()
+                .map(|f| format!("{}: {}", f.rule, f.description))
+                .collect();
+            return Err(format!(
+                "Persona failed security scan: {}",
+                findings.join("; ")
+            ));
+        }
+        agent.persona = persona.clone();
+        let identity = IdentityContract::new(persona, IdentitySource::UserConfig);
+        agent.persona_hash = identity.persona_hash_hex();
+        // Update identity store
+        if let Ok(mut identities) = state.identities.write() {
+            identities.insert(agent_id.clone(), identity);
+        }
+    }
+
+    let result = agent.clone();
+    {
+        let mut agents = state.agents.write().map_err(|e| e.to_string())?;
+        agents.insert(agent_id.clone(), agent);
+    }
+
+    // Persist & audit
+    state.persist_agent(&agent_id, &result);
+    state
+        .audit_logger
+        .log(
+            AuditCategory::SessionLifecycle,
+            "agent_updated",
+            AuditActor::System,
+            Some(agent_id),
+            serde_json::json!({
+                "name": &result.name,
+                "model": &result.model,
+                "persona_hash": &result.persona_hash,
+            }),
+            AuditOutcome::Success,
+        )
+        .await;
+    emit_security_changed(&app, &state).await;
+
+    // Update A2A directory
+    if let Ok(mut dir) = state.agent_directory.write() {
+        let mut card = clawdesk_acp::AgentCard::new(
+            result.id.clone(),
+            result.name.clone(),
+            "local://desktop",
+        );
+        card.description = result.persona.chars().take(200).collect();
+        card = card.with_capability(clawdesk_acp::CapabilityId::TextGeneration);
+        if !result.channels.is_empty() {
+            card = card.with_capability(clawdesk_acp::CapabilityId::Messaging);
+        }
+        dir.register(card);
+    }
+
     Ok(result)
 }
 
@@ -424,6 +544,8 @@ pub async fn import_openclaw_config(
                 source: "openclaw-import".to_string(),
                 template_id: None,
                 channels: Vec::new(),
+                team_id: None,
+                team_role: None,
             };
 
             if let Ok(mut identities) = state.identities.write() {
@@ -459,6 +581,8 @@ pub async fn import_openclaw_config(
             source: "openclaw-import".to_string(),
             template_id: None,
             channels: Vec::new(),
+            team_id: None,
+            team_role: None,
         };
         if let Ok(mut identities) = state.identities.write() {
             identities.insert(agent.id.clone(), identity);
@@ -1285,8 +1409,56 @@ pub async fn send_message(
         &active_skills,
     ).await;
 
-    let system_prompt = pipeline_result.system_prompt;
+    let mut system_prompt = pipeline_result.system_prompt;
     let memory_injection = pipeline_result.memory_injection;
+
+    // ── Team roster injection ──────────────────────────────────────────
+    // If this agent is a team router, inject a structured roster of all
+    // team members into the system prompt so the LLM knows their IDs,
+    // names, and roles and can delegate via `spawn_subagent`.
+    if agent.team_role.as_deref() == Some("router") {
+        if let Some(ref team_id) = agent.team_id {
+            let agents_guard = state.agents.read().map_err(|e| e.to_string())?;
+            let teammates: Vec<_> = agents_guard
+                .values()
+                .filter(|a| a.team_id.as_deref() == Some(team_id) && a.id != agent.id)
+                .collect();
+            if !teammates.is_empty() {
+                let mut roster = String::from(
+                    "\n\n## Your Team\n\n\
+You are the **router** for this team. Your job is to analyze each user request \
+and delegate tasks to the right team member(s) using `spawn_subagent`. \
+Do NOT try to do everything yourself — route to specialists.\n\n\
+### How to delegate\n\
+Call the `spawn_subagent` tool with the teammate's `agent_id` and a clear task description.\n\
+You can delegate to multiple teammates in parallel for independent tasks.\n\
+After receiving their results, synthesize a unified response for the user.\n\n\
+### Team Members\n\n"
+                );
+                for mate in &teammates {
+                    let role = mate.team_role.as_deref().unwrap_or("specialist");
+                    roster.push_str(&format!(
+                        "- **{}** (role: {}) — agent_id: `{}`\n",
+                        mate.name, role, mate.id,
+                    ));
+                    // Include first 200 chars of persona as a capability hint
+                    let hint: String = mate.persona.chars().take(200).collect();
+                    if !hint.is_empty() {
+                        roster.push_str(&format!("  Capabilities: {}\n", hint.trim()));
+                    }
+                }
+                roster.push_str(
+                    "\n### Routing Guidelines\n\
+- For business/growth/metrics questions → delegate to the Business & Growth agent\n\
+- For marketing/content/social media questions → delegate to the Marketing agent\n\
+- For coding/architecture/bugs → delegate to the Dev/Engineering agent\n\
+- For strategic/multi-domain requests → delegate to multiple agents and synthesize\n\
+- Only answer directly if the request is about coordination, planning, or team status\n"
+                );
+                system_prompt.push_str(&roster);
+            }
+        }
+    }
 
     // Store manifest for inspector command
     if let Some(ref manifest) = pipeline_result.prompt_manifest {
@@ -1620,6 +1792,10 @@ pub async fn send_message(
         })
     };
 
+    // Clone provider before AgentRunner takes ownership — team dispatch
+    // reuses the router's provider for sub-agents with model="default".
+    let provider_for_team = Arc::clone(&provider);
+
     let mut runner = AgentRunner::new(
         provider,
         request_tool_registry,
@@ -1679,76 +1855,751 @@ pub async fn send_message(
         }
     });
 
-    // Run the agent pipeline with full failover support (fix).
+    // ── Three-Phase Team Orchestration ─────────────────────────────────
     //
-    // `run_with_failover()` replaces the manual retry loop with the
-    // FailoverController DFA — multi-stage recovery:
-    //   Level 1: Retry same model with decorrelated-jitter backoff
-    //   Level 2: Rotate to next auth profile via ProfileRotator
-    //   Level 3: Fallback to next model in the failover chain
-    //   Level 4: Thinking-level downgrade on context overflow
+    // Architecture (principal-engineer design, informed by OpenFang research):
     //
-    // When FailoverConfig is `None`, it falls through to a single `run()` call.
+    // When the agent is a team router with teammates, we orchestrate in
+    // three phases — each with a fail-open fallback:
     //
-    // Acquire global concurrency permit before the LLM call.
-    // This bounds total parallel LLM calls across all sessions, preventing
-    // API rate-limit exhaustion and memory pressure from unbounded concurrency.
-    let _llm_permit = state.llm_concurrency.acquire().await
-        .map_err(|_| "LLM concurrency semaphore closed".to_string())?;
+    //   Phase 1 — DECOMPOSITION: Router LLM analyzes the user's request
+    //     and crafts specific, actionable sub-tasks per specialist.
+    //     Transforms "design a cake shop" → "Write a business plan with
+    //     TAM/SAM/SOM, revenue projections Y1-3, pricing per category…"
+    //     Fallback: generic role-based framing.
+    //
+    //   Phase 2 — PARALLEL DISPATCH: Each specialist receives their bespoke
+    //     sub-task (not the raw user message). Full agent loop with persona
+    //     as system prompt. Bounded concurrency via llm_concurrency semaphore.
+    //     Fallback: individual agent errors captured, team continues.
+    //
+    //   Phase 3 — SYNTHESIS: Router LLM reads all specialist outputs and
+    //     produces a coherent, unified document. Streamed live to the user.
+    //     Fallback: concatenated results with attribution headers.
+    //
+    // Total wall-clock ≈ decomposition + max(specialist latencies) + synthesis.
+    // Provider resolution: model="default" reuses the router's Arc (O(1)).
+
+    // Register this run in the cancellation registry BEFORE any LLM call.
     {
         let mut active = state.active_chat_runs.write().await;
         active.insert(chat_id.clone(), run_cancel.clone());
     }
-    let run_result = runner
-        .run_with_failover(history.clone(), system_prompt.clone())
-        .await
-        .map_err(|e| e.to_string());
-    drop(_llm_permit); // Release concurrency slot immediately after LLM call
 
-    // Clear this run from active cancellation registry.
-    {
-        let mut active = state.active_chat_runs.write().await;
-        active.remove(&chat_id);
-    }
+    let team_response: Option<clawdesk_agents::runner::AgentResponse> = {
+        let mut team_result: Option<clawdesk_agents::runner::AgentResponse> = None;
 
-    // Drop ALL broadcast senders so the forwarder sees `Closed` and exits.
-    // `runner` holds a cloned Sender from `.with_events(event_tx.clone())` and
-    // `run(&self)` does not consume it, so we must drop runner explicitly first.
-    // Without this, `forward_task.await` hangs forever because the channel never
-    // closes, which in turn holds `_session_guard` indefinitely and causes the
-    // next message on this session to hit the 300s watchdog timeout.
-    drop(runner);
-    drop(_event_tx_keepalive);
-    let _ = forward_task.await;
+        if agent.team_role.as_deref() == Some("router") {
+            if let Some(ref team_id) = agent.team_id {
+                // Gather teammates (deterministic ordering by name).
+                let teammates: Vec<DesktopAgent> = {
+                    let agents_guard = state.agents.read().map_err(|e| e.to_string())?;
+                    let mut mates: Vec<_> = agents_guard
+                        .values()
+                        .filter(|a| a.team_id.as_deref() == Some(team_id.as_str()) && a.id != agent.id)
+                        .cloned()
+                        .collect();
+                    mates.sort_by(|a, b| a.name.cmp(&b.name));
+                    mates
+                };
 
-    let (agent_response, execution_err): (clawdesk_agents::runner::AgentResponse, Option<String>) = match run_result {
-        Ok(resp) => (resp, None),
-        Err(e) => {
-            let msg = format!("Agent execution failed: {}", e);
-            let _ = app.emit(
-                "system:alert",
-                serde_json::json!({
-                    "level": "error",
-                    "title": "Agent execution failed",
-                    "message": msg.clone(),
-                }),
-            );
+                if !teammates.is_empty() {
+                    // ── Provider Resolution (synchronous, no locks across awaits) ──
+                    let mut resolved_mates: Vec<(DesktopAgent, String, Arc<dyn clawdesk_providers::Provider>)> =
+                        Vec::with_capacity(teammates.len());
 
-            // Construct a fake AgentResponse to represent the error message so it gets persisted
-            let err_resp = clawdesk_agents::runner::AgentResponse {
-                content: msg.clone(),
-                total_rounds: 1,
-                tool_messages: vec![],
-                finish_reason: clawdesk_providers::FinishReason::Stop,
-                input_tokens: 0,
-                output_tokens: 0,
-                segments: vec![],
-                active_skills: vec![],
-                messaging_sends: vec![],
-            };
-            (err_resp, Some(msg))
+                    for mate in &teammates {
+                        let is_default = mate.model.is_empty()
+                            || mate.model == "default"
+                            || mate.model == "auto";
+
+                        let (resolved_model, resolved_provider) = if is_default {
+                            (model_full_id.clone(), Arc::clone(&provider_for_team))
+                        } else {
+                            let mid = AppState::resolve_model_id(&mate.model);
+                            let p = {
+                                use clawdesk_providers::capability::ProviderCaps;
+                                let negotiator = state.negotiator.read().map_err(|e| e.to_string())?;
+                                let required = ProviderCaps::TEXT_COMPLETION.union(ProviderCaps::SYSTEM_PROMPT);
+                                match negotiator.resolve_model(&mid, required) {
+                                    Some((p, _)) => Arc::clone(p),
+                                    None => {
+                                        drop(negotiator);
+                                        state.resolve_provider(&mate.model)?
+                                    }
+                                }
+                            };
+                            (mid, p)
+                        };
+                        resolved_mates.push((mate.clone(), resolved_model, resolved_provider));
+                    }
+
+                    tracing::info!(
+                        team_id = %team_id,
+                        router = %agent.name,
+                        members = resolved_mates.len(),
+                        "Three-phase team orchestration: providers resolved"
+                    );
+
+                    // Collect agent metadata for later reference (synthesis headers).
+                    let agent_meta: Vec<(String, String, String)> = resolved_mates.iter()
+                        .map(|(m, _, _)| (
+                            m.id.clone(),
+                            m.name.clone(),
+                            m.team_role.clone().unwrap_or_else(|| "specialist".to_string()),
+                        ))
+                        .collect();
+
+                    // ════════════════════════════════════════════════════════════
+                    // PHASE 1: TASK DECOMPOSITION via Router LLM
+                    // ════════════════════════════════════════════════════════════
+                    //
+                    // The router LLM analyzes the user's request and produces
+                    // specific, actionable sub-tasks per specialist. This is the
+                    // critical quality multiplier — it transforms vague requests
+                    // into concrete deliverable specifications.
+
+                    let _ = app.emit("agent:event", serde_json::json!({
+                        "agent_id": agent.id,
+                        "event": "StreamChunk",
+                        "data": "🧠 **Analyzing request and planning team tasks...**\n\n",
+                    }));
+
+                    // Build decomposition prompt with team roster.
+                    let mut roster_for_decomp = String::new();
+                    for (mate, _, _) in &resolved_mates {
+                        let role = mate.team_role.as_deref().unwrap_or("specialist");
+                        let hint: String = mate.persona.chars().take(300).collect();
+                        roster_for_decomp.push_str(&format!(
+                            "- **{}** (agent_id: `{}`, role: {})\n  Capabilities: {}\n",
+                            mate.name, mate.id, role, hint.trim(),
+                        ));
+                    }
+
+                    let decomp_system_prompt = format!(
+                        "You are a task decomposition engine for a multi-agent team. \
+                        Your ONLY job is to analyze the user's request and break it into \
+                        SPECIFIC, ACTIONABLE sub-tasks — one per team member.\n\n\
+                        ## Team Members\n\n{}\n\n\
+                        ## Output Format\n\n\
+                        Output ONLY a JSON object with this exact structure:\n\
+                        ```json\n\
+                        {{\n\
+                          \"tasks\": [\n\
+                            {{\n\
+                              \"agent_id\": \"<exact agent_id from above>\",\n\
+                              \"task\": \"Detailed, specific task with expected deliverable format\"\n\
+                            }}\n\
+                          ]\n\
+                        }}\n\
+                        ```\n\n\
+                        ## Rules\n\n\
+                        - Each task must be HYPER-SPECIFIC: include expected sections, data points, \
+                        metrics, formats, and exact deliverables.\n\
+                        - BAD task: \"Handle the business aspects of a cake shop\"\n\
+                        - GOOD task: \"Write a complete Business Plan section containing: 1) Market \
+                        analysis with TAM/SAM/SOM size estimates and 3 local competitors with their \
+                        strengths/weaknesses, 2) Revenue projections for years 1-3 with monthly \
+                        breakdown for year 1 and assumptions stated, 3) Pricing strategy with specific \
+                        cake categories (wedding, custom, daily) and price ranges per category, \
+                        4) Break-even analysis with fixed costs (rent, staff, equipment) and variable \
+                        costs (ingredients, packaging) itemized\"\n\
+                        - Each task should produce a COMPLETE, STANDALONE deliverable section.\n\
+                        - The specialist should be able to WRITE the actual content, not just plan it.\n\
+                        - Only assign to agents whose role matches. Skip agents if the request \
+                        doesn't need their expertise.\n\
+                        - Output ONLY the JSON. No other text before or after.",
+                        roster_for_decomp,
+                    );
+
+                    let decomp_request = clawdesk_providers::ProviderRequest {
+                        model: model_full_id.clone(),
+                        messages: vec![
+                            clawdesk_providers::ChatMessage::new(
+                                clawdesk_providers::MessageRole::User,
+                                request.content.as_str(),
+                            ),
+                        ],
+                        system_prompt: Some(decomp_system_prompt),
+                        max_tokens: Some(2048),
+                        temperature: Some(0.3),
+                        tools: vec![],
+                        stream: false,
+                    };
+
+                    // Acquire concurrency permit for decomposition LLM call.
+                    let decomp_permit = state.llm_concurrency.acquire().await
+                        .map_err(|_| "LLM concurrency semaphore closed".to_string())?;
+
+                    let decomp_result = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(60),
+                        provider_for_team.complete(&decomp_request),
+                    ).await;
+
+                    drop(decomp_permit);
+
+                    // Parse decomposition result into per-agent tasks.
+                    // Fallback: generic role-based framing if parsing or LLM fails.
+                    let generic_fallback = |mates: &[(DesktopAgent, String, Arc<dyn clawdesk_providers::Provider>)]| -> Vec<(String, String)> {
+                        mates.iter().map(|(m, _, _)| {
+                            let role = m.team_role.as_deref().unwrap_or("specialist");
+                            (m.id.clone(), format!(
+                                "You are the team's {} specialist. Produce a COMPLETE, DETAILED \
+                                section for your area of expertise. Write the actual deliverable \
+                                content — not a list of what you would do. Be specific with numbers, \
+                                names, timelines, and actionable steps.\n\nRequest: {}",
+                                role, request.content,
+                            ))
+                        }).collect()
+                    };
+
+                    let mut decomp_tokens_in: u64 = 0;
+                    let mut decomp_tokens_out: u64 = 0;
+
+                    let agent_tasks: Vec<(String, String)> = match decomp_result {
+                        Ok(Ok(response)) => {
+                            decomp_tokens_in = response.usage.input_tokens;
+                            decomp_tokens_out = response.usage.output_tokens;
+                            tracing::info!(
+                                tokens_in = response.usage.input_tokens,
+                                tokens_out = response.usage.output_tokens,
+                                "Phase 1 decomposition: LLM responded"
+                            );
+
+                            // Try to extract JSON from response (may be wrapped in ```json...```).
+                            let content = &response.content;
+                            let parsed_tasks: Option<Vec<(String, String)>> = (|| {
+                                let json_str = {
+                                    let start = content.find('{')?;
+                                    let end = content.rfind('}')?;
+                                    if end <= start { return None; }
+                                    &content[start..=end]
+                                };
+
+                                let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+                                let tasks = parsed.get("tasks")?.as_array()?;
+
+                                let mut result = Vec::new();
+                                for task_obj in tasks {
+                                    let aid = task_obj.get("agent_id")?.as_str()?;
+                                    let task_text = task_obj.get("task")?.as_str()?;
+                                    if resolved_mates.iter().any(|(m, _, _)| m.id == aid) {
+                                        result.push((aid.to_string(), task_text.to_string()));
+                                    }
+                                }
+                                if result.is_empty() { None } else { Some(result) }
+                            })();
+
+                            match parsed_tasks {
+                                Some(tasks) => {
+                                    tracing::info!(
+                                        task_count = tasks.len(),
+                                        "Phase 1 decomposition: parsed specific tasks"
+                                    );
+                                    // Emit the decomposed task plan to user.
+                                    let mut plan_text = format!(
+                                        "📋 **Task plan** ({} specialist{}):\n\n",
+                                        tasks.len(),
+                                        if tasks.len() == 1 { "" } else { "s" },
+                                    );
+                                    for (aid, task_text) in &tasks {
+                                        let name = agent_meta.iter()
+                                            .find(|(id, _, _)| id == aid)
+                                            .map(|(_, n, _)| n.as_str())
+                                            .unwrap_or("Unknown");
+                                        let preview = if task_text.len() > 150 {
+                                            format!("{}…", &task_text[..task_text.char_indices().take_while(|(i, _)| *i < 150).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(150)])
+                                        } else {
+                                            task_text.clone()
+                                        };
+                                        plan_text.push_str(&format!("- **{}**: {}\n", name, preview));
+                                    }
+                                    plan_text.push_str("\n---\n\n");
+                                    let _ = app.emit("agent:event", serde_json::json!({
+                                        "agent_id": agent.id,
+                                        "event": "StreamChunk",
+                                        "data": &plan_text,
+                                    }));
+                                    tasks
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        raw_len = content.len(),
+                                        "Phase 1 decomposition: JSON parse failed, using generic framing"
+                                    );
+                                    let _ = app.emit("agent:event", serde_json::json!({
+                                        "agent_id": agent.id,
+                                        "event": "StreamChunk",
+                                        "data": "⚠️ Task decomposition couldn't parse — using general assignment.\n\n---\n\n",
+                                    }));
+                                    generic_fallback(&resolved_mates)
+                                }
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "Phase 1 decomposition: provider error, using generic framing");
+                            let _ = app.emit("agent:event", serde_json::json!({
+                                "agent_id": agent.id,
+                                "event": "StreamChunk",
+                                "data": "⚠️ Task decomposition failed — using general assignment.\n\n---\n\n",
+                            }));
+                            generic_fallback(&resolved_mates)
+                        }
+                        Err(_) => {
+                            tracing::warn!("Phase 1 decomposition: timed out after 60s, using generic framing");
+                            let _ = app.emit("agent:event", serde_json::json!({
+                                "agent_id": agent.id,
+                                "event": "StreamChunk",
+                                "data": "⚠️ Task decomposition timed out — using general assignment.\n\n---\n\n",
+                            }));
+                            generic_fallback(&resolved_mates)
+                        }
+                    };
+
+                    // ════════════════════════════════════════════════════════════
+                    // PHASE 2: PARALLEL SPECIALIST DISPATCH
+                    // ════════════════════════════════════════════════════════════
+                    //
+                    // Each specialist receives their bespoke sub-task from Phase 1.
+                    // Full agent loop with persona as system prompt.
+
+                    // Build a task lookup: agent_id → decomposed task.
+                    let task_map: std::collections::HashMap<String, String> =
+                        agent_tasks.into_iter().collect();
+
+                    let mut handles = Vec::with_capacity(resolved_mates.len());
+
+                    for (mate, resolved_model, mate_provider) in resolved_mates {
+                        let mate_name = mate.name.clone();
+                        let mate_role = mate.team_role.clone().unwrap_or_else(|| "specialist".to_string());
+                        let mate_persona = mate.persona.clone();
+                        let mate_id = mate.id.clone();
+                        // Look up the decomposed task for this agent. Fallback to generic.
+                        let task = task_map.get(&mate_id).cloned().unwrap_or_else(|| {
+                            format!(
+                                "Produce a complete, detailed section for your area of \
+                                expertise ({}). Write the actual deliverable — not a list \
+                                of plans. Request: {}",
+                                mate_role, request.content,
+                            )
+                        });
+
+                        let cancel = run_cancel.clone();
+                        let tools = Arc::clone(&state.tool_registry);
+                        let sandbox_eng = Arc::clone(&state.sandbox_engine);
+                        let memory = Arc::clone(&state.memory);
+                        let app_clone = app.clone();
+                        let router_agent_id = agent.id.clone();
+                        let llm_sem = Arc::clone(&state.llm_concurrency);
+
+                        handles.push(tokio::spawn(async move {
+                            // Acquire concurrency permit — bounds total parallel LLM
+                            // calls, preventing rate-limit exhaustion.
+                            let _permit = llm_sem.acquire().await
+                                .map_err(|_| "LLM concurrency semaphore closed".to_string())?;
+
+                            let _ = app_clone.emit("agent:event", serde_json::json!({
+                                "agent_id": router_agent_id,
+                                "event": "StreamChunk",
+                                "data": format!("⏳ **{}** ({}) is working...\n", mate_name, mate_role),
+                            }));
+
+                            let config = clawdesk_agents::AgentConfig {
+                                model: resolved_model,
+                                system_prompt: String::new(),
+                                max_tool_rounds: 5,
+                                ..Default::default()
+                            };
+                            let runner = clawdesk_agents::AgentRunner::new(
+                                mate_provider, tools, config, cancel,
+                            )
+                            .with_sandbox_gate(Arc::new(crate::commands::SandboxGateAdapter {
+                                engine: sandbox_eng,
+                            }))
+                            .with_memory_recall({
+                                let mem = memory;
+                                Arc::new(move |query: String| {
+                                    let mem = Arc::clone(&mem);
+                                    Box::pin(async move {
+                                        match mem.recall(&query, Some(5)).await {
+                                            Ok(results) => results.into_iter().filter_map(|r| {
+                                                let text = r.content?;
+                                                if text.is_empty() { return None; }
+                                                Some(clawdesk_agents::MemoryRecallResult {
+                                                    relevance: r.score as f64,
+                                                    source: r.metadata.get("source")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(String::from),
+                                                    content: text,
+                                                })
+                                            }).collect(),
+                                            Err(_) => vec![],
+                                        }
+                                    })
+                                })
+                            });
+
+                            let sub_history = vec![
+                                clawdesk_providers::ChatMessage::new(
+                                    clawdesk_providers::MessageRole::User,
+                                    task.as_str(),
+                                ),
+                            ];
+                            let timeout = tokio::time::Duration::from_secs(180);
+                            let result = match tokio::time::timeout(timeout, runner.run(sub_history, mate_persona)).await {
+                                Ok(Ok(response)) => {
+                                    tracing::info!(
+                                        agent = %mate_name,
+                                        tokens_in = response.input_tokens,
+                                        tokens_out = response.output_tokens,
+                                        rounds = response.total_rounds,
+                                        "Phase 2 dispatch: sub-agent completed"
+                                    );
+                                    Ok((response.content, response.input_tokens, response.output_tokens))
+                                }
+                                Ok(Err(e)) => Err(format!("Agent error: {e}")),
+                                Err(_) => Err("Timed out after 180s".to_string()),
+                            };
+
+                            let status_icon = if result.is_ok() { "✅" } else { "❌" };
+                            let _ = app_clone.emit("agent:event", serde_json::json!({
+                                "agent_id": router_agent_id,
+                                "event": "StreamChunk",
+                                "data": format!("{} **{}** completed.\n", status_icon, mate_name),
+                            }));
+
+                            Ok::<_, String>((mate_name, mate_role, result))
+                        }));
+                    }
+
+                    // Collect Phase 2 results.
+                    let mut dispatch_results: Vec<(String, String, Result<(String, u64, u64), String>)> =
+                        Vec::with_capacity(handles.len());
+                    for handle in handles {
+                        match handle.await {
+                            Ok(Ok(tuple)) => dispatch_results.push(tuple),
+                            Ok(Err(e)) => tracing::error!(error = %e, "Phase 2 dispatch: sub-agent task error"),
+                            Err(e) => tracing::error!(error = %e, "Phase 2 dispatch: join error"),
+                        }
+                    }
+
+                    let succeeded = dispatch_results.iter().filter(|(_, _, r)| r.is_ok()).count();
+                    let p2_input_tokens: u64 = dispatch_results.iter()
+                        .filter_map(|(_, _, r)| r.as_ref().ok()).map(|(_, i, _)| i).sum();
+                    let p2_output_tokens: u64 = dispatch_results.iter()
+                        .filter_map(|(_, _, r)| r.as_ref().ok()).map(|(_, _, o)| o).sum();
+
+                    tracing::info!(
+                        team_id = %team_id,
+                        total = dispatch_results.len(),
+                        succeeded = succeeded,
+                        failed = dispatch_results.len() - succeeded,
+                        p2_input_tokens,
+                        p2_output_tokens,
+                        "Phase 2 dispatch: all sub-agents completed"
+                    );
+
+                    if succeeded == 0 {
+                        // All specialists failed — fall through to normal router path.
+                        tracing::warn!("Phase 2 dispatch: all sub-agents failed, falling back to direct router response");
+                    } else {
+                        // ════════════════════════════════════════════════════════════
+                        // PHASE 3: SYNTHESIS via Router LLM
+                        // ════════════════════════════════════════════════════════════
+                        //
+                        // The router LLM reads all specialist outputs and produces a
+                        // coherent, unified document. Streamed live to the user.
+                        // Fallback: concatenated results with attribution headers.
+
+                        let _ = app.emit("agent:event", serde_json::json!({
+                            "agent_id": agent.id,
+                            "event": "StreamChunk",
+                            "data": "\n---\n\n✍️ **Synthesizing team outputs into a unified response...**\n\n",
+                        }));
+
+                        // Build synthesis context with all specialist outputs.
+                        let mut specialist_sections = String::new();
+                        for (name, role, result) in &dispatch_results {
+                            specialist_sections.push_str(&format!("### {} ({})\n\n", name, role));
+                            match result {
+                                Ok((content, _, _)) => {
+                                    specialist_sections.push_str(content);
+                                    specialist_sections.push_str("\n\n");
+                                }
+                                Err(e) => {
+                                    specialist_sections.push_str(&format!(
+                                        "*[This specialist encountered an error: {}]*\n\n", e
+                                    ));
+                                }
+                            }
+                        }
+
+                        let synth_system_prompt = format!(
+                            "You are a synthesis engine. Your team of {} specialists has each \
+                            produced a section in response to the user's request. Your job is to \
+                            combine their work into a SINGLE, POLISHED, COHERENT document.\n\n\
+                            ## Rules\n\n\
+                            - Preserve ALL substantive content from each specialist.\n\
+                            - Remove redundancy — if two specialists cover the same point, keep \
+                            the more detailed version.\n\
+                            - Add smooth transitions between sections so it reads as one document.\n\
+                            - Use clear headings and professional Markdown formatting.\n\
+                            - Maintain a consistent, professional tone throughout.\n\
+                            - Do NOT add new information — only organize and polish what's provided.\n\
+                            - Do NOT mention the team, specialists, or synthesis process.\n\
+                            - Write as if YOU are the single author of this complete document.\n\
+                            - The output should be the final deliverable, ready for the user.",
+                            succeeded,
+                        );
+
+                        let synth_user_msg = format!(
+                            "Original request: {}\n\n\
+                            ---\n\n\
+                            ## Specialist Reports\n\n{}\n\
+                            ---\n\n\
+                            Combine the above into a single, coherent document that directly \
+                            addresses the original request. Write the complete output now.",
+                            request.content,
+                            specialist_sections,
+                        );
+
+                        let synth_request = clawdesk_providers::ProviderRequest {
+                            model: model_full_id.clone(),
+                            messages: vec![
+                                clawdesk_providers::ChatMessage::new(
+                                    clawdesk_providers::MessageRole::User,
+                                    synth_user_msg.as_str(),
+                                ),
+                            ],
+                            system_prompt: Some(synth_system_prompt),
+                            max_tokens: Some(8192),
+                            temperature: Some(0.4),
+                            tools: vec![],
+                            stream: true,
+                        };
+
+                        // Acquire concurrency permit for synthesis.
+                        let synth_permit = state.llm_concurrency.acquire().await
+                            .map_err(|_| "LLM concurrency semaphore closed".to_string())?;
+
+                        // Stream synthesis directly to user.
+                        let (synth_tx, mut synth_rx) =
+                            tokio::sync::mpsc::channel::<clawdesk_providers::StreamChunk>(64);
+
+                        let synth_provider = Arc::clone(&provider_for_team);
+                        let synth_handle = tokio::spawn(async move {
+                            synth_provider.stream(&synth_request, synth_tx).await
+                        });
+
+                        let mut synth_content = String::new();
+                        let mut synth_tokens_in: u64 = 0;
+                        let mut synth_tokens_out: u64 = 0;
+
+                        while let Some(chunk) = synth_rx.recv().await {
+                            if !chunk.delta.is_empty() {
+                                synth_content.push_str(&chunk.delta);
+                                let _ = app.emit("agent:event", serde_json::json!({
+                                    "agent_id": agent.id,
+                                    "event": "StreamChunk",
+                                    "data": &chunk.delta,
+                                }));
+                            }
+                            if let Some(ref usage) = chunk.usage {
+                                synth_tokens_in = usage.input_tokens;
+                                synth_tokens_out = usage.output_tokens;
+                            }
+                        }
+
+                        // Wait for the provider stream task to complete.
+                        let synth_stream_result = synth_handle.await;
+                        drop(synth_permit);
+
+                        let synthesis_ok = match synth_stream_result {
+                            Ok(Ok(())) => true,
+                            Ok(Err(e)) => {
+                                tracing::warn!(error = %e, "Phase 3 synthesis: provider stream error");
+                                false
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Phase 3 synthesis: join error");
+                                false
+                            }
+                        };
+
+                        let final_content = if synthesis_ok && !synth_content.is_empty() {
+                            tracing::info!(
+                                synth_len = synth_content.len(),
+                                synth_tokens_in,
+                                synth_tokens_out,
+                                "Phase 3 synthesis: completed successfully"
+                            );
+                            synth_content
+                        } else {
+                            // Synthesis failed — fall back to concatenated results
+                            // with attribution headers (structural coordination).
+                            tracing::warn!("Phase 3 synthesis: failed or empty, falling back to concatenated output");
+                            let _ = app.emit("agent:event", serde_json::json!({
+                                "agent_id": agent.id,
+                                "event": "StreamChunk",
+                                "data": "\n\n⚠️ *Synthesis unavailable — showing individual specialist outputs:*\n\n",
+                            }));
+
+                            let mut fallback = String::new();
+                            for (idx, (name, role, result)) in dispatch_results.iter().enumerate() {
+                                let header = format!(
+                                    "{}## {} ({})\n\n",
+                                    if idx == 0 { "" } else { "\n---\n\n" },
+                                    name, role,
+                                );
+                                fallback.push_str(&header);
+                                let _ = app.emit("agent:event", serde_json::json!({
+                                    "agent_id": agent.id,
+                                    "event": "StreamChunk",
+                                    "data": &header,
+                                }));
+
+                                match result {
+                                    Ok((content, _, _)) => {
+                                        fallback.push_str(content);
+                                        // Stream in UTF-8-safe chunks.
+                                        let mut remaining = content.as_str();
+                                        while !remaining.is_empty() {
+                                            let end = if remaining.len() <= 512 {
+                                                remaining.len()
+                                            } else {
+                                                let mut i = 512;
+                                                while i > 0 && !remaining.is_char_boundary(i) {
+                                                    i -= 1;
+                                                }
+                                                if i == 0 { remaining.len().min(512) } else { i }
+                                            };
+                                            let (chunk, rest) = remaining.split_at(end);
+                                            let _ = app.emit("agent:event", serde_json::json!({
+                                                "agent_id": agent.id,
+                                                "event": "StreamChunk",
+                                                "data": chunk,
+                                            }));
+                                            remaining = rest;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let err_text = format!("*[Agent error: {}]*\n", e);
+                                        fallback.push_str(&err_text);
+                                        let _ = app.emit("agent:event", serde_json::json!({
+                                            "agent_id": agent.id,
+                                            "event": "StreamChunk",
+                                            "data": &err_text,
+                                        }));
+                                    }
+                                }
+                                fallback.push_str("\n\n");
+                            }
+                            fallback
+                        };
+
+                        // Aggregate token counts across all phases.
+                        let total_input = decomp_tokens_in + p2_input_tokens + synth_tokens_in;
+                        let total_output = decomp_tokens_out + p2_output_tokens + synth_tokens_out;
+
+                        tracing::info!(
+                            total_input,
+                            total_output,
+                            decomp_tokens_in,
+                            decomp_tokens_out,
+                            p2_input_tokens,
+                            p2_output_tokens,
+                            synth_tokens_in,
+                            synth_tokens_out,
+                            specialists = succeeded,
+                            "Three-phase team orchestration: complete"
+                        );
+
+                        team_result = Some(clawdesk_agents::runner::AgentResponse {
+                            content: final_content,
+                            total_rounds: dispatch_results.len() + 2, // decomp + specialists + synthesis
+                            tool_messages: vec![],
+                            finish_reason: clawdesk_providers::FinishReason::Stop,
+                            input_tokens: total_input,
+                            output_tokens: total_output,
+                            segments: vec![],
+                            active_skills: vec![],
+                            messaging_sends: vec![],
+                        });
+                    }
+                }
+            }
         }
+
+        team_result
     };
+
+    // ── Team path completed or fall-through to normal single-agent path ──
+
+    let (agent_response, execution_err): (clawdesk_agents::runner::AgentResponse, Option<String>) =
+        if let Some(resp) = team_response {
+            // Team path succeeded — clean up runner resources.
+            drop(runner);
+            drop(_event_tx_keepalive);
+            let _ = forward_task.await;
+            {
+                let mut active = state.active_chat_runs.write().await;
+                active.remove(&chat_id);
+            }
+            (resp, None)
+        } else {
+            // ── Normal path: single-agent LLM call with full failover ──
+            //
+            // `run_with_failover()` uses the FailoverController DFA:
+            //   Level 1: Retry same model with decorrelated-jitter backoff
+            //   Level 2: Rotate to next auth profile via ProfileRotator
+            //   Level 3: Fallback to next model in the failover chain
+            //   Level 4: Thinking-level downgrade on context overflow
+            let _llm_permit = state.llm_concurrency.acquire().await
+                .map_err(|_| "LLM concurrency semaphore closed".to_string())?;
+            // Cancel token already registered above (before team_response block).
+            let run_result = runner
+                .run_with_failover(history.clone(), system_prompt.clone())
+                .await
+                .map_err(|e| e.to_string());
+            drop(_llm_permit);
+
+            {
+                let mut active = state.active_chat_runs.write().await;
+                active.remove(&chat_id);
+            }
+
+            // Drop ALL broadcast senders so the forwarder sees `Closed` and exits.
+            drop(runner);
+            drop(_event_tx_keepalive);
+            let _ = forward_task.await;
+
+            match run_result {
+                Ok(resp) => (resp, None),
+                Err(e) => {
+                    let msg = format!("Agent execution failed: {}", e);
+                    let _ = app.emit(
+                        "system:alert",
+                        serde_json::json!({
+                            "level": "error",
+                            "title": "Agent execution failed",
+                            "message": msg.clone(),
+                        }),
+                    );
+                    let err_resp = clawdesk_agents::runner::AgentResponse {
+                        content: msg.clone(),
+                        total_rounds: 1,
+                        tool_messages: vec![],
+                        finish_reason: clawdesk_providers::FinishReason::Stop,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        segments: vec![],
+                        active_skills: vec![],
+                        messaging_sends: vec![],
+                    };
+                    (err_resp, Some(msg))
+                }
+            }
+        };
 
     // ── End LLM-call span ──
     if let (Some(tid), Some(sid)) = (&soch_trace_id, &llm_span_id) {
@@ -2477,39 +3328,36 @@ pub async fn debug_session_storage(state: State<'_, AppState>) -> Result<Vec<ser
     Ok(results)
 }
 
-/// Delete a chat session.
+/// Delete a chat session with full cascade (session state + messages + summaries +
+/// indexes + tool history + graph + traces + checkpoints + memory namespace).
 ///
-/// Note: Individual deletes use SochDB tombstones which may not survive
-/// restart due to WAL recovery limitations. The `clear_all_chats` command
-/// uses WAL truncation for guaranteed persistence. If this becomes an issue
-/// for individual deletes, a canary-based approach should be added.
+/// Uses the LifecycleManager for unified cleanup across all storage layers.
 #[tauri::command]
 pub async fn delete_chat(chat_id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    // Grab agent_id before removing from cache (needed for chat_index cleanup)
+    // Grab agent_id before removing from cache (needed for cascade cleanup)
     let agent_id = state.sessions.get(&chat_id).map(|s| s.agent_id.clone());
     state.sessions.remove(&chat_id);
-    // Atomic delete + commit under a single lock guard so an interleaving
-    // `put_durable` cannot re-write the session between delete and commit.
-    let key = format!("chats/{}", chat_id);
-    if let Err(e) = state.soch_store.delete_durable(&key) {
-        tracing::warn!(chat_id = %chat_id, error = %e, "delete_chat: failed to delete session from SochDB");
-    }
-    // Also remove tool history for this chat
-    let tool_key = format!("tool_history/{}", chat_id);
-    if let Err(e) = state.soch_store.delete_durable(&tool_key) {
-        tracing::warn!(chat_id = %chat_id, error = %e, "delete_chat: failed to delete tool history from SochDB");
-    }
-    // Clean up temporal index entry (chat_index/{agent_id}/{updated_at}/{chat_id})
-    if let Some(aid) = agent_id {
-        let prefix = format!("chat_index/{}/", aid);
-        if let Ok(entries) = state.soch_store.scan(&prefix) {
-            for (idx_key, _) in entries {
-                if idx_key.ends_with(&format!("/{}", chat_id)) {
-                    let _ = state.soch_store.delete_durable(&idx_key);
-                }
-            }
+
+    // Full cascade delete via LifecycleManager
+    let report = state.lifecycle_manager.delete_session_full(
+        &chat_id,
+        agent_id.as_deref(),
+    )?;
+
+    tracing::info!(
+        chat_id = %chat_id,
+        total_deleted = report.total_deleted,
+        warnings = report.warnings.len(),
+        duration_us = report.duration_us,
+        "delete_chat: cascade complete"
+    );
+
+    if !report.warnings.is_empty() {
+        for w in &report.warnings {
+            tracing::warn!(chat_id = %chat_id, warning = %w, "delete_chat: cascade warning");
         }
     }
+
     Ok(true)
 }
 
@@ -2917,7 +3765,7 @@ pub async fn register_skill(
         required_tools: request.allowed_tools.clone(),
         parameters: vec![],
         triggers: vec![clawdesk_skills::definition::SkillTrigger::Always],
-        estimated_tokens: request.instructions.len() / 4,
+        estimated_tokens: clawdesk_types::tokenizer::estimate_tokens(&request.instructions),
         priority_weight: 1.0,
         tags: request.tags.clone(),
         signature: None,
@@ -2961,7 +3809,7 @@ pub async fn register_skill(
         name: request.name,
         description: request.description,
         category: request.category,
-        estimated_tokens: request.instructions.len() / 4,
+        estimated_tokens: clawdesk_types::tokenizer::estimate_tokens(&request.instructions),
         state: "active".to_string(),
         verified: false,
         icon: "⚡".to_string(),
@@ -3112,6 +3960,81 @@ pub async fn create_pipeline(request: CreatePipelineRequest, state: State<'_, Ap
     Ok(result)
 }
 
+/// Delete a pipeline by ID — removes from memory, SochDB, and cron schedule.
+#[tauri::command]
+pub async fn delete_pipeline(
+    pipeline_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    {
+        let mut pipelines = state.pipelines.write().map_err(|e| e.to_string())?;
+        let before = pipelines.len();
+        pipelines.retain(|p| p.id != pipeline_id);
+        if pipelines.len() == before {
+            return Err(format!("Pipeline {} not found", pipeline_id));
+        }
+    }
+    // Remove from SochDB
+    state.delete_pipeline_from_store(&pipeline_id);
+    // Remove cron task
+    let task_id = format!("pipeline:{}", pipeline_id);
+    let _ = state.cron_manager.remove_task(&task_id).await;
+
+    state
+        .audit_logger
+        .log(
+            AuditCategory::ConfigChange,
+            "pipeline_deleted",
+            AuditActor::System,
+            Some(pipeline_id),
+            serde_json::json!({}),
+            AuditOutcome::Success,
+        )
+        .await;
+
+    Ok(true)
+}
+
+/// Update an existing pipeline — replaces steps, edges, schedule, name, description.
+#[tauri::command]
+pub async fn update_pipeline(
+    request: CreatePipelineRequest,
+    pipeline_id: String,
+    state: State<'_, AppState>,
+) -> Result<PipelineDescriptor, String> {
+    let updated = {
+        let mut pipelines = state.pipelines.write().map_err(|e| e.to_string())?;
+        let pipeline = pipelines.iter_mut().find(|p| p.id == pipeline_id)
+            .ok_or_else(|| format!("Pipeline {} not found", pipeline_id))?;
+        pipeline.name = request.name;
+        pipeline.description = request.description;
+        pipeline.steps = request.steps;
+        pipeline.edges = request.edges;
+        pipeline.schedule = request.schedule;
+        pipeline.clone()
+    };
+
+    // Write-through to SochDB
+    state.persist_pipeline(&updated);
+
+    state
+        .audit_logger
+        .log(
+            AuditCategory::ConfigChange,
+            "pipeline_updated",
+            AuditActor::System,
+            Some(updated.id.clone()),
+            serde_json::json!({ "name": &updated.name, "steps": updated.steps.len() }),
+            AuditOutcome::Success,
+        )
+        .await;
+
+    // Sync cron schedule
+    sync_pipeline_cron_schedule(&state, &updated).await;
+
+    Ok(updated)
+}
+
 /// Get historical pipeline run results from SochDB.
 #[tauri::command]
 pub async fn get_pipeline_runs(
@@ -3165,6 +4088,52 @@ pub async fn run_pipeline(
     let start = Instant::now();
     let mut step_results: Vec<serde_json::Value> = Vec::new();
     let mut step_outputs: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+
+    // ── Build cross-channel tool hint ──────────────────────────────
+    // The `message_send` tool is in state.tool_registry but the LLM
+    // won't use it unless the system prompt tells it to. Build the
+    // same channel hint that the chat path injects, so pipeline agents
+    // can send messages to Telegram, Discord, etc.
+    let channel_tool_hint: String = {
+        use clawdesk_types::channel::ChannelId;
+        let names: Vec<String> = match state.channel_registry.read() {
+            Ok(reg) => {
+                let list = reg.list();
+                // Filter out WebChat and Internal — same as the chat path.
+                // Only external channels (Telegram, Discord, etc.) are relevant.
+                let external: Vec<String> = list.iter()
+                    .filter(|id| !matches!(id, ChannelId::WebChat | ChannelId::Internal))
+                    .map(|id| format!("{}", id).to_lowercase())
+                    .collect();
+                tracing::info!(
+                    total_channels = list.len(),
+                    external_channels = external.len(),
+                    channels = ?external,
+                    "run_pipeline: channel registry channels available"
+                );
+                external
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "run_pipeline: channel_registry lock POISONED — message_send will not work");
+                Vec::new()
+            }
+        };
+        if names.is_empty() {
+            tracing::warn!("run_pipeline: no external channels available — message_send tool hint will be empty");
+            String::new()
+        } else {
+            format!(
+                "\n\n## Available Messaging Channels\n\
+                 You have access to these messaging channels: [{}]. \
+                 When your instructions mention sending a message to one of these channels, \
+                 you MUST use the `message_send` tool to deliver it. \
+                 Call `message_send` with channel=\"<channel_name>\" and content=\"<your message>\". \
+                 IMPORTANT: You MUST actually call the tool — do NOT just describe or narrate what you would do. \
+                 Do NOT ask for IDs, configuration, or confirmation. Just call the tool immediately.",
+                names.join(", ")
+            )
+        }
+    };
 
     // NOTE: Pipeline ↔ Runner Bridge
     //
@@ -3313,21 +4282,80 @@ pub async fn run_pipeline(
                     None
                 };
 
-                let model = step.model.as_deref().unwrap_or("sonnet");
-                let model_lower = model.to_lowercase();
+                // Model resolution priority for pipeline steps:
+                // 1. Explicit step.model (user chose a specific model)
+                // 2. channel_provider override (user's configured default from UI)
+                // 3. Fallback to "default" (let negotiator pick)
+                let model_lower = if let Some(ref m) = step.model {
+                    m.to_lowercase()
+                } else {
+                    // Check channel_provider override — this is the user's
+                    // configured provider from the UI Preferences/Onboarding.
+                    let cp = state.channel_provider.read().ok().and_then(|g| g.clone());
+                    if let Some(ref cp) = cp {
+                        if !cp.model.is_empty() {
+                            cp.model.to_lowercase()
+                        } else {
+                            "default".to_string()
+                        }
+                    } else {
+                        "default".to_string()
+                    }
+                };
                 let model_full = AppState::resolve_model_id(&model_lower);
 
-                // Provider resolution via negotiator (short name pre-resolved)
+                // Provider resolution via negotiator, with channel_provider override fallback.
+                // This ensures pipelines use the same provider the user configured in the UI.
                 let provider_result = {
                     use clawdesk_providers::capability::ProviderCaps;
-                    let negotiator = state.negotiator.read().map_err(|e| e.to_string())?;
-                    let required =
-                        ProviderCaps::TEXT_COMPLETION.union(ProviderCaps::SYSTEM_PROMPT);
-                    match negotiator.resolve_model(&model_full, required) {
-                        Some((p, _resolved)) => Ok(Arc::clone(p)),
-                        None => {
-                            drop(negotiator);
-                            state.resolve_provider(&model_lower)
+
+                    // First try: channel_provider override (user's UI-configured provider)
+                    let cp = state.channel_provider.read().ok().and_then(|g| g.clone());
+                    if let Some(ref cp) = cp {
+                        use clawdesk_providers::anthropic::AnthropicProvider;
+                        use clawdesk_providers::openai::OpenAiProvider;
+                        use clawdesk_providers::azure::AzureOpenAiProvider;
+                        use clawdesk_providers::gemini::GeminiProvider;
+                        use clawdesk_providers::ollama::OllamaProvider;
+                        use clawdesk_providers::cohere::CohereProvider;
+
+                        let prov_result: Result<Arc<dyn clawdesk_providers::Provider>, String> = match cp.provider.as_str() {
+                            "Anthropic" => Ok(Arc::new(AnthropicProvider::new(cp.api_key.clone(), Some(model_full.clone())))),
+                            "OpenAI" => Ok(Arc::new(OpenAiProvider::new(cp.api_key.clone(), if cp.base_url.is_empty() { None } else { Some(cp.base_url.clone()) }, Some(model_full.clone())))),
+                            "Azure OpenAI" => {
+                                let endpoint = if cp.base_url.is_empty() { "https://example.openai.azure.com".to_string() } else { cp.base_url.clone() };
+                                Ok(Arc::new(AzureOpenAiProvider::new(cp.api_key.clone(), endpoint, None, Some(model_full.clone()))))
+                            }
+                            "Google" => Ok(Arc::new(GeminiProvider::new(cp.api_key.clone(), Some(model_full.clone())))),
+                            "Cohere" => Ok(Arc::new(CohereProvider::new(cp.api_key.clone(), if cp.base_url.is_empty() { None } else { Some(cp.base_url.clone()) }, Some(model_full.clone())))),
+                            "Ollama (Local)" | "ollama" => Ok(Arc::new(OllamaProvider::new(if cp.base_url.is_empty() { None } else { Some(cp.base_url.clone()) }, Some(model_full.clone())))),
+                            "Local (OpenAI Compatible)" | "local_compatible" => {
+                                use clawdesk_providers::compatible::{CompatibleConfig, OpenAiCompatibleProvider};
+                                let url = if cp.base_url.is_empty() { "http://localhost:8080/v1".to_string() } else { cp.base_url.clone() };
+                                let config = CompatibleConfig::new("local_compatible", &url, &cp.api_key).with_default_model(model_full.clone());
+                                Ok(Arc::new(OpenAiCompatibleProvider::new(config)))
+                            }
+                            _ => {
+                                // Unknown provider name — fall through to negotiator
+                                let negotiator = state.negotiator.read().map_err(|e| e.to_string())?;
+                                let required = ProviderCaps::TEXT_COMPLETION.union(ProviderCaps::SYSTEM_PROMPT);
+                                match negotiator.resolve_model(&model_full, required) {
+                                    Some((p, _)) => Ok(Arc::clone(p)),
+                                    None => { drop(negotiator); state.resolve_provider(&model_lower) }
+                                }
+                            }
+                        };
+                        prov_result
+                    } else {
+                        // No channel_provider override — use negotiator → resolve_provider fallback.
+                        let negotiator = state.negotiator.read().map_err(|e| e.to_string())?;
+                        let required = ProviderCaps::TEXT_COMPLETION.union(ProviderCaps::SYSTEM_PROMPT);
+                        match negotiator.resolve_model(&model_full, required) {
+                            Some((p, _resolved)) => Ok(Arc::clone(p)),
+                            None => {
+                                drop(negotiator);
+                                state.resolve_provider(&model_lower)
+                            }
                         }
                     }
                 };
@@ -3384,10 +4412,13 @@ pub async fn run_pipeline(
         // Agent steps benefit from I/O concurrency (parallel LLM API calls).
         let state_ref = &state;
         let pipeline_ref = &pipeline;
+        let hint_ref = &channel_tool_hint;
 
         let futures: Vec<_> = prepared
             .into_iter()
-            .map(|(i, previous_output, agent_prep)| async move {
+            .map(|(i, previous_output, agent_prep)| {
+                let channel_hint = hint_ref.clone();
+                async move {
                 let step = &pipeline_ref.steps[i];
                 let step_start = Instant::now();
 
@@ -3412,7 +4443,7 @@ pub async fn run_pipeline(
                             // Read step config for custom prompts and settings.
                             // User-configured prompt text and max_rounds from the
                             // pipeline step UI config override defaults.
-                            let custom_prompt = step.config.get("prompt").cloned();
+                            let custom_prompt = step.config.get("prompt").cloned().filter(|s| !s.trim().is_empty());
                             let max_rounds: usize = step.config.get("max_rounds")
                                 .and_then(|v| v.parse().ok())
                                 .unwrap_or(10);
@@ -3425,11 +4456,29 @@ pub async fn run_pipeline(
                             // If the step has a custom prompt, append it to the
                             // agent's base persona. This allows pipeline designers to
                             // specialize agent behavior per-step.
+                            // The channel_tool_hint ensures the LLM knows about
+                            // message_send for Telegram/Discord/Slack delivery.
                             let system_prompt = if let Some(ref custom) = custom_prompt {
-                                format!("{}\n\n## Pipeline Step Instructions\n{}", base_prompt, custom)
+                                format!("{}\n\n## Pipeline Step Instructions\n{}{}", base_prompt, custom, channel_hint)
                             } else {
-                                base_prompt
+                                format!("{}{}", base_prompt, channel_hint)
                             };
+
+                            // Diagnostic logging for pipeline step execution.
+                            let tool_count = tool_reg.schemas().len();
+                            let has_message_send = tool_reg.schemas().iter().any(|s| s.name == "message_send");
+                            tracing::info!(
+                                step_index = i,
+                                step_label = %step.label,
+                                model = %model_id,
+                                tool_count = tool_count,
+                                has_message_send = has_message_send,
+                                channel_hint_len = channel_hint.len(),
+                                has_custom_prompt = custom_prompt.is_some(),
+                                custom_prompt_preview = ?custom_prompt.as_deref().map(|s| &s[..s.len().min(100)]),
+                                system_prompt_len = system_prompt.len(),
+                                "run_pipeline: executing agent step"
+                            );
 
                             let config = AgentConfig {
                                 model: model_id,
@@ -3476,10 +4525,26 @@ pub async fn run_pipeline(
 
                             // Use step config prompt as instruction context
                             // rather than generic "Process this as the X step" text.
+                            // If the channel hint is non-empty and the custom prompt
+                            // mentions a channel name, append a tool-usage reminder
+                            // to the user message — LLMs are more reliable about calling
+                            // tools when the user message explicitly references them.
+                            let needs_messaging_reminder = !channel_hint.is_empty() && custom_prompt.as_ref().map_or(false, |p| {
+                                let lower = p.to_lowercase();
+                                ["telegram", "discord", "slack", "whatsapp", "email", "signal", "teams", "matrix", "irc", "imessage"]
+                                    .iter()
+                                    .any(|ch| lower.contains(ch))
+                                    || lower.contains("send") || lower.contains("message")
+                            });
+                            let messaging_reminder = if needs_messaging_reminder {
+                                "\n\nREMINDER: You MUST use the `message_send` tool to deliver the message. Call it now."
+                            } else {
+                                ""
+                            };
                             let user_message = if let Some(ref custom) = custom_prompt {
                                 format!(
-                                    "Previous step output:\n{}\n\nInstructions:\n{}",
-                                    previous_output, custom
+                                    "Previous step output:\n{}\n\nInstructions:\n{}{}",
+                                    previous_output, custom, messaging_reminder
                                 )
                             } else {
                                 format!(
@@ -3496,6 +4561,25 @@ pub async fn run_pipeline(
                             match runner.run(history, system_prompt).await {
                                 Ok(response) => {
                                     let step_ms = step_start.elapsed().as_millis() as u64;
+                                    let msg_sends = response.messaging_sends.len();
+                                    tracing::info!(
+                                        step_index = i,
+                                        step_label = %step.label,
+                                        total_rounds = response.total_rounds,
+                                        input_tokens = response.input_tokens,
+                                        output_tokens = response.output_tokens,
+                                        messaging_sends = msg_sends,
+                                        content_preview = %safe_prefix(&response.content, response.content.len().min(300)),
+                                        duration_ms = step_ms,
+                                        "run_pipeline: agent step completed"
+                                    );
+                                    if msg_sends == 0 && channel_hint.len() > 0 {
+                                        tracing::warn!(
+                                            step_label = %step.label,
+                                            "run_pipeline: step had channel hint but LLM did NOT call message_send! \
+                                             The LLM may have responded with text instead of a tool call."
+                                        );
+                                    }
                                     state_ref.record_usage(
                                         &model_lower,
                                         response.input_tokens,
@@ -3596,7 +4680,7 @@ pub async fn run_pipeline(
                         false,
                     ),
                 }
-            })
+            }})
             .collect();
 
         let level_results = futures::future::join_all(futures).await;
@@ -3690,12 +4774,12 @@ pub async fn run_pipeline(
         "completed_at": Utc::now().to_rfc3339(),
     });
 
-    // ── Persist pipeline run result to SochDB ──
+    // ── Persist pipeline run result to SochDB (durable) ──
     {
         let run_id = Uuid::new_v4().to_string();
         let key = format!("pipeline_runs/{}/{}", pipeline_id, run_id);
         if let Ok(bytes) = serde_json::to_vec(&result) {
-            if let Err(e) = state.soch_store.put(&key, &bytes) {
+            if let Err(e) = state.soch_store.put_durable(&key, &bytes) {
                 tracing::error!(key = %key, error = %e, "Failed to persist pipeline run result");
             }
         }
@@ -3716,15 +4800,41 @@ async fn sync_pipeline_cron_schedule(state: &AppState, pipeline: &PipelineDescri
     let task_id = format!("pipeline:{}", pipeline.id);
 
     if let Some(ref schedule) = pipeline.schedule {
+        // Build a detailed prompt from the pipeline steps so the cron agent
+        // knows exactly what to do (e.g., "send hippo to telegram").
+        let step_instructions: Vec<String> = pipeline.steps.iter()
+            .enumerate()
+            .filter(|(_, s)| s.node_type == "agent")
+            .map(|(i, step)| {
+                let custom_prompt = step.config.get("prompt").cloned().unwrap_or_default();
+                if !custom_prompt.is_empty() {
+                    format!("Step {}: {} — {}", i + 1, step.label, custom_prompt)
+                } else {
+                    format!("Step {}: {}", i + 1, step.label)
+                }
+            })
+            .collect();
+
+        let prompt = if step_instructions.is_empty() {
+            format!(
+                "Execute the scheduled pipeline '{}'. {}",
+                pipeline.name, pipeline.description
+            )
+        } else {
+            format!(
+                "Execute the scheduled pipeline '{}'. {}\n\nSteps to perform:\n{}",
+                pipeline.name,
+                pipeline.description,
+                step_instructions.join("\n")
+            )
+        };
+
         let task = CronTask {
             id: task_id,
             name: format!("Pipeline: {}", pipeline.name),
             schedule: schedule.clone(),
-            prompt: format!(
-                "Execute the scheduled pipeline '{}'. Pipeline ID: {}",
-                pipeline.name, pipeline.id
-            ),
-            agent_id: None,
+            prompt,
+            agent_id: Some(format!("pipeline:{}", pipeline.id)),
             delivery_targets: Vec::new(),
             skip_if_running: true,
             timeout_secs: 600,

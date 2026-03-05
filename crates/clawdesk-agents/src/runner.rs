@@ -677,13 +677,13 @@ impl AgentRunnerBuilder<SandboxConfigured> {
             session_id: self.session_id,
             agent_id: self.agent_id,
             profile_rotator: self.profile_rotator,
-            active_profile_id: std::sync::Mutex::new(None),
+            active_profile_id: tokio::sync::Mutex::new(None),
             sandbox_gate: self.sandbox_gate,
             channel_context: self.channel_context,
             skill_provider: self.skill_provider,
             turn_counter: std::sync::atomic::AtomicU32::new(0),
             memory_recall_fn: self.memory_recall_fn,
-            approval_session_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            approval_session_cache: Arc::new(dashmap::DashMap::new()),
         }
     }
 }
@@ -701,6 +701,7 @@ pub struct AgentRunner {
     /// Optional approval gate for tools in `require_approval` set.
     approval_gate: Option<Arc<dyn ApprovalGate>>,
     /// Optional pre-injected context guard from upstream.
+    /// Uses `std::sync::Mutex` since the lock is never held across `.await`.
     injected_guard: std::sync::Mutex<Option<ContextGuard>>,
     /// Optional hook manager for plugin lifecycle dispatch.
     /// When present, hooks are fired at BeforeAgentStart, BeforeLlmCall,
@@ -716,7 +717,8 @@ pub struct AgentRunner {
     /// auth/rate-limit errors.
     profile_rotator: Option<Arc<ProfileRotator>>,
     /// Active profile ID (selected from rotator at run start).
-    active_profile_id: std::sync::Mutex<Option<String>>,
+    /// Uses `tokio::sync::Mutex` to avoid blocking the Tokio reactor.
+    active_profile_id: tokio::sync::Mutex<Option<String>>,
     /// Optional sandbox policy gate for tool execution.
     /// When set, tools are checked against sandbox policy before execution.
     /// Tools blocked by policy get an error result instead of executing.
@@ -740,7 +742,9 @@ pub struct AgentRunner {
     /// `AllowForSession`/`DenyForSession` decisions are cached here so
     /// subsequent calls to the same tool within this runner's lifetime
     /// skip the approval dialog.
-    approval_session_cache: Arc<tokio::sync::RwLock<std::collections::HashMap<String, ApprovalDecision>>>,
+    /// Uses `DashMap` for O(1) per-shard locking — zero reader contention
+    /// under concurrent tool execution (P0 recommendation).
+    approval_session_cache: Arc<dashmap::DashMap<String, ApprovalDecision>>,
 }
 
 impl AgentRunner {
@@ -766,13 +770,13 @@ impl AgentRunner {
             session_id: None,
             agent_id: None,
             profile_rotator: None,
-            active_profile_id: std::sync::Mutex::new(None),
+            active_profile_id: tokio::sync::Mutex::new(None),
             sandbox_gate: None,
             channel_context: None,
             skill_provider: None,
             turn_counter: std::sync::atomic::AtomicU32::new(0),
             memory_recall_fn: None,
-            approval_session_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            approval_session_cache: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -800,7 +804,7 @@ impl AgentRunner {
     /// and uses this one instead, preventing duplicate compaction. The
     /// upstream guard's token count and circuit breaker state are preserved.
     pub fn with_context_guard(self, guard: ContextGuard) -> Self {
-        *self.injected_guard.lock().expect("guard lock") = Some(guard);
+        *self.injected_guard.lock().unwrap() = Some(guard);
         self
     }
 
@@ -1081,7 +1085,7 @@ impl AgentRunner {
         // preventing duplicate compaction on already-compacted data.
         // Only create a fresh backstop guard (0.95 threshold) if none was
         // injected.
-        let mut guard = if let Some(g) = self.injected_guard.lock().expect("guard lock").take() {
+        let mut guard = if let Some(g) = self.injected_guard.lock().unwrap().take() {
             g
         } else {
             let mut g = ContextGuard::new(ContextGuardConfig {
@@ -1166,7 +1170,7 @@ impl AgentRunner {
         // This ensures we use the healthiest credential on each attempt.
         if let Some(ref rotator) = self.profile_rotator {
             if let Some(profile) = rotator.select() {
-                *self.active_profile_id.lock().expect("profile lock") = Some(profile.id.clone());
+                *self.active_profile_id.lock().await = Some(profile.id.clone());
                 info!(
                     profile = %profile.id,
                     weight = profile.effective_weight(Duration::from_secs(3600)),
@@ -1197,7 +1201,7 @@ impl AgentRunner {
             if action.attempt_number > 1 {
                 if let Some(ref rotator) = self.profile_rotator {
                     if let Some(profile) = rotator.select() {
-                        *self.active_profile_id.lock().expect("profile lock") = Some(profile.id.clone());
+                        *self.active_profile_id.lock().await = Some(profile.id.clone());
                         debug!(
                             profile = %profile.id,
                             attempt = action.attempt_number,
@@ -1228,7 +1232,7 @@ impl AgentRunner {
 
                     // Record success on the active profile
                     if let Some(ref rotator) = self.profile_rotator {
-                        if let Some(ref profile_id) = *self.active_profile_id.lock().expect("profile lock") {
+                        if let Some(ref profile_id) = *self.active_profile_id.lock().await {
                             rotator.record_success(profile_id);
                         }
                     }
@@ -1249,7 +1253,7 @@ impl AgentRunner {
 
                     // Record failure on the active profile with classified reason
                     if let Some(ref rotator) = self.profile_rotator {
-                        if let Some(ref profile_id) = *self.active_profile_id.lock().expect("profile lock") {
+                        if let Some(ref profile_id) = *self.active_profile_id.lock().await {
                             let reason = Self::classify_failure_reason(&e);
                             rotator.record_failure(profile_id, reason, None);
                         }
@@ -1423,11 +1427,11 @@ impl AgentRunner {
                 &mut request, guard, &mut loop_state, stream_result, round, &active_skills,
             ).await? {
                 RoundOutcome::Continue => continue,
-                RoundOutcome::Done { content, round: total_rounds } => {
+                RoundOutcome::Done { content, round: total_rounds, finish_reason } => {
                     // Stage 6: Build final response
                     return Ok(self.build_final_response(
                         &request, &loop_state, content, total_rounds,
-                        FinishReason::Stop, &active_skills,
+                        finish_reason, &active_skills,
                     ));
                 }
             }
@@ -1550,6 +1554,16 @@ impl AgentRunner {
         }
 
         self.emit(AgentEvent::StreamChunk { text: String::new(), done: true });
+
+        // Diagnostic: warn when the provider returned zero content
+        if streamed_content.is_empty() && stream_tool_calls.is_empty() {
+            warn!(
+                round,
+                finish_reason = ?stream_finish,
+                "Provider returned empty content with no tool calls — \
+                 possible content filter, malformed request, or provider issue"
+            );
+        }
 
         // Fallback token estimation
         if stream_usage.input_tokens == 0 && stream_usage.output_tokens == 0 {
@@ -1680,6 +1694,7 @@ impl AgentRunner {
             return Ok(crate::loop_stages::RoundOutcome::Done {
                 content: stream_result.content,
                 round: round + 1,
+                finish_reason: stream_result.finish_reason,
             });
         }
 
@@ -1861,6 +1876,9 @@ impl AgentRunner {
     ///
     /// Uses `cached_tokens` for O(1) per-message token lookup — avoids
     /// re-scanning every message's content on each compaction pass.
+    ///
+    /// Orphan-repair is applied as a single post-compaction step (deduplicated
+    /// from the per-level arms — P1 compaction refactor).
     async fn apply_compaction(
         &self,
         messages: &mut Vec<ChatMessage>,
@@ -1871,111 +1889,19 @@ impl AgentRunner {
 
         match level {
             CompactionLevel::DropMetadata => {
-                // Adaptive truncation threshold: scale with context window, not fixed 500 chars.
-                // Budget per tool result = max(200, context_limit / (message_count * 8)).
-                let adaptive_limit = (self.config.context_limit / messages.len().max(1) / 8).max(200);
-                for msg in messages.iter_mut() {
-                    if msg.role == MessageRole::Tool {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.content) {
-                            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                                if content.len() > adaptive_limit {
-                                    let preview = safe_prefix(content, adaptive_limit);
-                                    msg.content = std::sync::Arc::from(format!(
-                                        "{}...[truncated from {} chars]",
-                                        preview,
-                                        content.len()
-                                    ));
-                                } else {
-                                    msg.content = std::sync::Arc::from(content);
-                                }
-                                // Recompute cached tokens after content mutation.
-                                msg.cached_tokens = Some(estimate_tokens(&msg.content));
-                            }
-                        }
-                    }
-                }
+                self.compact_drop_metadata(messages);
             }
             CompactionLevel::SummarizeOld => {
-                // Adaptive chunk ratio — varies with average message size.
-                // R = max(R_min, R_base − 2 × (avg_msg_tokens × safety / context_limit))
-                let avg_msg_tokens = if messages.is_empty() {
-                    0
-                } else {
-                    tokens_before / messages.len()
-                };
-                let r_base: f64 = 0.40;
-                let r_min: f64 = 0.15;
-                let safety: f64 = 1.2;
-                let r = (r_base - 2.0 * (avg_msg_tokens as f64 * safety / self.config.context_limit as f64))
-                    .max(r_min);
-                let keep = ((messages.len() as f64 * (1.0 - r)) as usize).max(2);
-
-                if messages.len() > keep + 2 {
-                    let old_msgs: Vec<_> = messages.drain(..messages.len() - keep).collect();
-
-                    // Repair orphaned tool_use/tool_result pairs.
-                    // After removing old messages, the remaining messages may contain
-                    // tool_result messages whose corresponding tool_use was in the
-                    // removed set. Anthropic's API returns errors for orphaned tool_results.
-                    Self::repair_orphaned_tool_messages(messages);
-
-                    // Build a summarization prompt from the old messages.
-                    let mut transcript = String::with_capacity(old_msgs.len() * 80);
-                    for m in &old_msgs {
-                        transcript.push_str(m.role.as_str());
-                        transcript.push_str(": ");
-                        // Truncate very long individual messages to keep the
-                        // summarization prompt itself within reasonable bounds.
-                        if m.content.len() > 600 {
-                            transcript.push_str(safe_prefix(&m.content, 600));
-                            transcript.push_str("…");
-                        } else {
-                            transcript.push_str(&m.content);
-                        }
-                        transcript.push('\n');
-                    }
-
-                    let summary_content = self.summarize_via_llm(&transcript, old_msgs.len()).await;
-                    let summary_tokens = estimate_tokens(&summary_content);
-                    messages.insert(
-                        0,
-                        ChatMessage {
-                            role: MessageRole::System,
-                            content: std::sync::Arc::from(summary_content),
-                            cached_tokens: Some(summary_tokens),
-                        },
-                    );
-                }
+                self.compact_summarize_old(messages, tokens_before).await;
             }
             CompactionLevel::Truncate => {
-                // Budget-based truncation instead of fixed count.
-                // Keep messages until we consume maxHistoryShare × context_limit tokens,
-                // working backward from the most recent message.
-                let max_history_tokens = (self.config.context_limit as f64 * 0.6) as usize;
-                let mut kept_tokens = 0usize;
-                let mut keep_from = messages.len();
-                for (i, msg) in messages.iter().enumerate().rev() {
-                    let msg_tokens = msg.token_count();
-                    if kept_tokens + msg_tokens > max_history_tokens {
-                        keep_from = i + 1;
-                        break;
-                    }
-                    kept_tokens += msg_tokens;
-                    if i == 0 {
-                        keep_from = 0;
-                    }
-                }
-                // Ensure we keep at least 4 messages
-                if messages.len() - keep_from < 4 && messages.len() > 4 {
-                    keep_from = messages.len() - 4;
-                }
-                if keep_from > 0 {
-                    *messages = messages.split_off(keep_from);
-                }
-                // Repair orphaned tool messages after truncation
-                Self::repair_orphaned_tool_messages(messages);
+                self.compact_truncate(messages);
             }
         }
+
+        // Deduplicated orphan-repair: always run after any compaction level
+        // that modifies the message list (P1 recommendation).
+        Self::repair_orphaned_tool_messages(messages);
 
         let tokens_after: usize = messages.iter().map(|m| m.token_count()).sum();
 
@@ -1989,6 +1915,103 @@ impl AgentRunner {
             } else {
                 0
             },
+        }
+    }
+
+    /// DropMetadata: truncate tool result content to adaptive limit.
+    fn compact_drop_metadata(&self, messages: &mut Vec<ChatMessage>) {
+        let adaptive_limit = (self.config.context_limit / messages.len().max(1) / 8).max(200);
+        for msg in messages.iter_mut() {
+            if msg.role == MessageRole::Tool {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                    if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                        if content.len() > adaptive_limit {
+                            let preview = safe_prefix(content, adaptive_limit);
+                            msg.content = std::sync::Arc::from(format!(
+                                "{}...[truncated from {} chars]",
+                                preview,
+                                content.len()
+                            ));
+                        } else {
+                            msg.content = std::sync::Arc::from(content);
+                        }
+                        msg.cached_tokens = Some(estimate_tokens(&msg.content));
+                    }
+                }
+            }
+        }
+    }
+
+    /// SummarizeOld: adaptive chunk ratio + LLM summarization of old turns.
+    ///
+    /// Configurable parameters (P1 recommendation):
+    /// - `R_BASE` = 0.40 — base chunk ratio (chat-heavy agents)
+    /// - `R_MIN` = 0.15 — minimum ratio (tool-heavy workloads)
+    /// - `SAFETY` = 1.2 — safety margin on token estimates
+    async fn compact_summarize_old(&self, messages: &mut Vec<ChatMessage>, tokens_before: usize) {
+        const R_BASE: f64 = 0.40;
+        const R_MIN: f64 = 0.15;
+        const SAFETY: f64 = 1.2;
+
+        let avg_msg_tokens = if messages.is_empty() {
+            0
+        } else {
+            tokens_before / messages.len()
+        };
+        let r = (R_BASE - 2.0 * (avg_msg_tokens as f64 * SAFETY / self.config.context_limit as f64))
+            .max(R_MIN);
+        let keep = ((messages.len() as f64 * (1.0 - r)) as usize).max(2);
+
+        if messages.len() > keep + 2 {
+            let old_msgs: Vec<_> = messages.drain(..messages.len() - keep).collect();
+
+            let mut transcript = String::with_capacity(old_msgs.len() * 80);
+            for m in &old_msgs {
+                transcript.push_str(m.role.as_str());
+                transcript.push_str(": ");
+                if m.content.len() > 600 {
+                    transcript.push_str(safe_prefix(&m.content, 600));
+                    transcript.push_str("…");
+                } else {
+                    transcript.push_str(&m.content);
+                }
+                transcript.push('\n');
+            }
+
+            let summary_content = self.summarize_via_llm(&transcript, old_msgs.len()).await;
+            let summary_tokens = estimate_tokens(&summary_content);
+            messages.insert(
+                0,
+                ChatMessage {
+                    role: MessageRole::System,
+                    content: std::sync::Arc::from(summary_content),
+                    cached_tokens: Some(summary_tokens),
+                },
+            );
+        }
+    }
+
+    /// Truncate: budget-based backward retention.
+    fn compact_truncate(&self, messages: &mut Vec<ChatMessage>) {
+        let max_history_tokens = (self.config.context_limit as f64 * 0.6) as usize;
+        let mut kept_tokens = 0usize;
+        let mut keep_from = messages.len();
+        for (i, msg) in messages.iter().enumerate().rev() {
+            let msg_tokens = msg.token_count();
+            if kept_tokens + msg_tokens > max_history_tokens {
+                keep_from = i + 1;
+                break;
+            }
+            kept_tokens += msg_tokens;
+            if i == 0 {
+                keep_from = 0;
+            }
+        }
+        if messages.len() - keep_from < 4 && messages.len() > 4 {
+            keep_from = messages.len() - 4;
+        }
+        if keep_from > 0 {
+            *messages = messages.split_off(keep_from);
         }
     }
 
@@ -2336,11 +2359,8 @@ impl AgentRunner {
                 // Session-scoped decisions are cached to avoid repeated prompts.
                 let mut effective_args = args.clone();
                 if policy.requires_approval(&name) {
-                    // Check session cache first.
-                    let cached = {
-                        let cache = approval_cache.read().await;
-                        cache.get(&name).cloned()
-                    };
+                    // Check session cache first (DashMap: O(1) per-shard lock).
+                    let cached = approval_cache.get(&name).map(|v| v.clone());
 
                     let decision = if let Some(cached_decision) = cached {
                         cached_decision
@@ -2367,11 +2387,10 @@ impl AgentRunner {
                         });
                     };
 
-                    // Cache session-scoped decisions.
+                    // Cache session-scoped decisions (DashMap: lock-free insert).
                     match &decision {
                         ApprovalDecision::AllowForSession | ApprovalDecision::DenyForSession => {
-                            let mut cache = approval_cache.write().await;
-                            cache.insert(name.clone(), decision.clone());
+                            approval_cache.insert(name.clone(), decision.clone());
                         }
                         _ => {}
                     }

@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use clawdesk_types::error::ProviderError;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::time::{Duration, Instant};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{
     ChatMessage, FinishReason, MessageRole, Provider, ProviderRequest, ProviderResponse,
@@ -46,23 +46,6 @@ impl AzureOpenAiProvider {
             self.api_base, model, self.api_version
         )
     }
-}
-
-// Reuse the same JSON structs as OpenAiProvider since the body format is identical.
-#[derive(Debug, Serialize)]
-struct AzureRequest {
-    model: String,
-    messages: Vec<AzureMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-}
-
-#[derive(Debug, Serialize)]
-struct AzureMessage {
-    role: String,
-    content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,34 +113,43 @@ impl Provider for AzureOpenAiProvider {
 
         debug!(%model, messages = request.messages.len(), "calling Azure OpenAI API");
 
-        let mut messages = Vec::new();
-        if let Some(system) = &request.system_prompt {
-            messages.push(AzureMessage {
-                role: "system".into(),
-                content: system.clone(),
-            });
-        }
-        for m in &request.messages {
-            messages.push(AzureMessage {
-                role: m.role.as_str().to_string(),
-                content: m.content.to_string(),
-            });
-        }
-
-        let api_request = AzureRequest {
-            model: model.clone(), // Model string may be ignored by Azure depending on deployment, but we send it
-            messages,
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
-        };
+        // Use openai_compat to properly format tool call exchanges
+        let messages = crate::openai_compat::build_openai_api_messages(
+            request.system_prompt.as_deref(),
+            &request.messages,
+        );
 
         let url = self.build_url(&model);
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+        });
+        if let Some(max_tokens) = request.max_tokens {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
+        if let Some(temp) = request.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request.tools.iter().map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            }).collect();
+            body["tools"] = serde_json::json!(tools);
+        }
 
         let response = self
             .client
             .post(&url)
             .header("api-key", &self.api_key)
-            .json(&api_request)
+            .json(&body)
             .send()
             .await
             .map_err(|e| {
@@ -249,19 +241,11 @@ impl Provider for AzureOpenAiProvider {
 
         debug!(%model, "streaming Azure OpenAI API");
 
-        let mut messages = Vec::new();
-        if let Some(ref system) = request.system_prompt {
-            messages.push(serde_json::json!({
-                "role": "system",
-                "content": system,
-            }));
-        }
-        for m in &request.messages {
-            messages.push(serde_json::json!({
-                "role": m.role.as_str(),
-                "content": &*m.content,
-            }));
-        }
+        // Use openai_compat to properly format tool call exchanges
+        let messages = crate::openai_compat::build_openai_api_messages(
+            request.system_prompt.as_deref(),
+            &request.messages,
+        );
 
         let mut body = serde_json::json!({
             "model": model,
@@ -277,7 +261,23 @@ impl Provider for AzureOpenAiProvider {
             body["temperature"] = serde_json::json!(temp);
         }
 
+        // Include tool definitions for function calling
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request.tools.iter().map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            }).collect();
+            body["tools"] = serde_json::json!(tools);
+        }
+
         let url = self.build_url(&model);
+        debug!(%url, tool_count = request.tools.len(), "Azure OpenAI stream: target URL");
 
         let response = self
             .client
@@ -290,19 +290,29 @@ impl Provider for AzureOpenAiProvider {
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let body_bytes = response.bytes().await.unwrap_or_default();
-            let body_str = String::from_utf8_lossy(&body_bytes);
-
-            if status == 429 {
-                return Err(ProviderError::rate_limit("azure_openai", None));
+            let err_body = response.text().await.unwrap_or_default();
+            if !err_body.is_empty() {
+                warn!(status, body = %err_body.chars().take(500).collect::<String>(), "Azure OpenAI stream: HTTP error response");
             }
-
-            return Err(ProviderError::format_error("azure_openai", format!("HTTP {}: {}", status, body_str)));
+            return match status {
+                429 => Err(ProviderError::rate_limit("azure_openai", None)),
+                401 | 403 => Err(ProviderError::auth_failure("azure_openai", "default")),
+                _ => Err(ProviderError::format_error("azure_openai", format!("HTTP {} — {}", status, err_body.chars().take(300).collect::<String>()))),
+            };
         }
 
-        // Parse SSE event stream (Identical to OpenAI streaming logic)
+        // Parse SSE event stream
         let mut buffer = String::new();
         let mut response = response;
+        let mut received_any_content = false;
+
+        // Accumulate tool call deltas during streaming.
+        // Azure OpenAI sends tool calls as incremental fragments (same as OpenAI):
+        //   delta.tool_calls[i].id (first chunk for call i)
+        //   delta.tool_calls[i].function.name (first chunk for call i)
+        //   delta.tool_calls[i].function.arguments (subsequent chunks, partial JSON)
+        let mut tool_call_accum: Vec<(String, String, String)> = Vec::new(); // (id, name, args_json)
+
         while let Some(chunk) = response.chunk().await.map_err(|e| {
             ProviderError::network_error("azure_openai", e.to_string())
         })? {
@@ -320,12 +330,33 @@ impl Provider for AzureOpenAiProvider {
                     };
 
                     if data == "[DONE]" {
+                        if !received_any_content && tool_call_accum.is_empty() {
+                            warn!("Azure OpenAI stream completed with [DONE] but produced no content or tool calls");
+                        }
                         return Ok(());
                     }
 
                     let Ok(chunk_json) = serde_json::from_str::<serde_json::Value>(data) else {
+                        warn!(raw_data = %data.chars().take(200).collect::<String>(), "Azure OpenAI stream: unparseable SSE chunk");
                         continue;
                     };
+
+                    // Check for error responses embedded in the stream
+                    // Azure OpenAI can return error JSON mid-stream
+                    // (e.g., content filter violations, quota exceeded).
+                    if let Some(error_obj) = chunk_json.get("error") {
+                        let err_msg = error_obj.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+                        let err_code = error_obj.get("code").and_then(|c| c.as_str()).unwrap_or("unknown");
+                        warn!(
+                            error_code = %err_code,
+                            error_message = %err_msg,
+                            "Azure OpenAI stream: error response received in SSE stream"
+                        );
+                        return Err(ProviderError::format_error(
+                            "azure_openai",
+                            format!("Stream error [{}]: {}", err_code, err_msg),
+                        ));
+                    }
 
                     let usage = chunk_json.get("usage").and_then(|u| {
                         Some(TokenUsage {
@@ -341,12 +372,41 @@ impl Provider for AzureOpenAiProvider {
                         .and_then(|c| c.as_array());
 
                     if let Some(choices) = choices {
+                        if choices.is_empty() {
+                            // Azure content filter can return empty choices array
+                            warn!("Azure OpenAI stream: empty choices array (possible content filter)");
+                        }
                         for choice in choices {
                             let delta = choice.get("delta");
                             let content = delta
                                 .and_then(|d| d.get("content"))
                                 .and_then(|c| c.as_str())
                                 .unwrap_or("");
+
+                            if !content.is_empty() {
+                                received_any_content = true;
+                            }
+
+                            // ── Accumulate tool call deltas ──
+                            if let Some(tc_arr) = delta.and_then(|d| d.get("tool_calls")).and_then(|v| v.as_array()) {
+                                for tc in tc_arr {
+                                    let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                    while tool_call_accum.len() <= idx {
+                                        tool_call_accum.push((String::new(), String::new(), String::new()));
+                                    }
+                                    if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                                        tool_call_accum[idx].0 = id.to_string();
+                                    }
+                                    if let Some(func) = tc.get("function") {
+                                        if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                            tool_call_accum[idx].1 = name.to_string();
+                                        }
+                                        if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+                                            tool_call_accum[idx].2.push_str(args);
+                                        }
+                                    }
+                                }
+                            }
 
                             let finish = choice
                                 .get("finish_reason")
@@ -360,6 +420,21 @@ impl Provider for AzureOpenAiProvider {
 
                             let done = finish.is_some();
 
+                            // On final chunk, assemble accumulated tool calls
+                            let final_tool_calls = if done && !tool_call_accum.is_empty() {
+                                tool_call_accum.drain(..).filter_map(|(id, name, args)| {
+                                    if name.is_empty() { return None; }
+                                    let arguments = if args.is_empty() {
+                                        serde_json::json!({})
+                                    } else {
+                                        serde_json::from_str(&args).unwrap_or(serde_json::json!({}))
+                                    };
+                                    Some(ToolCall { id, name, arguments })
+                                }).collect()
+                            } else {
+                                Vec::new()
+                            };
+
                             let _ = chunk_tx
                                 .send(StreamChunk {
                                     delta: content.to_string(),
@@ -367,7 +442,7 @@ impl Provider for AzureOpenAiProvider {
                                     done,
                                     finish_reason: finish,
                                     usage: if done { usage.clone() } else { None },
-                                    tool_calls: Vec::new(),
+                                    tool_calls: final_tool_calls,
                                 })
                                 .await;
                         }
@@ -382,9 +457,21 @@ impl Provider for AzureOpenAiProvider {
                                 tool_calls: Vec::new(),
                             })
                             .await;
+                    } else {
+                        debug!(
+                            chunk_keys = %chunk_json.as_object()
+                                .map(|o| o.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(","))
+                                .unwrap_or_default(),
+                            "Azure OpenAI stream: chunk without choices or usage"
+                        );
                     }
                 }
             }
+        }
+
+        // Stream ended without [DONE] signal
+        if !received_any_content && tool_call_accum.is_empty() {
+            warn!("Azure OpenAI stream: connection closed without [DONE] and no content was received");
         }
 
         Ok(())

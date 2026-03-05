@@ -47,18 +47,8 @@ pub use wasm::WasmSandbox;
 // Core types
 // ---------------------------------------------------------------------------
 
-/// Isolation levels matching the lattice in clawdesk-security/sandbox_policy.rs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum IsolationLevel {
-    /// No isolation — direct execution in host process
-    None = 0,
-    /// Filesystem path confinement only
-    PathScope = 1,
-    /// Process-level isolation (subprocess or Docker)
-    ProcessIsolation = 2,
-    /// Full sandbox (WASM linear memory isolation)
-    FullSandbox = 3,
-}
+/// Canonical isolation level from clawdesk-types.
+pub use clawdesk_types::IsolationLevel;
 
 /// Resource limits for sandboxed execution
 #[derive(Debug, Clone, Serialize, Deserialize)]

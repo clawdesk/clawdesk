@@ -115,6 +115,16 @@ enum Commands {
         #[command(subcommand)]
         action: skill_cli::SkillAction,
     },
+    /// Launch the terminal UI (ratatui-based interactive dashboard)
+    #[cfg(feature = "tui")]
+    Tui {
+        /// Gateway URL to connect to
+        #[arg(long, default_value = "http://127.0.0.1:18789")]
+        gateway: String,
+        /// Color theme (dark, light, high-contrast)
+        #[arg(long, default_value = "dark")]
+        theme: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -248,6 +258,43 @@ enum AgentAction {
         #[arg(long, default_value = "25")]
         max_tool_rounds: usize,
     },
+    /// Add a new agent from TOML definition or interactive wizard
+    #[command(name = "add")]
+    Add {
+        /// Agent ID (kebab-case)
+        id: String,
+        /// Path to agent.toml (if omitted, generates interactively)
+        #[arg(long)]
+        from_toml: Option<String>,
+    },
+    /// Validate all agent.toml definitions
+    #[command(name = "validate")]
+    Validate,
+    /// List all registered agents with routing table
+    #[command(name = "list", alias = "ls")]
+    List {
+        /// Show channel bindings
+        #[arg(long)]
+        bindings: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hot-reload agent definitions without restart
+    #[command(name = "apply")]
+    Apply {
+        /// Specific agent ID to reload (reloads all if omitted)
+        id: Option<String>,
+    },
+    /// Export an agent to agent.toml
+    #[command(name = "export")]
+    Export {
+        /// Agent ID to export
+        id: String,
+        /// Output path (default: stdout)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -307,8 +354,104 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                 // Build registries
                 let channels = clawdesk_channel::registry::ChannelRegistry::new();
-                let providers = clawdesk_providers::registry::ProviderRegistry::new();
+                let mut providers = clawdesk_providers::registry::ProviderRegistry::new();
                 let tools = clawdesk_agents::ToolRegistry::new();
+
+                // Auto-register providers from environment variables
+                if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+                    info!("registering Anthropic provider from env");
+                    providers.register(
+                        std::sync::Arc::new(
+                            clawdesk_providers::anthropic::AnthropicProvider::new(key, None),
+                        ),
+                    );
+                }
+                if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+                    let base_url = std::env::var("OPENAI_BASE_URL").ok();
+                    info!("registering OpenAI provider from env");
+                    providers.register(
+                        std::sync::Arc::new(
+                            clawdesk_providers::openai::OpenAiProvider::new(key, base_url, None),
+                        ),
+                    );
+                }
+                if let Ok(key) = std::env::var("AZURE_OPENAI_API_KEY") {
+                    if let Ok(endpoint) = std::env::var("AZURE_OPENAI_ENDPOINT") {
+                        let api_version = std::env::var("AZURE_OPENAI_API_VERSION").ok();
+                        info!("registering Azure OpenAI provider from env");
+                        providers.register(
+                            std::sync::Arc::new(
+                                clawdesk_providers::azure::AzureOpenAiProvider::new(
+                                    key, endpoint, api_version, None,
+                                ),
+                            ),
+                        );
+                    }
+                }
+                if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
+                    info!("registering Gemini provider from env");
+                    providers.register(
+                        std::sync::Arc::new(
+                            clawdesk_providers::gemini::GeminiProvider::new(key, None),
+                        ),
+                    );
+                }
+                if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+                    info!("registering OpenRouter provider from env");
+                    providers.register(
+                        std::sync::Arc::new(
+                            clawdesk_providers::openrouter::OpenRouterProvider::new(key),
+                        ),
+                    );
+                }
+                // Ollama — always available if running locally
+                providers.register(
+                    std::sync::Arc::new(
+                        clawdesk_providers::ollama::OllamaProvider::new(None, None),
+                    ),
+                );
+
+                // Also try to load channel_provider.json for Azure/custom overrides
+                let cp_path = dirs_home().join(".clawdesk").join("channel_provider.json");
+                if cp_path.exists() {
+                    if let Ok(raw) = std::fs::read_to_string(&cp_path) {
+                        if let Ok(cp) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            let provider_name = cp.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+                            let api_key = cp.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+                            let base_url = cp.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
+                            let model = cp.get("model").and_then(|v| v.as_str());
+
+                            if !api_key.is_empty() && !base_url.is_empty() {
+                                if provider_name.contains("Azure") {
+                                    info!("registering Azure OpenAI from channel_provider.json");
+                                    providers.register(
+                                        std::sync::Arc::new(
+                                            clawdesk_providers::azure::AzureOpenAiProvider::new(
+                                                api_key.to_string(),
+                                                base_url.to_string(),
+                                                None,
+                                                model.map(|m| m.to_string()),
+                                            ),
+                                        ),
+                                    );
+                                } else if provider_name.contains("OpenAI") {
+                                    info!("registering OpenAI from channel_provider.json");
+                                    providers.register(
+                                        std::sync::Arc::new(
+                                            clawdesk_providers::openai::OpenAiProvider::new(
+                                                api_key.to_string(),
+                                                Some(base_url.to_string()),
+                                                model.map(|m| m.to_string()),
+                                            ),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                info!(count = providers.list().len(), "providers registered");
 
                 // Plugin host with a no-op factory (plugins loaded at runtime)
                 let plugin_host = clawdesk_plugin::PluginHost::new(
@@ -444,6 +587,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 };
                 local_agent::run_local_agent(config, cancel).await?;
             }
+            AgentAction::Add { id, from_toml } => {
+                agent_compose::cmd_agent_add(&id, from_toml.as_deref()).await?;
+            }
+            AgentAction::Validate => {
+                agent_compose::cmd_agent_validate().await?;
+            }
+            AgentAction::List { bindings, json } => {
+                agent_compose::cmd_agent_list(bindings, json).await?;
+            }
+            AgentAction::Apply { id } => {
+                agent_compose::cmd_agent_apply(&cli.gateway_url, id.as_deref()).await?;
+            }
+            AgentAction::Export { id, output } => {
+                agent_compose::cmd_agent_export(&id, output.as_deref()).await?;
+            }
         },
         Commands::Login => {
             cmd_login().await?;
@@ -490,6 +648,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         std::process::exit(1);
                     }
                 }
+            }
+        }
+        #[cfg(feature = "tui")]
+        Commands::Tui { gateway, theme } => {
+            info!(gateway = %gateway, theme = %theme, "Launching terminal UI");
+            println!("Starting ClawDesk TUI...");
+            println!("  Gateway: {gateway}");
+            println!("  Theme:   {theme}");
+            println!();
+
+            // Create the TUI app and apply the selected theme
+            let mut app = clawdesk_tui::App::new();
+            app.theme = clawdesk_tui::Theme::by_name(&theme);
+
+            // Run the TUI event loop (blocks until user exits)
+            if let Err(e) = app.run() {
+                eprintln!("TUI error: {e}");
+                std::process::exit(1);
             }
         }
     }

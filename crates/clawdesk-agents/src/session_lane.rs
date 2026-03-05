@@ -18,14 +18,48 @@
 //! Without serialization, P(race condition) = 1 for concurrent messages
 //! at any realistic processing time. Lane serialization reduces P to 0.
 
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use dashmap::DashMap;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::time::{Duration, timeout};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Default watchdog timeout — force-unlock hung sessions after this duration.
 const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+
+/// Default maximum number of tracked session lanes before eviction kicks in.
+const DEFAULT_MAX_LANES: usize = 10_000;
+
+/// Tracked lane — mutex + last-access timestamp for LRU eviction.
+struct LaneEntry {
+    mutex: Arc<Mutex<()>>,
+    last_access: AtomicU64, // epoch millis, atomic for lock-free reads
+}
+
+impl LaneEntry {
+    fn new() -> Self {
+        Self {
+            mutex: Arc::new(Mutex::new(())),
+            last_access: AtomicU64::new(Self::now()),
+        }
+    }
+
+    fn touch(&self) {
+        self.last_access.store(Self::now(), Ordering::Relaxed);
+    }
+
+    fn last_access_ms(&self) -> u64 {
+        self.last_access.load(Ordering::Relaxed)
+    }
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+}
 
 /// Per-session mutex guard. Dropping this releases the session lock.
 pub struct SessionGuard {
@@ -48,26 +82,39 @@ impl Drop for SessionGuard {
 
 /// Lane manager — manages per-session serialization mutexes.
 ///
-/// Thread-safe: the inner HashMap is behind a Mutex.
-/// Each session gets an independent `Arc<Mutex<()>>` for serialization.
+/// Uses `DashMap` for lock-free concurrent access to session lanes.
+/// Automatically evicts idle lanes (LRU) when the lane count exceeds
+/// `max_lanes`, preventing unbounded memory growth in long-running servers.
 pub struct SessionLaneManager {
-    lanes: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    lanes: DashMap<String, Arc<LaneEntry>>,
     watchdog_timeout: Duration,
+    max_lanes: usize,
 }
 
 impl SessionLaneManager {
     pub fn new() -> Self {
         Self {
-            lanes: Mutex::new(HashMap::new()),
+            lanes: DashMap::new(),
             watchdog_timeout: WATCHDOG_TIMEOUT,
+            max_lanes: DEFAULT_MAX_LANES,
         }
     }
 
     /// Create a manager with a custom watchdog timeout.
-    pub fn with_timeout(timeout: Duration) -> Self {
+    pub fn with_timeout(timeout_dur: Duration) -> Self {
         Self {
-            lanes: Mutex::new(HashMap::new()),
-            watchdog_timeout: timeout,
+            lanes: DashMap::new(),
+            watchdog_timeout: timeout_dur,
+            max_lanes: DEFAULT_MAX_LANES,
+        }
+    }
+
+    /// Create a manager with custom timeout and capacity.
+    pub fn with_capacity(timeout_dur: Duration, max_lanes: usize) -> Self {
+        Self {
+            lanes: DashMap::new(),
+            watchdog_timeout: timeout_dur,
+            max_lanes,
         }
     }
 
@@ -78,13 +125,17 @@ impl SessionLaneManager {
     ///
     /// Returns a `SessionGuard` that releases the lock when dropped.
     pub async fn acquire(&self, session_id: &str) -> Result<SessionGuard, SessionLaneError> {
-        let mutex = {
-            let mut lanes = self.lanes.lock().await;
-            lanes
-                .entry(session_id.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
+        // Evict idle lanes if over capacity.
+        self.maybe_evict();
+
+        let entry = self
+            .lanes
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(LaneEntry::new()))
+            .clone();
+
+        entry.touch();
+        let mutex = entry.mutex.clone();
 
         // Acquire the per-session mutex with watchdog timeout
         match timeout(self.watchdog_timeout, mutex.lock_owned()).await {
@@ -102,14 +153,9 @@ impl SessionLaneManager {
                     "session lane watchdog fired — previous run may be hung"
                 );
                 // Force-create a new mutex for this session, abandoning the hung one.
-                // The hung run's mutex guard will be dropped when its task completes
-                // (or is cancelled), but new runs won't wait for it.
-                let new_mutex = Arc::new(Mutex::new(()));
-                let guard = new_mutex.clone().lock_owned().await;
-                {
-                    let mut lanes = self.lanes.lock().await;
-                    lanes.insert(session_id.to_string(), new_mutex);
-                }
+                let new_entry = Arc::new(LaneEntry::new());
+                let guard = new_entry.mutex.clone().lock_owned().await;
+                self.lanes.insert(session_id.to_string(), new_entry);
                 Ok(SessionGuard {
                     _guard: guard,
                     session_id: session_id.to_string(),
@@ -120,25 +166,52 @@ impl SessionLaneManager {
 
     /// Remove a session's lane entry (cleanup when session ends).
     pub async fn remove(&self, session_id: &str) {
-        let mut lanes = self.lanes.lock().await;
-        lanes.remove(session_id);
+        self.lanes.remove(session_id);
     }
 
     /// Number of active session lanes.
-    pub async fn lane_count(&self) -> usize {
-        let lanes = self.lanes.lock().await;
-        lanes.len()
+    pub fn lane_count(&self) -> usize {
+        self.lanes.len()
     }
 
     /// Cleanup lanes that have no waiters (garbage collection).
     /// Returns the number of lanes removed.
-    pub async fn gc(&self) -> usize {
-        let mut lanes = self.lanes.lock().await;
-        let before = lanes.len();
+    pub fn gc(&self) -> usize {
+        let before = self.lanes.len();
         // Remove lanes where the mutex is not currently held
-        // (strong_count == 1 means only the HashMap holds a reference)
-        lanes.retain(|_, mutex| Arc::strong_count(mutex) > 1);
-        before - lanes.len()
+        // (strong_count == 1 means only the DashMap holds a reference)
+        self.lanes.retain(|_, entry| Arc::strong_count(&entry.mutex) > 1);
+        before - self.lanes.len()
+    }
+
+    /// Evict idle lanes if over capacity, removing the oldest-accessed
+    /// lanes that have no active waiters.
+    fn maybe_evict(&self) {
+        let count = self.lanes.len();
+        if count <= self.max_lanes {
+            return;
+        }
+
+        let excess = count - self.max_lanes;
+        // Collect (session_id, last_access_ms) for idle lanes only.
+        let mut candidates: Vec<(String, u64)> = self
+            .lanes
+            .iter()
+            .filter(|entry| Arc::strong_count(&entry.value().mutex) <= 1)
+            .map(|entry| (entry.key().clone(), entry.value().last_access_ms()))
+            .collect();
+
+        // Sort by last_access ascending (oldest first).
+        candidates.sort_by_key(|&(_, ts)| ts);
+
+        let to_remove = candidates.len().min(excess);
+        for (session_id, _) in candidates.into_iter().take(to_remove) {
+            self.lanes.remove(&session_id);
+        }
+
+        if to_remove > 0 {
+            debug!(evicted = to_remove, remaining = self.lanes.len(), "session lane LRU eviction");
+        }
     }
 }
 
@@ -239,8 +312,28 @@ mod tests {
             let _guard = mgr.acquire("temp").await.unwrap();
         }
         // After guard dropped, lane should be GC-able
-        let removed = mgr.gc().await;
+        let removed = mgr.gc();
         assert_eq!(removed, 1);
-        assert_eq!(mgr.lane_count().await, 0);
+        assert_eq!(mgr.lane_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_eviction() {
+        let mgr = SessionLaneManager::with_capacity(Duration::from_secs(300), 3);
+
+        // Create 5 lanes (need to acquire and release)
+        for i in 0..5 {
+            let _guard = mgr.acquire(&format!("s{i}")).await.unwrap();
+        }
+
+        // All 5 lanes exist but are idle
+        assert_eq!(mgr.lane_count(), 5);
+
+        // Next acquire triggers eviction (5 > max_lanes=3)
+        let _guard = mgr.acquire("s5").await.unwrap();
+
+        // Should have evicted at least 2 idle lanes to get back to max_lanes
+        // The held guard (s5) counts, so we should be at max_lanes or fewer
+        assert!(mgr.lane_count() <= 4); // 3 + the newly acquired one
     }
 }

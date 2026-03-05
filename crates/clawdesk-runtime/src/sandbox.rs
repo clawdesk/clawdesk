@@ -39,19 +39,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 
-// Re-use the policy types from clawdesk-security.
-// In production, this would be:
-//   use clawdesk_security::sandbox_policy::{...};
-// For module-level independence, we define compatible types here.
-
-/// Isolation level — mirrors `clawdesk_security::sandbox_policy::IsolationLevel`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum IsolationLevel {
-    None = 0,
-    PathScope = 1,
-    ProcessIsolation = 2,
-    FullSandbox = 3,
-}
+// Canonical isolation level from clawdesk-types.
+pub use clawdesk_types::IsolationLevel;
 
 /// Resource limits for sandboxed execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]

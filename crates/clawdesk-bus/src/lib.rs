@@ -11,7 +11,8 @@
 //! - **Topics**: Named event streams with configurable capacity
 //! - **Priority classes**: Urgent (w=8), Standard (w=4), Batch (w=1)
 //! - **Backpressure**: Bounded mpsc channels; full channels yield cooperatively
-//! - **Crash recovery**: Events persisted to SochDB append-only log
+//! - **Persistence**: Not yet implemented — all events are in-memory only.
+//!   A future version may persist events to SochDB for crash recovery.
 //! - **Consumer cursors**: u64 offsets per subscriber — O(1) publish/consume
 
 pub mod backpressure;

@@ -70,6 +70,7 @@ tracing-subscriber = { workspace = true }
 async-trait = "0.1"
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
+aho-corasick = { workspace = true }
 lru = { workspace = true }
 thiserror = "1"
 uuid = { version = "1", features = ["v4"] }

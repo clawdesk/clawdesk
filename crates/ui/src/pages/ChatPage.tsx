@@ -78,6 +78,8 @@ export interface ChatPageProps {
   onSelectAgent: (id: string | null) => void;
   onCreateAgent: (template: (typeof AGENT_TEMPLATES)[number]) => void;
   onAgentEvent?: (event: AgentEventEnvelope) => void;
+  /** Open the Agent Journey Wizard for creating/editing */
+  onOpenJourney?: (agentId?: string) => void;
   pushToast: (text: string) => void;
   showTerminal: boolean;
   setShowTerminal: (s: boolean) => void;
@@ -411,6 +413,7 @@ export function ChatPage({
   selectedAgentId,
   onSelectAgent,
   onCreateAgent,
+  onOpenJourney,
   pushToast,
   showTerminal,
   setShowTerminal,
@@ -1358,6 +1361,26 @@ export function ChatPage({
                     <p className="chat-hero-desc">
                       ClawDesk is your local AI workspace. Create an assistant to get started.
                     </p>
+
+                    {/* Journey CTA */}
+                    {onOpenJourney && (
+                      <button
+                        className="chat-hero-journey-btn"
+                        onClick={() => onOpenJourney()}
+                      >
+                        <span className="journey-btn-icon">🎨</span>
+                        <div className="journey-btn-text">
+                          <span className="journey-btn-title">Design Your Agent</span>
+                          <span className="journey-btn-desc">Step-by-step guided creation with team topology</span>
+                        </div>
+                        <span className="journey-btn-arrow">→</span>
+                      </button>
+                    )}
+
+                    <div className="chat-hero-divider">
+                      <span>or pick a template</span>
+                    </div>
+
                     <div className="template-grid">
                       {AGENT_TEMPLATES.map((t) => (
                         <button
@@ -1386,25 +1409,97 @@ export function ChatPage({
                         <span className="agent-name">{agent?.name ?? "Select agent"}</span>
                         <span className="agent-chevron"><Icon name="collapse-left" /></span>
                       </button>
+                      {onOpenJourney && (
+                        <button
+                          className="chat-hero-new-agent-btn"
+                          onClick={() => onOpenJourney()}
+                          title="Create a new agent or team"
+                        >
+                          <span>+</span> Create Agent
+                        </button>
+                      )}
                     </div>
 
                     {showAgentPicker && (
                       <div className="chat-agent-overlay" onClick={() => setShowAgentPicker(false)}>
                         <div className="chat-agent-picker" onClick={(e) => e.stopPropagation()}>
-                          {agents.map((a) => (
-                            <button
-                              key={a.id}
-                              className={`chat-agent-option ${selectedAgentId === a.id ? "active" : ""}`}
-                              onClick={() => { onSelectAgent(a.id); setShowAgentPicker(false); }}
-                            >
-                              <span className="chat-agent-option-icon">{a.icon}</span>
-                              <div>
-                                <div className="chat-agent-option-name">{a.name}</div>
-                                <div className="chat-agent-option-meta">{a.model === "default" ? "Ready to use" : a.model}</div>
-                              </div>
-                              {a.status === "active" && <span className="status-dot status-ok" />}
-                            </button>
-                          ))}
+                          {(() => {
+                            const soloAgents = agents.filter((a) => !a.team_id);
+                            const teamMap = new Map<string, typeof agents>();
+                            for (const a of agents) {
+                              if (a.team_id) {
+                                const list = teamMap.get(a.team_id) || [];
+                                list.push(a);
+                                teamMap.set(a.team_id, list);
+                              }
+                            }
+                            return (
+                              <>
+                                {soloAgents.map((a) => (
+                                  <button
+                                    key={a.id}
+                                    className={`chat-agent-option ${selectedAgentId === a.id ? "active" : ""}`}
+                                    onClick={() => { onSelectAgent(a.id); setShowAgentPicker(false); }}
+                                  >
+                                    <span className="chat-agent-option-icon">{a.icon}</span>
+                                    <div>
+                                      <div className="chat-agent-option-name">{a.name}</div>
+                                      <div className="chat-agent-option-meta">{a.model === "default" ? "Ready to use" : a.model}</div>
+                                    </div>
+                                    {a.status === "active" && <span className="status-dot status-ok" />}
+                                  </button>
+                                ))}
+
+                                {[...teamMap.entries()].map(([teamId, teamAgents]) => {
+                                  const router = teamAgents.find((a) => a.team_role === "router") || teamAgents[0];
+                                  const isTeamSelected = teamAgents.some((a) => a.id === selectedAgentId);
+                                  return (
+                                    <div key={teamId} className="chat-agent-team-group">
+                                      <button
+                                        className={`chat-agent-option chat-agent-team-header ${isTeamSelected ? "active" : ""}`}
+                                        onClick={() => { onSelectAgent(router.id); setShowAgentPicker(false); }}
+                                      >
+                                        <span className="chat-agent-option-icon">👥</span>
+                                        <div>
+                                          <div className="chat-agent-option-name">Team: {router.name}</div>
+                                          <div className="chat-agent-option-meta">{teamAgents.length} agents · routes to team</div>
+                                        </div>
+                                      </button>
+                                      <div className="chat-agent-team-members">
+                                        {teamAgents.map((a) => (
+                                          <button
+                                            key={a.id}
+                                            className={`chat-agent-option chat-agent-team-member ${selectedAgentId === a.id ? "active" : ""}`}
+                                            onClick={() => { onSelectAgent(a.id); setShowAgentPicker(false); }}
+                                          >
+                                            <span className="chat-agent-option-icon">{a.icon}</span>
+                                            <div>
+                                              <div className="chat-agent-option-name">{a.name}</div>
+                                              <div className="chat-agent-option-meta">{a.team_role || "member"}</div>
+                                            </div>
+                                            {a.status === "active" && <span className="status-dot status-ok" />}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+
+                                {onOpenJourney && (
+                                  <button
+                                    className="chat-agent-option chat-agent-option-new"
+                                    onClick={() => { setShowAgentPicker(false); onOpenJourney(); }}
+                                  >
+                                    <span className="chat-agent-option-icon">✨</span>
+                                    <div>
+                                      <div className="chat-agent-option-name">Create Agent</div>
+                                      <div className="chat-agent-option-meta">Single agent or team</div>
+                                    </div>
+                                  </button>
+                                )}
+                              </>
+                            );
+                          })()}
                         </div>
                       </div>
                     )}
@@ -1583,14 +1678,16 @@ export function ChatPage({
                     >
                       <Icon name="clock" />
                     </button>
-                    <button
-                      className="btn ghost"
-                      onClick={startNewThread}
-                      title="New thread"
-                      style={{ padding: "4px 8px", color: "var(--text-soft)" }}
-                    >
-                      <Icon name="plus" />
-                    </button>
+                    {!showSidebar && (
+                      <button
+                        className="btn ghost"
+                        onClick={startNewThread}
+                        title="New thread"
+                        style={{ padding: "4px 8px", color: "var(--text-soft)" }}
+                      >
+                        <Icon name="plus" />
+                      </button>
+                    )}
                     <ModelSelector
                       currentModel={effectiveModel}
                       currentProviderId={effectiveProviderId}
@@ -1604,7 +1701,13 @@ export function ChatPage({
                   </div>
                   <VoiceInput
                     onTranscription={(text) => {
-                      setInput((prev) => (prev ? prev + " " + text : text));
+                      // Auto-send the transcribed text as a chat message
+                      if (text && agent && !isSending) {
+                        sendMessage(text);
+                      } else {
+                        // Fallback: put in input box if can't auto-send
+                        setInput((prev) => (prev ? prev + " " + text : text));
+                      }
                     }}
                     disabled={isSending || !agent}
                   />

@@ -1,7 +1,8 @@
 import { useCallback, useState, type CSSProperties } from "react";
 import { Icon } from "../components/Icon";
+import type { DesktopAgent } from "../types";
 
-export type ShellNavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "settings" | "logs";
+export type ShellNavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "settings" | "logs" | "extensions" | "mcp";
 
 interface ShellNavItem {
   key: ShellNavKey;
@@ -36,6 +37,10 @@ export function AppShell({
   onOpenInspectorModal,
   inspectorOpen,
   onToggleInspector,
+  agents,
+  selectedAgentId,
+  onSelectAgent,
+  onOpenJourney,
 }: {
   sidebarCollapsed: boolean;
   compactSidebar: boolean;
@@ -53,6 +58,11 @@ export function AppShell({
   onOpenInspectorModal: () => void;
   inspectorOpen: boolean;
   onToggleInspector: () => void;
+  /** Agent list for top-right selector */
+  agents?: DesktopAgent[];
+  selectedAgentId?: string | null;
+  onSelectAgent?: (id: string | null) => void;
+  onOpenJourney?: (agentId?: string) => void;
 }) {
   const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
   const dragStyle: ExtendedCSSProperties | undefined = isMac
@@ -78,13 +88,19 @@ export function AppShell({
     [isMac]
   );
 
+  const [showAgentDropdown, setShowAgentDropdown] = useState(false);
+  const selectedAgent = agents?.find((a) => a.id === selectedAgentId);
+
   return (
     <div className={`app-shell ${isMac ? "mac-shell" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className={`sidebar ${sidebarCollapsed ? "compact" : ""}`}>
         <div className="brand">
-          <span className="brand-mark">
-            <img src="/logo.svg" alt="ClawDesk logo" className="brand-logo" />
-          </span>
+          <div className="brand-icon-group">
+            <span className="brand-mark">
+              <img src="/logo.svg" alt="ClawDesk logo" className="brand-logo" />
+            </span>
+            <span className="brand-alpha-tag">alpha</span>
+          </div>
           <button
             className="collapse-toggle"
             onClick={onToggleSidebar}
@@ -130,6 +146,8 @@ export function AppShell({
             </div>
           ))}
         </nav>
+
+
       </aside>
 
       <div className={`app-main ${isMac ? "mac-chrome" : ""}`}>
@@ -161,6 +179,130 @@ export function AppShell({
           </button>
 
           <div className="top-actions" style={noDragStyle}>
+            {/* Agent selector pill */}
+            {agents && agents.length > 0 && onSelectAgent && (
+              <div className="top-agent-selector" data-no-drag>
+                <button
+                  className="top-agent-pill"
+                  onClick={() => setShowAgentDropdown(!showAgentDropdown)}
+                  title={selectedAgent ? selectedAgent.name : "Select agent"}
+                >
+                  <span className="top-agent-icon">{selectedAgent?.icon || "⚡"}</span>
+                  <span className="top-agent-name">
+                    {selectedAgent?.name || "Select agent"}
+                  </span>
+                  <Icon name="chevron-down" />
+                </button>
+                {showAgentDropdown && (
+                  <>
+                    <div
+                      className="top-agent-backdrop"
+                      onClick={(e) => { e.stopPropagation(); setShowAgentDropdown(false); }}
+                    />
+                    <div
+                      className="top-agent-dropdown"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {(() => {
+                        // Group agents: teams vs solo
+                        const soloAgents = agents.filter((a) => !a.team_id);
+                        const teamMap = new Map<string, typeof agents>();
+                        for (const a of agents) {
+                          if (a.team_id) {
+                            const list = teamMap.get(a.team_id) || [];
+                            list.push(a);
+                            teamMap.set(a.team_id, list);
+                          }
+                        }
+
+                        return (
+                          <>
+                            {/* Solo agents */}
+                            {soloAgents.map((a) => (
+                              <button
+                                key={a.id}
+                                className={`top-agent-option ${selectedAgentId === a.id ? "active" : ""}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onSelectAgent(a.id);
+                                  setShowAgentDropdown(false);
+                                }}
+                              >
+                                <span className="top-agent-option-icon">{a.icon}</span>
+                                <div className="top-agent-option-info">
+                                  <span className="top-agent-option-name">{a.name}</span>
+                                  <span className="top-agent-option-model">{a.model === "default" ? "Auto" : a.model}</span>
+                                </div>
+                                {selectedAgentId === a.id && <span className="top-agent-active-dot" />}
+                              </button>
+                            ))}
+
+                            {/* Teams */}
+                            {[...teamMap.entries()].map(([teamId, teamAgents]) => {
+                              const router = teamAgents.find((a) => a.team_role === "router") || teamAgents[0];
+                              const isTeamSelected = teamAgents.some((a) => a.id === selectedAgentId);
+                              return (
+                                <div key={teamId} className="top-agent-team-group">
+                                  <button
+                                    className={`top-agent-option top-agent-team-header ${isTeamSelected ? "active" : ""}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onSelectAgent(router.id);
+                                      setShowAgentDropdown(false);
+                                    }}
+                                  >
+                                    <span className="top-agent-option-icon">👥</span>
+                                    <div className="top-agent-option-info">
+                                      <span className="top-agent-option-name">Team: {router.name}</span>
+                                      <span className="top-agent-option-model">{teamAgents.length} agents · routes to team</span>
+                                    </div>
+                                    {isTeamSelected && <span className="top-agent-active-dot" />}
+                                  </button>
+                                  <div className="top-agent-team-members">
+                                    {teamAgents.map((a) => (
+                                      <button
+                                        key={a.id}
+                                        className={`top-agent-option top-agent-team-member ${selectedAgentId === a.id ? "active" : ""}`}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          onSelectAgent(a.id);
+                                          setShowAgentDropdown(false);
+                                        }}
+                                      >
+                                        <span className="top-agent-option-icon">{a.icon}</span>
+                                        <div className="top-agent-option-info">
+                                          <span className="top-agent-option-name">{a.name}</span>
+                                          <span className="top-agent-option-model">{a.team_role || "member"}</span>
+                                        </div>
+                                        {selectedAgentId === a.id && <span className="top-agent-active-dot" />}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              );
+                            })}
+
+                            {/* Create new */}
+                            {onOpenJourney && (
+                              <button
+                                className="top-agent-option top-agent-new"
+                                onClick={(e) => { e.stopPropagation(); setShowAgentDropdown(false); onOpenJourney(); }}
+                              >
+                                <span className="top-agent-option-icon">✨</span>
+                                <div className="top-agent-option-info">
+                                  <span className="top-agent-option-name">Create Agent</span>
+                                  <span className="top-agent-option-model">Single agent or team</span>
+                                </div>
+                              </button>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
             <button className="icon-button" onClick={onToggleTerminal} aria-label="Terminal" title="Toggle Terminal (⌘J)">
               <Icon name="terminal" />
             </button>

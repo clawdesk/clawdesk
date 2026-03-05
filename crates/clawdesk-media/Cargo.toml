@@ -13,7 +13,7 @@ clawdesk-storage = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "process"] }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
@@ -23,6 +23,7 @@ dashmap = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 fastrand = "2"
+uuid = { workspace = true }
 whisper-rs = "0.13"
 hound = "3.5"
 cpal = "0.15"

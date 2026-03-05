@@ -15,7 +15,10 @@ pub mod vault;
 
 pub use credentials::*;
 pub use health::{HealthMonitor, HealthState, HealthStatus};
-pub use registry::{Integration, IntegrationCategory, IntegrationRegistry};
+pub use registry::{
+    ConfigField, ConfigFieldOption, ConfigFieldType, Integration, IntegrationCategory,
+    IntegrationRegistry,
+};
 pub use vault::CredentialVault;
 
 use serde::{Deserialize, Serialize};

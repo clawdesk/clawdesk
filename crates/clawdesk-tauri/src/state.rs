@@ -60,6 +60,8 @@ use clawdesk_sochdb::{
 };
 use clawdesk_tunnel::discovery::InviteManager;
 use clawdesk_tunnel::metrics::TunnelMetrics;
+use clawdesk_tunnel::wireguard::TunnelManager;
+use clawdesk_tunnel::peer::PeerManager;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -108,6 +110,12 @@ pub struct DesktopAgent {
     /// When empty, the agent can serve any channel (default/fallback).
     #[serde(default)]
     pub channels: Vec<String>,
+    /// If this agent belongs to a team, the shared team identifier.
+    #[serde(default)]
+    pub team_id: Option<String>,
+    /// Role within the team (e.g. "router", "researcher", "developer").
+    #[serde(default)]
+    pub team_role: Option<String>,
 }
 
 impl Default for DesktopAgent {
@@ -129,6 +137,8 @@ impl Default for DesktopAgent {
             source: String::new(),
             template_id: None,
             channels: Vec::new(),
+            team_id: None,
+            team_role: None,
         }
     }
 }
@@ -588,6 +598,16 @@ pub struct AppState {
     /// Agent capability registry — multi-agent routing by tool capabilities.
     pub agent_registry: Arc<SochAgentRegistry>,
 
+    // ── Storage lifecycle, indexing, health, structured tracing ──
+    /// Cascading lifecycle manager — unified delete across all stores.
+    pub lifecycle_manager: Arc<clawdesk_sochdb::LifecycleManager>,
+    /// Secondary indexes for sessions (by_activity, by_channel, by_agent).
+    pub session_index: Arc<clawdesk_sochdb::SessionIndex>,
+    /// Structured trace attributes — queryable span metadata alongside message-based spans.
+    pub structured_tracing: Arc<clawdesk_sochdb::StructuredTracing>,
+    /// Schema migration registry — versioned deserialization for all persisted types.
+    pub migration_registry: Arc<clawdesk_sochdb::MigrationRegistry>,
+
     // ── Memory system: embeddings + hybrid search backed by SochDB MemoryBackend ──
     // Uses SochMemoryBackend for full integration: atomic writes, graph nodes,
     // temporal edges, policy checks, and trace spans.
@@ -617,9 +637,13 @@ pub struct AppState {
     pub server_secret: ServerSecret,
     pub sessions: SessionCache,
 
-    // Infrastructure
+    // Infrastructure — WireGuard tunnel + peer management
     pub invites: RwLock<InviteManager>,
     pub tunnel_metrics: Arc<TunnelMetrics>,
+    /// WireGuard tunnel manager — `None` when tunnel is not running.
+    pub tunnel_manager: tokio::sync::RwLock<Option<TunnelManager>>,
+    /// Peer manager for WireGuard tunnel peers.
+    pub peer_manager: tokio::sync::RwLock<PeerManager>,
 
     // Metrics (hot counters — persisted to SochDB on checkpoint)
     pub total_cost_today: AtomicU64,
@@ -678,7 +702,8 @@ pub struct AppState {
     // ── Channel provider override (synced from UI) ──
     /// The active provider configuration from the UI, used by ChannelMessageSink
     /// to construct one-shot providers for inbound channel messages (Discord, etc.).
-    pub channel_provider: RwLock<Option<ChannelProviderOverride>>,
+    /// Wrapped in Arc so CronAgentExecutor can share the same instance.
+    pub channel_provider: Arc<RwLock<Option<ChannelProviderOverride>>>,
 
     // ── Clipboard (hot cache — persisted to SochDB) ──
     pub clipboard_history: RwLock<Vec<ClipboardEntry>>,
@@ -715,6 +740,9 @@ pub struct AppState {
 
     // ── Cron Scheduling ──
     pub cron_manager: Arc<CronManager>,
+    /// Deferred AppHandle — set once `.setup()` fires.  
+    /// Shared with CronAgentExecutor so cron can route through `send_message`.
+    pub cron_app_handle: Arc<std::sync::OnceLock<tauri::AppHandle>>,
 
     // ── T8: Life OS Template Registry ──
     pub template_registry: Arc<clawdesk_skills::life_os::TemplateRegistry>,
@@ -817,71 +845,133 @@ pub struct AppState {
 // ── Cron executor glue ──
 
 /// AgentExecutor implementation for CronManager.
-/// Executes cron-triggered prompts using a configured LLM provider.
+///
+/// Instead of maintaining a separate provider/runner stack, this executor
+/// routes cron prompts through the same `send_message` command path used by
+/// the chat interface.  That way every improvement to the chat path
+/// (channel context, tool wiring, failover, hooks, sandbox gate, etc.)
+/// automatically applies to cron executions too.
+///
+/// Uses `OnceLock` because the CronManager is created inside `AppState::new()`
+/// *before* Tauri's `AppHandle` is available. The handle is set once the
+/// `.setup()` callback fires.
 struct CronAgentExecutor {
-    provider: Arc<dyn Provider>,
-    tool_registry: Arc<ToolRegistry>,
-    cancel: tokio_util::sync::CancellationToken,
-    /// GAP-B: Memory manager for automatic recall during cron executions.
-    memory: Arc<MemoryManager<SochMemoryBackend>>,
+    app_handle: Arc<std::sync::OnceLock<tauri::AppHandle>>,
 }
 
 #[async_trait::async_trait]
 impl clawdesk_cron::executor::AgentExecutor for CronAgentExecutor {
-    async fn execute(&self, prompt: &str, _agent_id: Option<&str>) -> Result<String, String> {
-        let config = AgentConfig {
-            model: "default".to_string(),
-            system_prompt: "You are a helpful automation assistant executing a scheduled task.".to_string(),
-            max_tool_rounds: 5,
-            context_limit: 32_000,
-            response_reserve: 4_096,
-            ..Default::default()
-        };
+    async fn execute(&self, prompt: &str, agent_id: Option<&str>) -> Result<String, String> {
+        let app_handle = self.app_handle.get()
+            .ok_or_else(|| "AppHandle not yet initialized — cron fired before setup".to_string())?;
+        let state: tauri::State<'_, AppState> = app_handle.state();
 
-        // GAP-B: Build memory recall callback for cron executions
-        let memory_recall_fn: clawdesk_agents::MemoryRecallFn = {
-            let mem = Arc::clone(&self.memory);
-            Arc::new(move |query: String| {
-                let mem = Arc::clone(&mem);
-                Box::pin(async move {
-                    match mem.recall(&query, Some(5)).await {
-                        Ok(results) => results.into_iter().filter_map(|r| {
-                            let text = r.content?;
-                            if text.is_empty() { return None; }
-                            Some(clawdesk_agents::MemoryRecallResult {
-                                relevance: r.score as f64,
-                                source: r.metadata.get("source")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from),
-                                content: text,
-                            })
-                        }).collect(),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Cron memory recall failed");
-                            vec![]
-                        }
+        // ── Pipeline execution: if agent_id starts with "pipeline:",
+        // delegate to run_pipeline which executes the full DAG with
+        // proper tool registries, skill wiring, and per-step agents.
+        // This is the correct path for scheduled pipeline jobs.
+        if let Some(aid) = agent_id {
+            if let Some(pipeline_id) = aid.strip_prefix("pipeline:") {
+                tracing::info!(
+                    pipeline_id = %pipeline_id,
+                    prompt_len = prompt.len(),
+                    "Cron: executing pipeline via run_pipeline (full DAG execution)"
+                );
+                let result = crate::commands::run_pipeline(
+                    pipeline_id.to_string(),
+                    state,
+                    app_handle.clone(),
+                ).await;
+                match &result {
+                    Ok(val) => {
+                        let success = val.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let duration = val.get("total_duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                        tracing::info!(
+                            pipeline_id = %pipeline_id,
+                            success = success,
+                            duration_ms = duration,
+                            "Cron: pipeline execution finished"
+                        );
                     }
-                })
-            })
+                    Err(e) => {
+                        tracing::error!(
+                            pipeline_id = %pipeline_id,
+                            error = %e,
+                            "Cron: pipeline execution FAILED"
+                        );
+                    }
+                }
+                let result = result?;
+                // Extract summary from pipeline run result.
+                // The key is "steps" (array of step results).
+                let summary = if let Some(steps) = result.get("steps").and_then(|v| v.as_array()) {
+                    let successes = steps.iter().filter(|s| s.get("success").and_then(|v| v.as_bool()).unwrap_or(false)).count();
+                    let total = steps.len();
+                    let tool_calls: usize = steps.iter()
+                        .filter_map(|s| s.get("total_rounds").and_then(|v| v.as_u64()))
+                        .sum::<u64>() as usize;
+                    format!(
+                        "Pipeline completed: {}/{} steps succeeded, {} tool rounds. Duration: {}ms",
+                        successes,
+                        total,
+                        tool_calls,
+                        result.get("total_duration_ms").and_then(|v| v.as_u64()).unwrap_or(0)
+                    )
+                } else {
+                    format!("Pipeline result: {}", result.to_string().chars().take(300).collect::<String>())
+                };
+                tracing::info!(pipeline_id = %pipeline_id, summary = %summary, "Cron: pipeline summary");
+                return Ok(summary);
+            }
+        }
+
+        // ── Standard agent execution (non-pipeline cron tasks) ──
+        // Pick the first available agent (same fallback the channel sink uses).
+        let resolved_agent_id = if let Some(aid) = agent_id {
+            aid.to_string()
+        } else {
+            let agents = state.agents.read().map_err(|e| format!("agents lock: {e}"))?;
+            agents.values().next()
+                .map(|a| a.id.clone())
+                .ok_or_else(|| "No agents configured — cannot execute cron task".to_string())?
         };
 
-        let runner = AgentRunner::new(
-            Arc::clone(&self.provider),
-            Arc::clone(&self.tool_registry),
-            config,
-            self.cancel.clone(),
-        )
-        .with_memory_recall(memory_recall_fn);
+        // Resolve the user's preferred model from channel_provider override.
+        let (model_override, provider_override, api_key, base_url) = {
+            let cp = state.channel_provider.read().ok().and_then(|g| g.clone());
+            if let Some(cp) = cp {
+                (
+                    if cp.model.is_empty() { None } else { Some(cp.model) },
+                    if cp.provider.is_empty() { None } else { Some(cp.provider) },
+                    if cp.api_key.is_empty() { None } else { Some(cp.api_key) },
+                    if cp.base_url.is_empty() { None } else { Some(cp.base_url) },
+                )
+            } else {
+                (None, None, None, None)
+            }
+        };
 
-        let history = vec![clawdesk_providers::ChatMessage::new(
-            clawdesk_providers::MessageRole::User,
-            prompt.to_string(),
-        )];
-        let response = runner
-            .run(history, "You are a helpful automation assistant.".to_string())
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(response.content)
+        // Create a dedicated chat_id for this cron run so history doesn't
+        // accumulate across executions (each run is independent).
+        let chat_id = format!("cron:{}", uuid::Uuid::new_v4());
+
+        let request = crate::commands::SendMessageRequest {
+            agent_id: resolved_agent_id,
+            content: prompt.to_string(),
+            model_override,
+            chat_id: Some(chat_id),
+            provider_override,
+            api_key,
+            base_url,
+        };
+
+        let response = crate::commands::send_message(
+            request,
+            state,
+            app_handle.clone(),
+        ).await?;
+
+        Ok(response.message.content)
     }
 }
 
@@ -898,6 +988,125 @@ impl clawdesk_cron::executor::DeliveryHandler for NoOpDelivery {
         // Desktop app delivers cron results via emit("routine:executed") events,
         // not through the DeliveryHandler trait.
         Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// SochDB-backed cron persistence — durable across restarts
+// ═══════════════════════════════════════════════════════════
+
+/// Durable cron persistence backed by SochDB.
+///
+/// Key layout:
+///   `cron_tasks/{task_id}`         → JSON-serialized `CronTask`
+///   `cron_logs/{task_id}/{run_id}` → JSON-serialized `CronRunLog`
+pub(crate) struct SochDbCronPersistence {
+    store: Arc<SochStore>,
+}
+
+impl SochDbCronPersistence {
+    pub fn new(store: Arc<SochStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait::async_trait]
+impl clawdesk_cron::CronPersistence for SochDbCronPersistence {
+    async fn save_task(&self, task: &clawdesk_types::cron::CronTask) -> Result<(), String> {
+        let bytes = serde_json::to_vec(task).map_err(|e| format!("serialize CronTask: {e}"))?;
+        let key = format!("cron_tasks/{}", task.id);
+        tracing::info!(
+            key = %key,
+            task_name = %task.name,
+            enabled = task.enabled,
+            bytes_len = bytes.len(),
+            "CronPersistence: saving task to SochDB"
+        );
+        self.store
+            .put_durable(&key, &bytes)
+            .map_err(|e| format!("SochDB put cron_task: {e}"))?;
+        tracing::info!(key = %key, "CronPersistence: task saved successfully");
+        Ok(())
+    }
+
+    async fn load_tasks(&self) -> Result<Vec<clawdesk_types::cron::CronTask>, String> {
+        let entries = self
+            .store
+            .scan("cron_tasks/")
+            .map_err(|e| format!("SochDB scan cron_tasks: {e}"))?;
+        tracing::info!(
+            raw_entries = entries.len(),
+            "CronPersistence: scanned cron_tasks/ prefix from SochDB"
+        );
+        let mut tasks = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            match serde_json::from_slice::<clawdesk_types::cron::CronTask>(&value) {
+                Ok(task) => {
+                    tracing::info!(
+                        key = %key,
+                        task_name = %task.name,
+                        enabled = task.enabled,
+                        "CronPersistence: loaded persisted task"
+                    );
+                    tasks.push(task);
+                }
+                Err(e) => {
+                    tracing::warn!(key = %key, error = %e, "Skipping corrupt cron task");
+                }
+            }
+        }
+        Ok(tasks)
+    }
+
+    async fn delete_task(&self, id: &str) -> Result<(), String> {
+        let key = format!("cron_tasks/{}", id);
+        self.store
+            .delete_durable(&key)
+            .map_err(|e| format!("SochDB delete cron_task: {e}"))
+    }
+
+    async fn save_log(&self, log: &clawdesk_types::cron::CronRunLog) -> Result<(), String> {
+        let bytes = serde_json::to_vec(log).map_err(|e| format!("serialize CronRunLog: {e}"))?;
+        let key = format!("cron_logs/{}/{}", log.task_id, log.run_id);
+        self.store
+            .put_durable(&key, &bytes)
+            .map_err(|e| format!("SochDB put cron_log: {e}"))
+    }
+
+    async fn load_logs(
+        &self,
+        task_id: &str,
+        limit: usize,
+    ) -> Result<Vec<clawdesk_types::cron::CronRunLog>, String> {
+        let prefix = format!("cron_logs/{}/", task_id);
+        let entries = self
+            .store
+            .scan(&prefix)
+            .map_err(|e| format!("SochDB scan cron_logs: {e}"))?;
+        let mut logs: Vec<clawdesk_types::cron::CronRunLog> = entries
+            .into_iter()
+            .filter_map(|(key, value)| {
+                serde_json::from_slice(&value)
+                    .map_err(|e| {
+                        tracing::warn!(key = %key, error = %e, "Skipping corrupt cron log");
+                        e
+                    })
+                    .ok()
+            })
+            .collect();
+        // Sort newest-first, then truncate.
+        logs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        logs.truncate(limit);
+        Ok(logs)
+    }
+
+    async fn last_run_with_status(
+        &self,
+        task_id: &str,
+        status: clawdesk_types::cron::CronRunStatus,
+    ) -> Result<Option<clawdesk_types::cron::CronRunLog>, String> {
+        let logs = self.load_logs(task_id, 100).await?;
+        Ok(logs.into_iter().find(|l| l.status == status))
     }
 }
 
@@ -998,6 +1207,172 @@ impl ChannelMessageSink {
             }
         }
     }
+
+    // ── Direct cross-channel dispatch ────────────────────────────────────
+    //
+    // Detects obvious cross-channel intents from user messages and dispatches
+    // directly without routing through the LLM. This is O(1) string matching
+    // — no regex, no LLM call — making it both faster and more reliable than
+    // depending on the LLM to call the message_send tool.
+
+    /// Known action verbs that signal a cross-channel send intent.
+    const SEND_VERBS: &'static [&'static str] = &[
+        "say", "tell", "send", "post", "write", "message", "forward", "relay",
+    ];
+
+    /// Detect obvious cross-channel intent from a user message.
+    ///
+    /// Matches patterns like:
+    /// - "say hello to discord"
+    /// - "tell telegram hey there"
+    /// - "send hi to slack"
+    /// - "discord say hello"        (channel-first variant)
+    ///
+    /// Returns `Some((target_channel_name, content))` if intent is clear,
+    /// `None` otherwise (falls through to standard LLM processing).
+    fn detect_cross_channel_intent(
+        body: &str,
+        current_channel: clawdesk_types::channel::ChannelId,
+        channel_registry: &Arc<RwLock<ChannelRegistry>>,
+    ) -> Option<(String, String)> {
+        let lower = body.to_lowercase();
+        let words: Vec<&str> = lower.split_whitespace().collect();
+        if words.len() < 3 {
+            return None; // Too short to be a cross-channel command
+        }
+
+        // Build list of OTHER connected channel names (lowercase)
+        let other_channels: Vec<String> = {
+            let reg = channel_registry.read().ok()?;
+            reg.list()
+                .iter()
+                .filter(|id| **id != current_channel)
+                .filter(|id| !matches!(id,
+                    clawdesk_types::channel::ChannelId::WebChat |
+                    clawdesk_types::channel::ChannelId::Internal
+                ))
+                .map(|id| format!("{:?}", id).to_lowercase())
+                .collect()
+        };
+        if other_channels.is_empty() {
+            return None; // No other channels connected
+        }
+
+        // Pattern 1: "<verb> <content> to/on/in <channel>"
+        //   e.g. "say hello to discord", "send hi on telegram"
+        if Self::SEND_VERBS.iter().any(|v| words[0] == *v) {
+            // Find the preposition + channel at the tail
+            for (i, word) in words.iter().enumerate().rev() {
+                if other_channels.iter().any(|ch| ch == *word) {
+                    // Check preceding word is a preposition
+                    if i > 0 {
+                        let prev = words[i - 1];
+                        if matches!(prev, "to" | "on" | "in" | "via") {
+                            // Content is everything between verb and preposition
+                            let content_words = &words[1..i - 1];
+                            if !content_words.is_empty() {
+                                // Reconstruct content from original text (preserving case)
+                                let original_words: Vec<&str> = body.split_whitespace().collect();
+                                let content = original_words[1..i - 1].join(" ");
+                                return Some((word.to_string(), content));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pattern 2: "<verb> <channel> <content>"
+        //   e.g. "tell discord hello", "message telegram hey there"
+        if Self::SEND_VERBS.iter().any(|v| words[0] == *v) && words.len() >= 3 {
+            if other_channels.iter().any(|ch| ch == words[1]) {
+                let original_words: Vec<&str> = body.split_whitespace().collect();
+                let content = original_words[2..].join(" ");
+                if !content.is_empty() {
+                    return Some((words[1].to_string(), content));
+                }
+            }
+        }
+
+        // Pattern 3: "<channel> <content>" (channel-first, no verb)
+        //   e.g. "discord say hello", "telegram hey!"
+        if other_channels.iter().any(|ch| ch == words[0]) {
+            let original_words: Vec<&str> = body.split_whitespace().collect();
+            let content = original_words[1..].join(" ");
+            if !content.is_empty() {
+                return Some((words[0].to_string(), content));
+            }
+        }
+
+        None
+    }
+
+    /// Send a message directly to a target channel without LLM involvement.
+    ///
+    /// Looks up the target channel in the registry, resolves the last known
+    /// origin (or default), and dispatches the outbound message.
+    async fn direct_cross_channel_send(
+        &self,
+        target_channel_name: &str,
+        content: &str,
+        source_channel: clawdesk_types::channel::ChannelId,
+    ) -> Result<(), String> {
+        use clawdesk_types::channel::ChannelId;
+
+        // Parse target channel name → ChannelId
+        let target_id = match target_channel_name {
+            "telegram" => ChannelId::Telegram,
+            "discord" => ChannelId::Discord,
+            "slack" => ChannelId::Slack,
+            "whatsapp" => ChannelId::WhatsApp,
+            "email" => ChannelId::Email,
+            "irc" => ChannelId::Irc,
+            "teams" => ChannelId::Teams,
+            "matrix" => ChannelId::Matrix,
+            "signal" => ChannelId::Signal,
+            "mastodon" => ChannelId::Mastodon,
+            "webhook" => ChannelId::Webhook,
+            other => return Err(format!("Unknown channel: {other}")),
+        };
+
+        // Look up the channel in the registry
+        let ch = {
+            let reg = self.channel_registry.read()
+                .map_err(|e| format!("Channel registry lock: {e}"))?;
+            reg.get(&target_id).cloned()
+        }.ok_or_else(|| format!("Channel {} not connected", target_channel_name))?;
+
+        // Resolve the message origin — use last known origin or default
+        let origin = {
+            let last = self.last_channel_origins.read()
+                .map_err(|e| format!("Origins lock: {e}"))?;
+            last.get(&target_id).cloned()
+        }.or_else(|| ch.default_origin())
+            .ok_or_else(|| format!(
+                "No target configured for {target_channel_name}. \
+                 Send a message in that channel first, or set a default target in Settings."
+            ))?;
+
+        let outbound = clawdesk_types::message::OutboundMessage {
+            origin,
+            body: content.to_string(),
+            media: vec![],
+            reply_to: None,
+            thread_id: None,
+        };
+
+        ch.send(outbound).await
+            .map_err(|e| format!("Send failed: {e}"))?;
+
+        info!(
+            source = %source_channel,
+            target = %target_channel_name,
+            content_len = content.len(),
+            "Direct cross-channel message sent successfully"
+        );
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -1015,6 +1390,45 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             body_preview = %msg.body.chars().take(80).collect::<String>(),
             "Inbound channel message received — routing to agent"
         );
+
+        // ── Fast-path: direct cross-channel dispatch ──
+        // Detect obvious cross-channel intents like "say X to discord",
+        // "tell telegram hello", "send discord hi" and dispatch directly
+        // without routing through the LLM. This is more reliable than
+        // depending on the LLM to call the message_send tool.
+        if let Some((target_ch, content)) = Self::detect_cross_channel_intent(
+            &msg.body,
+            channel_id,
+            &self.channel_registry,
+        ) {
+            info!(
+                channel = %channel_id,
+                target = %target_ch,
+                content_len = content.len(),
+                "Cross-channel intent detected — dispatching directly"
+            );
+            let send_result = self.direct_cross_channel_send(
+                &target_ch, &content, channel_id,
+            ).await;
+            match send_result {
+                Ok(()) => {
+                    self.reply_error(
+                        channel_id,
+                        &msg.origin,
+                        &format!("✅ Sent to {target_ch}."),
+                    ).await;
+                }
+                Err(e) => {
+                    warn!(target = %target_ch, error = %e, "Direct cross-channel send failed");
+                    self.reply_error(
+                        channel_id,
+                        &msg.origin,
+                        &format!("⚠️ Failed to send to {target_ch}: {e}"),
+                    ).await;
+                }
+            }
+            return;
+        }
 
         // Track the last origin for this channel so cross-channel message_send
         // can resolve "default" targets without requiring internal IDs.
@@ -1106,6 +1520,11 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
                         use clawdesk_providers::openai::OpenAiProvider;
                         let base = if cp.base_url.is_empty() { None } else { Some(cp.base_url.clone()) };
                         Ok((Arc::new(OpenAiProvider::new(cp.api_key.clone(), base, Some(effective_model.clone()))), effective_model))
+                    }
+                    "Azure OpenAI" => {
+                        use clawdesk_providers::azure::AzureOpenAiProvider;
+                        let endpoint = if cp.base_url.is_empty() { "https://example.openai.azure.com".to_string() } else { cp.base_url.clone() };
+                        Ok((Arc::new(AzureOpenAiProvider::new(cp.api_key.clone(), endpoint, None, Some(effective_model.clone()))), effective_model))
                     }
                     "Ollama (Local)" | "ollama" => {
                         use clawdesk_providers::ollama::OllamaProvider;
@@ -1434,8 +1853,10 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             }
         }
 
-        // Append assistant response to conversation history
-        {
+        // Append assistant response to conversation history.
+        // Skip empty responses — pushing an empty assistant message can cause
+        // Azure OpenAI (and other providers) to return empty on subsequent calls.
+        if !response.content.trim().is_empty() {
             if let Some(mut entry) = self.conversation_histories.get_mut(&history_key) {
                 entry.push_back(clawdesk_providers::ChatMessage::new(
                     clawdesk_providers::MessageRole::Assistant,
@@ -1446,12 +1867,25 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
                     entry.pop_front();
                 }
             }
+        } else {
+            warn!(
+                channel = %channel_id,
+                sender = %sender_name,
+                "Skipping empty assistant message in conversation history"
+            );
         }
 
         info!(
             channel = %channel_id,
             sender = %sender_name,
             response_len = response.content.len(),
+            total_rounds = response.total_rounds,
+            finish_reason = ?response.finish_reason,
+            input_tokens = response.input_tokens,
+            output_tokens = response.output_tokens,
+            tool_messages = response.tool_messages.len(),
+            messaging_sends = response.messaging_sends.len(),
+            content_preview = %response.content.chars().take(120).collect::<String>(),
             "Agent response ready — sending back to channel"
         );
 
@@ -1479,7 +1913,40 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             });
         }
 
-        // 5. Send response back through the originating channel
+        // 5. Send response back through the originating channel.
+        //    Guard against empty responses — Telegram (and other APIs) reject
+        //    messages with an empty body (HTTP 400 "message text is empty").
+        //    If the LLM returned empty content but called tools (e.g. message_send),
+        //    the work was already done via tool execution; silently skip the reply.
+        if response.content.trim().is_empty() {
+            if response.messaging_sends.is_empty() {
+                // LLM returned nothing AND didn't call any tools —
+                // this is a genuine failure, not a successful tool dispatch.
+                warn!(
+                    channel = %channel_id,
+                    sender = %sender_name,
+                    finish_reason = ?response.finish_reason,
+                    total_rounds = response.total_rounds,
+                    input_tokens = response.input_tokens,
+                    output_tokens = response.output_tokens,
+                    "Agent returned empty response with no tool calls — sending fallback"
+                );
+                self.reply_error(
+                    channel_id,
+                    &msg.origin,
+                    "⚠️ I wasn't able to process that request. Please try rephrasing.",
+                ).await;
+            } else {
+                info!(
+                    channel = %channel_id,
+                    sender = %sender_name,
+                    messaging_sends = response.messaging_sends.len(),
+                    "Agent returned empty response — tools already delivered the result"
+                );
+            }
+            return;
+        }
+
         let outbound = clawdesk_types::message::OutboundMessage {
             origin: msg.origin.clone(),
             body: response.content,
@@ -1644,10 +2111,10 @@ impl AppState {
                      Chat history will NOT survive restart!"
                 );
                 let tmp = std::env::temp_dir().join(format!("clawdesk-threads-{}", std::process::id()));
-                Arc::new(
-                    clawdesk_threads::ThreadStore::open(&tmp)
-                        .expect("temp ThreadStore must succeed"),
-                )
+                let mut ts = clawdesk_threads::ThreadStore::open(&tmp)
+                    .expect("temp ThreadStore must succeed");
+                ts.mark_ephemeral();
+                Arc::new(ts)
             }
         };
 
@@ -1686,6 +2153,19 @@ impl AppState {
             "SochDB advanced modules initialized: SemanticCache, TraceStore, \
              CheckpointStore, GraphOverlay, TemporalGraph, PolicyEngine, \
              AtomicMemoryWriter, AgentRegistry"
+        );
+
+        // ── Lifecycle manager, indexes, structured tracing, schema ──
+        let lifecycle_manager = Arc::new(clawdesk_sochdb::LifecycleManager::new(
+            soch_store.clone(),
+            Some(thread_store.clone()),
+        ));
+        let session_index = Arc::new(clawdesk_sochdb::SessionIndex::new(soch_store.clone()));
+        let structured_tracing = Arc::new(clawdesk_sochdb::StructuredTracing::new(soch_store.clone()));
+        let migration_registry = Arc::new(clawdesk_sochdb::schema::build_migrations());
+        info!(
+            "Storage infrastructure initialized: LifecycleManager, SessionIndex, \
+             StructuredTracing, MigrationRegistry"
         );
 
         let skill_registry = load_bundled_skills();
@@ -2453,24 +2933,23 @@ impl AppState {
 
         // ── T5: CronManager — wire scheduled pipeline execution ──────
         let cancel = tokio_util::sync::CancellationToken::new();
-        let cron_provider: Arc<dyn Provider> = provider_registry
-            .default_provider()
-            .map(|p| Arc::clone(p))
-            .unwrap_or_else(|| {
-                // Fallback: create an Ollama provider (always available locally)
-                Arc::new(OllamaProvider::new(None, None)) as Arc<dyn Provider>
-            });
+        // Pre-load channel_provider for sharing.
+        // This same Arc is reused in the AppState struct below.
+        let shared_channel_provider: Arc<RwLock<Option<ChannelProviderOverride>>> =
+            Arc::new(RwLock::new(Self::load_channel_provider()));
+        // Deferred AppHandle — set in lib.rs .setup() callback.
+        let cron_app_handle: Arc<std::sync::OnceLock<tauri::AppHandle>> =
+            Arc::new(std::sync::OnceLock::new());
         let cron_executor = CronAgentExecutor {
-            provider: cron_provider,
-            tool_registry: Arc::clone(&tool_registry),
-            cancel: cancel.clone(),
-            memory: Arc::clone(&memory),
+            app_handle: Arc::clone(&cron_app_handle),
         };
-        let cron_manager = Arc::new(CronManager::new(
+        let cron_persistence = Arc::new(SochDbCronPersistence::new(Arc::clone(&soch_store)));
+        let cron_manager = Arc::new(CronManager::with_persistence(
             Arc::new(cron_executor),
             Arc::new(NoOpDelivery),
+            cron_persistence,
         ));
-        info!("CronManager initialized — scheduled pipeline execution ready");
+        info!("CronManager initialized with SochDB persistence — scheduled pipeline execution ready");
 
         // ── Hydrate hot caches from SochDB ──────────────────────────
         info!("Starting hydration from SochDB...");
@@ -2671,6 +3150,10 @@ impl AppState {
             policy_engine,
             atomic_writer,
             agent_registry,
+            lifecycle_manager,
+            session_index,
+            structured_tracing,
+            migration_registry,
             memory,
             embedding_provider: embedding_for_state,
 
@@ -2699,6 +3182,8 @@ impl AppState {
             },
             invites: RwLock::new(InviteManager::new()),
             tunnel_metrics: Arc::new(TunnelMetrics::new()),
+            tunnel_manager: tokio::sync::RwLock::new(None),
+            peer_manager: tokio::sync::RwLock::new(PeerManager::new(50)),
             total_cost_today: AtomicU64::new(0),
             total_input_tokens: AtomicU64::new(0),
             total_output_tokens: AtomicU64::new(0),
@@ -2746,7 +3231,7 @@ impl AppState {
             notification_history: RwLock::new(notification_history),
 
             // ── Channel provider override (hydrated from disk if available) ──
-            channel_provider: RwLock::new(Self::load_channel_provider()),
+            channel_provider: shared_channel_provider,
 
             // ── Clipboard (hydrated from SochDB) ──
             clipboard_history: RwLock::new(clipboard_history),
@@ -2807,6 +3292,7 @@ impl AppState {
 
             // ── T5: Cron Scheduling ──
             cron_manager,
+            cron_app_handle,
 
             // ── T8: Life OS Template Registry ──
             template_registry: Arc::new(clawdesk_skills::life_os::TemplateRegistry::with_builtins()),
@@ -2894,11 +3380,16 @@ impl AppState {
                     &registry,
                     &soch_store,
                 );
+                // Restore per-extension configuration from SochDB
+                crate::commands_extensions::restore_extension_configs(
+                    &registry,
+                    &soch_store,
+                );
                 let enabled_count = registry.enabled().len();
                 info!(
                     total = registry.count(),
                     enabled = enabled_count,
-                    "Integration registry loaded (enabled state restored)"
+                    "Integration registry loaded (enabled state + configs restored)"
                 );
                 tokio::sync::RwLock::new(registry)
             },
@@ -3068,17 +3559,11 @@ impl AppState {
             tracing::info!(ok = ok_count, failed = fail_count, "bulk persist: sessions written");
         }
 
-        // Pipelines
-        if let Ok(pipelines) = self.pipelines.read() {
-            for p in pipelines.iter() {
-                if let Ok(bytes) = serde_json::to_vec(p) {
-                    let key = format!("pipelines/{}", p.id);
-                    if let Err(e) = self.soch_store.put(&key, &bytes) {
-                        tracing::error!(key = %key, error = %e, "Failed to persist pipeline");
-                    }
-                }
-            }
-        }
+        // Pipelines — SKIP: pipelines use write-through durability
+        // (put_durable) on every create/update/delete. Re-writing them
+        // here with non-durable put() can race with a concurrent
+        // update_pipeline's put_durable and overwrite newer data.
+        // The pipeline data in SochDB is always authoritative.
 
         // Canvases
         if let Ok(canvases) = self.canvases.read() {
@@ -3354,18 +3839,26 @@ impl AppState {
     /// Delete an agent from SochDB.
     pub fn delete_agent_from_store(&self, id: &str) {
         let key = format!("agents/{}", id);
-        if let Err(e) = self.soch_store.delete(&key) {
+        if let Err(e) = self.soch_store.delete_durable(&key) {
             tracing::error!(key = %key, error = %e, "Failed to delete agent from SochDB");
         }
     }
 
-    /// Persist a pipeline to SochDB (write-through).
+    /// Persist a pipeline to SochDB (write-through, durable).
     pub fn persist_pipeline(&self, pipeline: &PipelineDescriptor) {
         if let Ok(bytes) = serde_json::to_vec(pipeline) {
             let key = format!("pipelines/{}", pipeline.id);
-            if let Err(e) = self.soch_store.put(&key, &bytes) {
+            if let Err(e) = self.soch_store.put_durable(&key, &bytes) {
                 tracing::error!(key = %key, error = %e, "Failed to persist pipeline");
             }
+        }
+    }
+
+    /// Delete a pipeline from SochDB (write-through, durable).
+    pub fn delete_pipeline_from_store(&self, id: &str) {
+        let key = format!("pipelines/{}", id);
+        if let Err(e) = self.soch_store.delete_durable(&key) {
+            tracing::error!(key = %key, error = %e, "Failed to delete pipeline from SochDB");
         }
     }
 

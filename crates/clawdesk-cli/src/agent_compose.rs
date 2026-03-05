@@ -398,6 +398,355 @@ pub fn binding_specificity(binding: &ChannelBinding) -> usize {
     specificity
 }
 
+// ── CLI command implementations ──────────────────────────────
+
+/// Agents directory inside user config.
+fn agents_dir() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    home.join(".clawdesk").join("agents")
+}
+
+/// `clawdesk agent add <id> [--from-toml path]`
+///
+/// Creates a new agent directory with agent.toml. If `--from-toml` is provided,
+/// copies and validates the TOML. Otherwise generates a scaffold.
+pub async fn cmd_agent_add(
+    id: &str,
+    from_toml: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dir = agents_dir().join(id);
+    if dir.exists() {
+        return Err(format!("Agent directory already exists: {}", dir.display()).into());
+    }
+
+    let content = if let Some(path) = from_toml {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {path}: {e}"))?;
+        // Validate before saving
+        let def = parse_agent_toml(&raw)?;
+        let diags = validate_agent(&def);
+        let errors: Vec<_> = diags.iter()
+            .filter(|d| d.severity == ValidationSeverity::Error)
+            .collect();
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("  ✗ {}", e.message);
+            }
+            return Err(format!("{} validation error(s) — agent not created", errors.len()).into());
+        }
+        for w in diags.iter().filter(|d| d.severity == ValidationSeverity::Warning) {
+            eprintln!("  ⚠ {}", w.message);
+        }
+        raw
+    } else {
+        // Generate scaffold TOML
+        format!(
+            r#"[agent]
+id = "{id}"
+display_name = "{name}"
+model = "claude-sonnet-4-20250514"
+
+[agent.persona]
+soul = """
+You are {name}. Describe your personality and responsibilities here.
+"""
+
+guidelines = """
+- Add working guidelines here
+"""
+
+[agent.tools]
+allow = ["file_read", "file_write", "web_search"]
+deny = []
+
+[agent.skills]
+activate = []
+
+# [[agent.bindings.channels]]
+# channel = "telegram"
+# account = "team"
+
+[agent.subagents]
+can_spawn = []
+max_depth = 2
+max_concurrent = 3
+"#,
+            id = id,
+            name = id.replace('-', " ").split_whitespace()
+                .map(|w| {
+                    let mut c = w.chars();
+                    match c.next() {
+                        None => String::new(),
+                        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+
+    std::fs::create_dir_all(&dir)?;
+    let toml_path = dir.join("agent.toml");
+    std::fs::write(&toml_path, &content)?;
+    println!("✓ Created agent '{}' at {}", id, toml_path.display());
+
+    // Also try to register with the running gateway
+    let url = "http://127.0.0.1:18789/api/v1/admin/agents";
+    if let Ok(def) = parse_agent_toml(&content) {
+        let body = serde_json::json!({
+            "name": def.agent.display_name,
+            "icon": "🤖",
+            "color": "#6366f1",
+            "persona": def.agent.persona.soul,
+            "skills": def.agent.skills.activate,
+            "model": def.agent.model,
+            "channels": def.agent.bindings.channels.iter()
+                .map(|b| b.channel.clone()).collect::<Vec<_>>(),
+        });
+        match reqwest::Client::new().post(url).json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                println!("  ↳ Registered with running gateway");
+            }
+            _ => {
+                println!("  ↳ Gateway not running — agent saved locally. Run 'clawdesk agent apply' to register later.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// `clawdesk agent validate`
+///
+/// Schema-validates all agent.toml files in ~/.clawdesk/agents/.
+pub async fn cmd_agent_validate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dir = agents_dir();
+    if !dir.exists() {
+        println!("No agents directory at {}", dir.display());
+        return Ok(());
+    }
+
+    let agents = load_all_agents(&dir)?;
+    if agents.is_empty() {
+        println!("No agent.toml files found in {}", dir.display());
+        return Ok(());
+    }
+
+    let mut total_errors = 0;
+    let mut total_warnings = 0;
+
+    for (path, def) in &agents {
+        let diags = validate_agent(def);
+        let errors: Vec<_> = diags.iter().filter(|d| d.severity == ValidationSeverity::Error).collect();
+        let warnings: Vec<_> = diags.iter().filter(|d| d.severity == ValidationSeverity::Warning).collect();
+
+        if errors.is_empty() {
+            println!("✓ {} ({})", def.agent.id, path.display());
+        } else {
+            println!("✗ {} ({})", def.agent.id, path.display());
+        }
+
+        for e in &errors {
+            println!("    ✗ {}", e.message);
+            total_errors += 1;
+        }
+        for w in &warnings {
+            println!("    ⚠ {}", w.message);
+            total_warnings += 1;
+        }
+    }
+
+    // Check for binding conflicts
+    let defs: Vec<_> = agents.iter().map(|(_, d)| d.clone()).collect();
+    let conflicts = detect_binding_conflicts(&defs);
+    for c in &conflicts {
+        println!("  ⚠ {}", c);
+        total_warnings += 1;
+    }
+
+    println!();
+    println!("{} agents, {} errors, {} warnings",
+        agents.len(), total_errors, total_warnings);
+
+    if total_errors > 0 {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// `clawdesk agent list [--bindings] [--json]`
+///
+/// Lists all agent definitions and their routing table.
+pub async fn cmd_agent_list(
+    show_bindings: bool,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dir = agents_dir();
+    let agents = if dir.exists() {
+        load_all_agents(&dir)?
+    } else {
+        Vec::new()
+    };
+
+    if json_output {
+        let items: Vec<serde_json::Value> = agents.iter().map(|(path, def)| {
+            serde_json::json!({
+                "id": def.agent.id,
+                "display_name": def.agent.display_name,
+                "model": def.agent.model,
+                "path": path.display().to_string(),
+                "skills": def.agent.skills.activate,
+                "bindings": def.agent.bindings.channels.iter().map(|b| {
+                    serde_json::json!({
+                        "channel": b.channel,
+                        "account": b.account,
+                        "group": b.group,
+                    })
+                }).collect::<Vec<_>>(),
+                "can_spawn": def.agent.subagents.can_spawn,
+            })
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+
+    if agents.is_empty() {
+        println!("No agents configured. Run 'clawdesk agent add <id>' to create one.");
+        return Ok(());
+    }
+
+    println!("{:<16} {:<24} {:<30} {}", "ID", "NAME", "MODEL", "SKILLS");
+    println!("{}", "─".repeat(90));
+
+    for (_, def) in &agents {
+        let skills = if def.agent.skills.activate.is_empty() {
+            "—".to_string()
+        } else {
+            def.agent.skills.activate.join(", ")
+        };
+        println!("{:<16} {:<24} {:<30} {}",
+            def.agent.id,
+            def.agent.display_name,
+            def.agent.model,
+            skills,
+        );
+
+        if show_bindings {
+            for b in &def.agent.bindings.channels {
+                let group = b.group.as_deref().unwrap_or("*");
+                println!("  ↳ {}:{} (group={})", b.channel, b.account, group);
+            }
+            if !def.agent.subagents.can_spawn.is_empty() {
+                println!("  ↳ can_spawn: {:?}", def.agent.subagents.can_spawn);
+            }
+        }
+    }
+
+    println!();
+    println!("{} agent(s)", agents.len());
+    Ok(())
+}
+
+/// `clawdesk agent apply [id]`
+///
+/// Hot-reload agent definitions by registering them with the running gateway.
+pub async fn cmd_agent_apply(
+    gateway_url: &str,
+    specific_id: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dir = agents_dir();
+    let agents = if dir.exists() {
+        load_all_agents(&dir)?
+    } else {
+        return Err("No agents directory found".into());
+    };
+
+    let agents_to_apply: Vec<_> = if let Some(id) = specific_id {
+        agents.into_iter().filter(|(_, d)| d.agent.id == id).collect()
+    } else {
+        agents
+    };
+
+    if agents_to_apply.is_empty() {
+        println!("No matching agents to apply.");
+        return Ok(());
+    }
+
+    let client = reqwest::Client::new();
+    let mut success = 0;
+    let mut failed = 0;
+
+    for (_, def) in &agents_to_apply {
+        let url = format!("{}/api/v1/admin/agents", gateway_url);
+        let body = serde_json::json!({
+            "name": def.agent.display_name,
+            "icon": "🤖",
+            "color": "#6366f1",
+            "persona": def.agent.persona.soul,
+            "skills": def.agent.skills.activate,
+            "model": def.agent.model,
+            "channels": def.agent.bindings.channels.iter()
+                .map(|b| b.channel.clone()).collect::<Vec<_>>(),
+            "source": "agent.toml",
+        });
+
+        match client.post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                println!("✓ Applied '{}'", def.agent.id);
+                success += 1;
+            }
+            Ok(resp) => {
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!("✗ Failed to apply '{}': {}", def.agent.id, body);
+                failed += 1;
+            }
+            Err(e) => {
+                eprintln!("✗ Failed to apply '{}': {}", def.agent.id, e);
+                failed += 1;
+            }
+        }
+    }
+
+    println!();
+    println!("{} applied, {} failed", success, failed);
+    Ok(())
+}
+
+/// `clawdesk agent export <id> [-o path]`
+///
+/// Export an agent to agent.toml format.
+pub async fn cmd_agent_export(
+    id: &str,
+    output: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dir = agents_dir();
+    let agents = if dir.exists() {
+        load_all_agents(&dir)?
+    } else {
+        Vec::new()
+    };
+
+    if let Some((_, def)) = agents.iter().find(|(_, d)| d.agent.id == id) {
+        let toml_str = toml::to_string_pretty(def)
+            .map_err(|e| format!("Failed to serialize: {e}"))?;
+
+        if let Some(path) = output {
+            std::fs::write(path, &toml_str)?;
+            println!("Exported '{}' to {}", id, path);
+        } else {
+            println!("{}", toml_str);
+        }
+    } else {
+        return Err(format!("Agent '{}' not found in {}", id, dir.display()).into());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

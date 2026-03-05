@@ -64,6 +64,7 @@ pub mod sandbox;
 // Re-exports for ergonomic use.
 pub use checkpoint::CheckpointStore;
 pub use dag::DagExecutor;
+pub use dag::AgentConfigRegistry;
 pub use dead_letter::DeadLetterQueue;
 pub use durable_runner::DurableAgentRunner;
 pub use journal::ActivityJournal;

@@ -5,11 +5,9 @@ import {
   ResponsiveContainer, PieChart, Pie, Cell,
 } from "recharts";
 import * as api from "../api";
-import { ChannelSetupJourney } from "../onboarding/ChannelSetupJourney";
 import type {
   DesktopAgent,
   ChannelInfo,
-  ChannelTypeSpec,
   SecurityStatus,
   CostMetrics,
   ObservabilityStatus,
@@ -50,12 +48,10 @@ const CHART_YELLOW = "#E8A817";
 const PIE_COLORS = [CHART_ACCENT, CHART_BLUE, CHART_GREEN, CHART_YELLOW, "#7C3AED", "#EC4899"];
 
 // ── Tab definition ────────────────────────────────────────────
-type SettingsTab = "preferences" | "channels" | "agents" | "providers" | "security" | "observe" | "infra" | "backup";
+type SettingsTab = "preferences" | "providers" | "security" | "observe" | "infra" | "backup";
 
 const TABS: { id: SettingsTab; label: string; icon: string }[] = [
   { id: "preferences", label: "Preferences", icon: "⚙️" },
-  { id: "channels", label: "Channels", icon: "📡" },
-  { id: "agents", label: "Agents", icon: "🤖" },
   { id: "providers", label: "Providers", icon: "🧠" },
   { id: "security", label: "Security", icon: "🛡️" },
   { id: "observe", label: "Observability", icon: "📈" },
@@ -95,161 +91,6 @@ export interface SettingsPageProps {
   onNavigate: (nav: string, options?: { threadId?: string }) => void;
 }
 
-// ── Channels sub-panel ────────────────────────────────────────
-
-function ChannelsPanel({
-  channels,
-  onRefreshChannels,
-  pushToast,
-}: {
-  channels: ChannelInfo[];
-  onRefreshChannels: () => void;
-  pushToast: (text: string) => void;
-}) {
-  const [typeSpecs, setTypeSpecs] = useState<ChannelTypeSpec[]>([]);
-  const [configuring, setConfiguring] = useState<ChannelInfo | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    api.getChannelTypes().then(setTypeSpecs).catch(() => { });
-  }, []);
-
-  const specFor = useCallback(
-    (ch: ChannelInfo) => typeSpecs.find((ts) => ts.id === ch.channel_type),
-    [typeSpecs]
-  );
-
-  const openConfig = useCallback((ch: ChannelInfo) => {
-    setConfiguring(ch);
-  }, []);
-
-  const disconnect = useCallback(async (ch: ChannelInfo) => {
-    try {
-      await api.disconnectChannel(ch.id);
-      pushToast(`${ch.name} disconnected.`);
-      onRefreshChannels();
-    } catch {
-      pushToast(`Failed to disconnect ${ch.name}.`);
-    }
-  }, [onRefreshChannels, pushToast]);
-
-  // "active" = running in registry; "configured" = saved but may need restart; "available" = not set up
-  const connected = channels.filter((c) => c.status === "active" || c.status === "configured");
-  const available = channels.filter((c) => c.status === "available");
-  const spec = configuring ? specFor(configuring) : null;
-
-  return (
-    <div className="settings-panel">
-      <p className="settings-desc">
-        Connect messaging platforms. ClawDesk normalizes inbound messages and renders
-        outbound responses for each platform automatically.
-      </p>
-
-      {connected.length > 0 && (
-        <div className="settings-group">
-          <div className="settings-group-label">Connected</div>
-          <div className="channel-grid">
-            {connected.map((ch) => {
-              const ts = specFor(ch);
-              const isRunning = ch.status === "active";
-              return (
-                <div key={ch.id} className={`channel-card ${isRunning ? "channel-card--active" : ""}`}>
-                  <div className="channel-card-info">
-                    <h3>
-                      {ts?.icon ?? "📡"} {ch.name}
-                    </h3>
-                    <p>
-                      {ch.channel_type} · {isRunning
-                        ? <span className="status-text-ok">active</span>
-                        : <span className="status-text-warn" title="Config saved — will connect on next start or after reconnect">configured</span>
-                      }
-                    </p>
-                    {(ch.capabilities ?? []).length > 0 && (
-                      <div className="channel-card-caps">
-                        {(ch.capabilities ?? []).map((c) => (
-                          <span key={c} className="chip chip-sm">{c}</span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  <span className={`status-dot ${isRunning ? "status-ok" : "status-warn"}`} />
-                  <div className="channel-card-btns">
-                    <button className="btn subtle" onClick={() => openConfig(ch)}>Configure</button>
-                    {ch.channel_type !== "WebChat" && ch.channel_type !== "Internal" && (
-                      <button className="btn ghost" onClick={() => disconnect(ch)}>Disconnect</button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {available.length > 0 && (
-        <div className="settings-group">
-          <div className="settings-group-label">Available</div>
-          <div className="channel-grid">
-            {available.map((ch) => {
-              const ts = specFor(ch);
-              return (
-                <div key={ch.id} className="channel-card">
-                  <div className="channel-card-info">
-                    <h3>
-                      {ts?.icon ?? "📡"} {ch.name}
-                    </h3>
-                    <p>{ch.channel_type} · <span className="status-text-off">available</span></p>
-                  </div>
-                  <span className="status-dot status-error" />
-                  <button className="btn subtle" onClick={() => openConfig(ch)}>Connect</button>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {channels.length === 0 && (
-        <div className="empty-state">
-          <p>No channels found.</p>
-          <button className="btn primary" onClick={onRefreshChannels}>Refresh</button>
-        </div>
-      )}
-
-      {configuring && spec && (
-        <div className="modal-backdrop" onClick={() => setConfiguring(null)}>
-          <div className="modal channel-config-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-head">
-              <h2>{spec.icon} {configuring.name} Setup</h2>
-              <button className="btn ghost" onClick={() => setConfiguring(null)}>✕</button>
-            </div>
-            <div className="modal-body">
-              <ChannelSetupJourney
-                spec={spec}
-                initialValues={configuring.config ?? {}}
-                onComplete={async (config) => {
-                  setSaving(true);
-                  try {
-                    await api.updateChannel(configuring.id, config);
-                    pushToast(`${configuring.name} connected.`);
-                    onRefreshChannels();
-                    setConfiguring(null);
-                  } catch {
-                    pushToast(`Failed to save ${configuring.name} config.`);
-                  } finally {
-                    setSaving(false);
-                  }
-                }}
-                onCancel={() => setConfiguring(null)}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Component ─────────────────────────────────────────────────
 
 export function SettingsPage({
@@ -277,8 +118,6 @@ export function SettingsPage({
     if (deepLink) {
       window.localStorage.removeItem("clawdesk._settingsTab");
       const mapping: Record<string, SettingsTab> = {
-        Channels: "channels",
-        Agents: "agents",
         Providers: "providers",
         Security: "security",
         Observability: "observe",
@@ -639,76 +478,6 @@ export function SettingsPage({
                       </button>
                     </div>
                   </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ═══ CHANNELS TAB ═══ */}
-          {tab === "channels" && (
-            <ChannelsPanel
-              channels={channels}
-              onRefreshChannels={onRefreshChannels}
-              pushToast={pushToast}
-            />
-          )}
-
-          {/* ═══ AGENTS TAB ═══ */}
-          {tab === "agents" && (
-            <div className="settings-panel">
-              <div className="settings-panel-head">
-                <p className="settings-desc">
-                  Each agent has a hash-locked IdentityContract, assigned skills, and a designated
-                  model. Personas are scanned by CascadeScanner before activation.
-                </p>
-                <button className="btn primary" onClick={() => onCreateAgent(AGENT_TEMPLATES[0])}>
-                  Create agent
-                </button>
-              </div>
-              <div className="agent-list">
-                {agents.map((a) => (
-                  <div key={a.id} className="agent-card-settings">
-                    <div className="agent-card-icon">{a.icon}</div>
-                    <div className="agent-card-info">
-                      <div className="agent-card-name">
-                        {a.name}
-                        <span className={`status-dot ${a.status === "active" ? "status-ok" : "status-warn"}`} />
-                        <span className="chip">{a.status}</span>
-                      </div>
-                      <div className="agent-card-persona">{a.persona.slice(0, 80)}...</div>
-                      <div className="agent-card-meta">
-                        {a.skills.slice(0, 4).map((s) => (
-                          <span key={s} className="chip">{s}</span>
-                        ))}
-                        <span className="chip">{a.model}</span>
-                        {(a.channels ?? []).length > 0 ? (
-                          (a.channels ?? []).map((ch) => (
-                            <span key={ch} className="chip" style={{ background: "var(--accent-bg)", color: "var(--brand)" }}>{ch}</span>
-                          ))
-                        ) : (
-                          <span className="chip" style={{ opacity: 0.5 }}>all channels</span>
-                        )}
-                        <span>{a.msg_count} msgs · {(a.tokens_used ?? 0).toLocaleString()}/{(a.token_budget ?? 0).toLocaleString()} tokens</span>
-                      </div>
-                    </div>
-                    <div className="agent-card-verify">
-                      <div className="verify-status">✓ Identity Verified</div>
-                      <div className="verify-hash">sha256:{a.persona_hash.slice(0, 8)}...</div>
-                    </div>
-                    <div className="agent-card-actions">
-                      <button className="btn subtle" onClick={() => onNavigate("chat")}>Chat →</button>
-                      <button className="btn subtle">Edit</button>
-                      <button className="btn ghost" onClick={() => onDeleteAgent(a.id)}>Delete</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              {agents.length === 0 && (
-                <div className="empty-state-action" style={{ padding: 24, textAlign: "center" }}>
-                  <p style={{ marginBottom: 12 }}>No agents created yet. Create one to start chatting.</p>
-                  <button className="btn primary" onClick={() => onCreateAgent(AGENT_TEMPLATES[0])}>
-                    Create your first agent
-                  </button>
                 </div>
               )}
             </div>

@@ -1,6 +1,6 @@
 //! Transactional connection wrapper — buffered writes over `ConnectionTrait`.
 //!
-//! ## SochDB Transactions (P3)
+//! ## SochDB Transactions (GAP-02)
 //!
 //! `ConnectionTrait` is a flat put/get/delete/scan interface with no transaction
 //! support. ClawDesk needs multi-key writes for:
@@ -12,16 +12,16 @@
 //! `TransactionalConn` wraps any `ConnectionTrait` implementor and provides:
 //! - **Read-your-writes**: reads check the write buffer before falling through.
 //! - **Best-effort batch commit**: buffered writes applied sequentially.
-//!   **NOT ATOMIC** — a crash mid-commit produces partial state. Callers
-//!   requiring crash-safety must implement external idempotency.
 //! - **Rollback**: discard all buffered writes.
 //! - **Drop safety**: uncommitted transaction is auto-rolled-back on drop.
 //!
-//! ## Future work
+//! ## Recommended: native MVCC transactions
 //!
-//! Implement a write-ahead log (WAL) in front of the connection to restore
-//! true atomicity. Alternatively, use SochDB's native batch API if one is
-//! added at a lower abstraction level.
+//! For `SochStore`-backed usage, prefer [`SochStore::apply_atomic_batch`] or
+//! [`SochStore::with_transaction`] which use the native `EmbeddedConnection`
+//! `begin()`/`commit()`/`abort()` cycle for true all-or-nothing semantics.
+//! The `TransactionalConn` buffer-and-flush approach remains available as
+//! a fallback for generic `ConnectionTrait` backends.
 
 use sochdb::ConnectionTrait;
 use std::collections::BTreeMap;
@@ -153,23 +153,19 @@ impl<C: ConnectionTrait> TransactionalConn<C> {
 
     /// Commit the transaction — apply all buffered writes sequentially.
     ///
-    /// **WARNING: NOT ATOMIC.** Operations are applied one-by-one via
-    /// individual `put`/`delete` calls. If the process crashes or a write
-    /// fails mid-commit, the underlying store will contain a **partially
-    /// committed** state. Callers must provide their own idempotency
-    /// guarantees if crash-safety is required.
+    /// Operations are applied one-by-one via individual `put`/`delete` calls
+    /// on the `ConnectionTrait` backend. While this traverses the buffer
+    /// sequentially, callers using `SochConn` should prefer
+    /// [`commit_atomic()`](Self::commit_atomic) for true MVCC atomicity.
     ///
-    /// SochDB 0.5.0 removed `write_batch` from `ConnectionTrait`.
-    /// A future version should implement a write-ahead log (WAL) to
-    /// restore true atomicity.
+    /// For generic `ConnectionTrait` backends without native transaction
+    /// support, this remains the fallback commit path.
     pub fn commit(mut self) -> sochdb::error::Result<CommitResult> {
         assert_eq!(self.state, TxnState::Active, "cannot commit a finished transaction");
 
         let puts = self.buffer.iter().filter(|(_, op)| matches!(op, PendingOp::Put(_))).count();
         let deletes = self.buffer.iter().filter(|(_, op)| matches!(op, PendingOp::Delete)).count();
 
-        // Apply all buffered operations via individual put/delete calls.
-        // SochDB 0.5.0 removed write_batch from ConnectionTrait.
         for (key, op) in &self.buffer {
             match op {
                 PendingOp::Put(value) => {
@@ -254,6 +250,10 @@ pub struct RollbackResult {
 ///
 /// If the closure returns `Ok`, the transaction is committed.
 /// If it returns `Err`, the transaction is rolled back.
+///
+/// **Note:** For `SochConn`-backed transactions, prefer
+/// [`SochStore::with_transaction`] or [`SochStore::apply_atomic_batch`]
+/// for true MVCC atomicity.
 ///
 /// # Example
 ///

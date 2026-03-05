@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import * as api from "../api";
 import type { PipelineDescriptor, PipelineNodeDescriptor } from "../types";
 import { Icon } from "./Icon";
@@ -39,20 +39,164 @@ function makeStepId() {
   return `step_${++stepCounter}_${Date.now().toString(36)}`;
 }
 
+// ── Cron helpers ──────────────────────────────────────────────
+
+/** Parse a 5-field cron expression and compute the next fire time after `after`. */
+function nextCronDate(cron: string, after: Date): Date | null {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+
+  const parseField = (field: string, min: number, max: number): Set<number> => {
+    const vals = new Set<number>();
+    for (const part of field.split(",")) {
+      const stepMatch = part.match(/^(.+)\/(\d+)$/);
+      const step = stepMatch ? parseInt(stepMatch[2]) : 1;
+      const range = stepMatch ? stepMatch[1] : part;
+
+      if (range === "*") {
+        for (let i = min; i <= max; i += step) vals.add(i);
+      } else if (range.includes("-")) {
+        const [a, b] = range.split("-").map(Number);
+        for (let i = a; i <= b; i += step) vals.add(i);
+      } else {
+        vals.add(parseInt(range));
+      }
+    }
+    return vals;
+  };
+
+  const minutes = parseField(parts[0], 0, 59);
+  const hours = parseField(parts[1], 0, 23);
+  const doms = parseField(parts[2], 1, 31);
+  const months = parseField(parts[3], 1, 12);
+  const dows = parseField(parts[4], 0, 6);
+
+  const d = new Date(after);
+  d.setSeconds(0, 0);
+  d.setMinutes(d.getMinutes() + 1); // start from next minute
+
+  for (let safety = 0; safety < 525960; safety++) { // max ~1 year of minutes
+    const mo = d.getMonth() + 1, dom = d.getDate(), dow = d.getDay(), hr = d.getHours(), mn = d.getMinutes();
+    if (months.has(mo) && doms.has(dom) && dows.has(dow) && hours.has(hr) && minutes.has(mn)) {
+      return d;
+    }
+    d.setMinutes(d.getMinutes() + 1);
+  }
+  return null;
+}
+
+/** Human-readable formatted next run time string. */
+function computeNextCronRun(cron: string): string {
+  const next = nextCronDate(cron, new Date());
+  if (!next) return "Invalid cron expression";
+  return next.toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Compute the next N fire times as formatted strings. */
+function computeNextCronRuns(cron: string, count: number): string[] {
+  const results: string[] = [];
+  let cursor = new Date();
+  for (let i = 0; i < count; i++) {
+    const next = nextCronDate(cron, cursor);
+    if (!next) break;
+    results.push(next.toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }));
+    cursor = next;
+  }
+  return results;
+}
+
+/** Convert a cron expression to a human-readable description. */
+function cronToHuman(cron: string): string {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return `Custom: ${cron}`;
+  const [min, hr, dom, month, dow] = parts;
+
+  const hrDesc = hr === "*" ? "every hour" : `at ${hr.padStart(2, "0")}:${min.padStart(2, "0")}`;
+  const dayDesc = dow === "*" && dom === "*"
+    ? "every day"
+    : dow !== "*"
+      ? `on ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].filter((_, i) => {
+          if (dow.includes("-")) { const [a, b] = dow.split("-").map(Number); return i >= a && i <= b; }
+          return dow.split(",").map(Number).includes(i);
+        }).join(", ") || dow}`
+      : dom !== "*" ? `on day ${dom} of the month` : "";
+  const monthDesc = month === "*" ? "" : ` in month ${month}`;
+
+  return `Runs ${dayDesc} ${hrDesc}${monthDesc}`.replace(/\s+/g, " ").trim();
+}
+
+/** Parse cron day-of-week field → boolean[7] (Sun=0 … Sat=6). */
+function parseCronDow(cron: string): boolean[] {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return [false, true, true, true, true, true, false];
+  const dow = parts[4];
+  if (dow === "*") return [true, true, true, true, true, true, true];
+  const set = new Set<number>();
+  for (const seg of dow.split(",")) {
+    if (seg.includes("-")) {
+      const [a, b] = seg.split("-").map(Number);
+      for (let i = a; i <= b; i++) set.add(i);
+    } else {
+      set.add(parseInt(seg));
+    }
+  }
+  return [0, 1, 2, 3, 4, 5, 6].map((d) => set.has(d));
+}
+
+/** Build cron day-of-week field from boolean[7]. */
+function buildCronDow(days: boolean[]): string {
+  if (days.every(Boolean)) return "*";
+  const active = days.map((v, i) => (v ? i : -1)).filter((i) => i >= 0);
+  if (active.length === 0) return "*"; // fallback — all days
+  // Compress consecutive runs
+  const ranges: string[] = [];
+  let start = active[0], end = active[0];
+  for (let i = 1; i < active.length; i++) {
+    if (active[i] === end + 1) { end = active[i]; }
+    else { ranges.push(start === end ? `${start}` : `${start}-${end}`); start = end = active[i]; }
+  }
+  ranges.push(start === end ? `${start}` : `${start}-${end}`);
+  return ranges.join(",");
+}
+
+/** Replace only the DOW (5th) field in a cron expression. */
+function setCronDow(cron: string, days: boolean[]): string {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return cron;
+  parts[4] = buildCronDow(days);
+  return parts.join(" ");
+}
+
 /** Map a backend PipelineNodeDescriptor to a designer PipelineStep */
 function nodeToStep(node: PipelineNodeDescriptor): PipelineStep {
   const kind: PipelineStep["kind"] =
     node.node_type === "agent" ? "prompt"
-    : node.node_type === "gate" ? "condition"
-    : node.node_type === "parallel" ? "loop"
-    : node.node_type === "input" ? "prompt"
-    : "tool";
+      : node.node_type === "gate" ? "condition"
+        : node.node_type === "parallel" ? "loop"
+          : node.node_type === "input" ? "prompt"
+            : "tool";
+  // Preserve existing step config from the backend. Only use defaults
+  // for keys that are missing. This prevents save-and-reopen from wiping
+  // custom prompts, tool args, gate expressions, etc.
   const defaultConfig: Record<string, string> =
     kind === "prompt" ? { prompt: "" }
-    : kind === "condition" ? { expression: "", thenLabel: "Yes", elseLabel: "No" }
-    : kind === "loop" ? { count: "3", condition: "" }
-    : { tool: "", args: "{}" };
-  return { id: makeStepId(), name: node.label, kind, config: defaultConfig };
+      : kind === "condition" ? { expression: "", thenLabel: "Yes", elseLabel: "No" }
+        : kind === "loop" ? { count: "3", condition: "" }
+          : { tool: "", args: "{}" };
+  const mergedConfig: Record<string, string> = { ...defaultConfig };
+  if (node.config) {
+    for (const [key, value] of Object.entries(node.config)) {
+      if (value !== undefined && value !== null) {
+        mergedConfig[key] = String(value);
+      }
+    }
+  }
+  // If no explicit prompt was set but the node has a label, use the label
+  // as the default prompt so the LLM has something to work with.
+  if (kind === "prompt" && !mergedConfig.prompt && node.label) {
+    mergedConfig.prompt = node.label;
+  }
+  return { id: makeStepId(), name: node.label, kind, config: mergedConfig };
 }
 
 /** Convert existing pipeline steps, skipping Input/Output bookend nodes */
@@ -85,19 +229,24 @@ export function AutomationDesigner({
   const [steps, setSteps] = useState<PipelineStep[]>(
     existingPipeline ? loadExistingSteps(existingPipeline) : []
   );
-  const [schedule, setSchedule] = useState("0 9 * * *");
+  const [schedule, setSchedule] = useState(existingPipeline?.schedule ?? "");
+  const [enableSchedule, setEnableSchedule] = useState(!!existingPipeline?.schedule);
   const [scheduleDays, setScheduleDays] = useState<boolean[]>([false, true, true, true, true, true, false]);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [testLog, setTestLog] = useState<string[]>([]);
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [selectedStepIdx, setSelectedStepIdx] = useState<number | null>(null);
   const [lastAddedId, setLastAddedId] = useState<string | null>(null);
   const [dragOverCanvas, setDragOverCanvas] = useState(false);
   const stepsListRef = useRef<HTMLDivElement>(null);
-  // Track pointer-down so we can distinguish click vs. drag on the
-  // palette buttons — `draggable` on macOS trackpads often intercepts
-  // tiny movements and swallows the click event entirely.
-  const pointerDown = useRef<{ kind: PipelineStep["kind"]; x: number; y: number; t: number } | null>(null);
+
+  // ── Custom pointer-based drag (replaces flaky HTML5 DnD in Tauri/WebKit) ──
+  const [draggingKind, setDraggingKind] = useState<PipelineStep["kind"] | null>(null);
+  const [ghostPos, setGhostPos] = useState<{ x: number; y: number } | null>(null);
+  const dragRef = useRef<{ kind: PipelineStep["kind"]; startX: number; startY: number; isDragging: boolean } | null>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const addStepRef = useRef<(kind: PipelineStep["kind"]) => void>(() => {});
 
   // ── Step management ───────────────────────────────────────
 
@@ -112,10 +261,10 @@ export function AutomationDesigner({
         kind,
         config: kind === "prompt" ? { prompt: "" }
           : kind === "tool" ? { tool: "", args: "{}" }
-          : kind === "condition" ? { expression: "", thenLabel: "Yes", elseLabel: "No" }
-          : kind === "loop" ? { count: "3", condition: "" }
-          : kind === "delay" ? { seconds: "60" }
-          : { url: "", method: "POST", body: "{}" },
+            : kind === "condition" ? { expression: "", thenLabel: "Yes", elseLabel: "No" }
+              : kind === "loop" ? { count: "3", condition: "" }
+                : kind === "delay" ? { seconds: "60" }
+                  : { url: "", method: "POST", body: "{}" },
       },
     ]);
     setLastAddedId(id);
@@ -128,6 +277,55 @@ export function AutomationDesigner({
         stepsListRef.current.scrollTop = stepsListRef.current.scrollHeight;
       }
     }, 50);
+  }, []);
+
+  // Keep ref in sync so the pointer listeners always call the latest addStep
+  addStepRef.current = addStep;
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const dr = dragRef.current;
+      if (!dr) return;
+      const dx = e.clientX - dr.startX;
+      const dy = e.clientY - dr.startY;
+      if (!dr.isDragging && Math.hypot(dx, dy) < 6) return;
+      if (!dr.isDragging) {
+        dr.isDragging = true;
+        setDraggingKind(dr.kind);
+      }
+      setGhostPos({ x: e.clientX, y: e.clientY });
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect();
+        const over = e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+        setDragOverCanvas(over);
+      }
+    };
+    const onUp = (e: PointerEvent) => {
+      const dr = dragRef.current;
+      if (!dr) return;
+      if (dr.isDragging) {
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const rect = canvas.getBoundingClientRect();
+          if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+            addStepRef.current(dr.kind);
+          }
+        }
+      } else {
+        addStepRef.current(dr.kind);
+      }
+      dragRef.current = null;
+      setDraggingKind(null);
+      setGhostPos(null);
+      setDragOverCanvas(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
   }, []);
 
   const removeStep = useCallback((idx: number) => {
@@ -158,46 +356,69 @@ export function AutomationDesigner({
     );
   }, []);
 
-  // ── Toggle schedule day ───────────────────────────────────
+  // ── Sync scheduleDays ↔ cron DOW field ─────────────────
+
+  // When cron expression changes externally (presets, manual edit), sync days
+  useEffect(() => {
+    if (schedule.trim()) {
+      setScheduleDays(parseCronDow(schedule));
+    }
+  }, [schedule]);
 
   const toggleDay = useCallback((dayIdx: number) => {
-    setScheduleDays((prev) => prev.map((v, i) => (i === dayIdx ? !v : v)));
+    setScheduleDays((prev) => {
+      const next = prev.map((v, i) => (i === dayIdx ? !v : v));
+      // Also update the cron expression's DOW field
+      setSchedule((prevCron) => setCronDow(prevCron || "0 9 * * *", next));
+      return next;
+    });
   }, []);
 
   // ── Save ──────────────────────────────────────────────────
 
   const handleSave = useCallback(async () => {
     if (!name.trim()) {
+      setValidationError("name");
       pushToast("Enter a name for the automation.");
       return;
     }
     if (steps.length === 0) {
+      setValidationError("steps");
       pushToast("Add at least one step.");
       return;
     }
+    setValidationError(null);
     setIsSaving(true);
     try {
       const pipelineSteps: PipelineNodeDescriptor[] = steps.map((s, i) => ({
         label: s.name,
         node_type: s.kind === "prompt" ? "agent" as const
           : s.kind === "condition" ? "gate" as const
-          : s.kind === "loop" ? "parallel" as const
-          : i === 0 ? "input" as const
-          : "output" as const,
-        model: s.kind === "prompt" ? "sonnet" : null,
+            : s.kind === "loop" ? "parallel" as const
+              : i === 0 ? "input" as const
+                : "output" as const,
+        model: null, // let the backend ProviderNegotiator pick the best available model
         agent_id: null,
         x: i * 200,
         y: 0,
+        config: s.config,
       }));
       const edges: [number, number][] = pipelineSteps.map((_, i) => [i, i + 1] as [number, number]).slice(0, -1);
-      await api.createPipeline(name, description, pipelineSteps, edges);
-      pushToast(`Automation "${name}" saved.`);
+      const scheduleValue = enableSchedule && schedule.trim() ? schedule.trim() : null;
+
+      if (existingPipeline && existingPipeline.id) {
+        await api.updatePipeline(existingPipeline.id, name, description, pipelineSteps, edges, scheduleValue);
+        pushToast(`Automation "${name}" updated.`);
+      } else {
+        await api.createPipeline(name, description, pipelineSteps, edges, scheduleValue);
+        pushToast(`Automation "${name}" saved.`);
+      }
       onSaved();
     } catch {
       pushToast("Failed to save automation.");
     }
     setIsSaving(false);
-  }, [name, description, steps, schedule, onSaved, pushToast]);
+  }, [name, description, steps, schedule, enableSchedule, existingPipeline, onSaved, pushToast]);
 
   // ── Dry run ───────────────────────────────────────────────
 
@@ -240,8 +461,8 @@ export function AutomationDesigner({
             <h2>{existingPipeline ? "Edit Automation" : "Design New Automation"}</h2>
           </div>
           <div className="skill-designer-header-right">
-            <button className="btn primary" disabled={isSaving || !name.trim()} onClick={handleSave}>
-              {isSaving ? "Saving..." : "Save"}
+            <button className="btn primary" disabled={isSaving} onClick={handleSave}>
+              {isSaving ? "Saving..." : existingPipeline?.id ? "Update" : "Save"}
             </button>
             <button className="btn ghost" onClick={onClose}>✕</button>
           </div>
@@ -249,19 +470,31 @@ export function AutomationDesigner({
 
         {/* Name / Description */}
         <div className="automation-designer-meta">
-          <input
-            className="input"
-            placeholder="Automation name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            style={{ fontWeight: 600, fontSize: 16 }}
-          />
+          <div>
+            <input
+              className={`input${validationError === "name" ? " input-error" : ""}`}
+              placeholder="Automation name *"
+              value={name}
+              onChange={(e) => { setName(e.target.value); if (validationError === "name" && e.target.value.trim()) setValidationError(null); }}
+              style={{ fontWeight: 600, fontSize: 16 }}
+            />
+            {validationError === "name" && (
+              <div style={{ color: "var(--red, #e53e3e)", fontSize: 12, marginTop: 4 }}>
+                A name is required to save this automation.
+              </div>
+            )}
+          </div>
           <input
             className="input"
             placeholder="Description (optional)"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
           />
+          {validationError === "steps" && (
+            <div style={{ color: "var(--red, #e53e3e)", fontSize: 12 }}>
+              Add at least one step before saving.
+            </div>
+          )}
         </div>
 
         {/* Tabs */}
@@ -289,27 +522,15 @@ export function AutomationDesigner({
                 <h4>Add Step</h4>
                 <p style={{ fontSize: 11, color: "var(--text-soft)", marginBottom: 4 }}>Click or drag to canvas →</p>
                 {STEP_KINDS.map((sk) => (
-                  <button
+                  <div
                     key={sk.kind}
-                    className="automation-step-kind-btn"
-                    type="button"
-                    onClick={() => addStep(sk.kind)}
+                    className={`automation-step-kind-btn${draggingKind === sk.kind ? " dragging" : ""}`}
+                    role="button"
+                    tabIndex={0}
                     onPointerDown={(e) => {
-                      pointerDown.current = { kind: sk.kind, x: e.clientX, y: e.clientY, t: Date.now() };
-                    }}
-                    onPointerUp={(e) => {
-                      const pd = pointerDown.current;
-                      if (!pd || pd.kind !== sk.kind) return;
-                      const dist = Math.hypot(e.clientX - pd.x, e.clientY - pd.y);
-                      const elapsed = Date.now() - pd.t;
-                      // Treat as click when the pointer barely moved
-                      if (dist < 8 && elapsed < 500) addStep(sk.kind);
-                      pointerDown.current = null;
-                    }}
-                    draggable
-                    onDragStart={(e) => {
-                      e.dataTransfer.setData("application/x-step-kind", sk.kind);
-                      e.dataTransfer.effectAllowed = "copy";
+                      e.preventDefault();
+                      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+                      dragRef.current = { kind: sk.kind, startX: e.clientX, startY: e.clientY, isDragging: false };
                     }}
                   >
                     <span className="automation-step-kind-icon">{sk.icon}</span>
@@ -317,26 +538,24 @@ export function AutomationDesigner({
                       <div className="automation-step-kind-label">{sk.label}</div>
                       <div className="automation-step-kind-desc">{sk.desc}</div>
                     </div>
-                  </button>
+                  </div>
                 ))}
               </div>
+
+              {/* Drag ghost */}
+              {draggingKind && ghostPos && (() => {
+                const meta = STEP_KINDS.find((s) => s.kind === draggingKind);
+                return (
+                  <div className="automation-drag-ghost" style={{ left: ghostPos.x, top: ghostPos.y }}>
+                    <span>{meta?.icon}</span> {meta?.label}
+                  </div>
+                );
+              })()}
 
               {/* Steps list / drop target */}
               <div
                 className={`automation-steps-list${dragOverCanvas ? " drag-over" : ""}`}
-                ref={stepsListRef}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  e.dataTransfer.dropEffect = "copy";
-                  setDragOverCanvas(true);
-                }}
-                onDragLeave={() => setDragOverCanvas(false)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setDragOverCanvas(false);
-                  const kind = e.dataTransfer.getData("application/x-step-kind") as PipelineStep["kind"];
-                  if (kind) addStep(kind);
-                }}
+                ref={(el) => { (stepsListRef as React.MutableRefObject<HTMLDivElement | null>).current = el; (canvasRef as React.MutableRefObject<HTMLDivElement | null>).current = el; }}
               >
                 {steps.length === 0 ? (
                   <div className={`automation-empty-canvas${dragOverCanvas ? " drag-over" : ""}`}>
@@ -523,48 +742,108 @@ export function AutomationDesigner({
           {/* ── Schedule Tab ── */}
           {tab === "schedule" && (
             <div className="automation-schedule">
-              <h3>Schedule</h3>
-              <p className="settings-desc">Configure when this automation runs automatically.</p>
-
-              <div className="skill-editor-field">
-                <label className="field-label">Cron Expression</label>
-                <input
-                  className="input"
-                  value={schedule}
-                  onChange={(e) => setSchedule(e.target.value)}
-                  style={{ fontFamily: "'IBM Plex Mono', monospace" }}
-                />
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+                <label className="automation-schedule-toggle" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={enableSchedule}
+                    onChange={(e) => {
+                      setEnableSchedule(e.target.checked);
+                      if (e.target.checked && !schedule.trim()) setSchedule("0 9 * * *");
+                    }}
+                  />
+                  <span style={{ fontWeight: 600, fontSize: 15 }}>Enable Schedule</span>
+                </label>
+                {enableSchedule && schedule.trim() && (
+                  <span className="automation-next-run-badge">
+                    Next run: {(() => {
+                      try {
+                        const next = computeNextCronRun(schedule.trim());
+                        return next;
+                      } catch {
+                        return "Invalid cron";
+                      }
+                    })()}
+                  </span>
+                )}
               </div>
 
-              <div className="automation-schedule-presets">
-                <label className="field-label">Quick Presets</label>
-                <div className="automation-preset-grid">
-                  {SCHEDULE_PRESETS.map((preset) => (
-                    <button
-                      key={preset.cron}
-                      className={`btn ${schedule === preset.cron ? "primary" : "subtle"}`}
-                      onClick={() => setSchedule(preset.cron)}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
+              {!enableSchedule && (
+                <div className="empty-state centered" style={{ padding: 24 }}>
+                  <p style={{ color: "var(--text-soft)" }}>This automation will only run manually (no schedule).</p>
+                  <p style={{ fontSize: 12, color: "var(--text-soft)", marginTop: 4 }}>Toggle the switch above to configure automatic scheduling.</p>
                 </div>
-              </div>
+              )}
 
-              <div className="skill-editor-field">
-                <label className="field-label">Active Days</label>
-                <div className="schedule-days">
-                  {DAY_LABELS.map((label, idx) => (
-                    <button
-                      key={label}
-                      className={`schedule-day${scheduleDays[idx] ? " active" : ""}`}
-                      onClick={() => toggleDay(idx)}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {enableSchedule && (
+                <>
+                  <p className="settings-desc" style={{ marginBottom: 12 }}>Configure when this automation runs automatically.</p>
+
+                  <div className="skill-editor-field">
+                    <label className="field-label">Cron Expression</label>
+                    <input
+                      className="input"
+                      value={schedule}
+                      onChange={(e) => setSchedule(e.target.value)}
+                      placeholder="minute hour day month weekday"
+                      style={{ fontFamily: "'IBM Plex Mono', monospace" }}
+                    />
+                    <div style={{ fontSize: 11, color: "var(--text-soft)", marginTop: 4 }}>
+                      Format: <code>minute hour day-of-month month day-of-week</code> — e.g. <code>30 9 * * 1-5</code> = weekdays at 9:30 AM
+                    </div>
+                  </div>
+
+                  <div className="automation-schedule-presets">
+                    <label className="field-label">Quick Presets</label>
+                    <div className="automation-preset-grid">
+                      {SCHEDULE_PRESETS.map((preset) => (
+                        <button
+                          key={preset.cron}
+                          className={`btn ${schedule === preset.cron ? "primary" : "subtle"}`}
+                          onClick={() => setSchedule(preset.cron)}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="skill-editor-field">
+                    <label className="field-label">Active Days</label>
+                    <div className="schedule-days">
+                      {DAY_LABELS.map((label, idx) => (
+                        <button
+                          key={label}
+                          className={`schedule-day${scheduleDays[idx] ? " active" : ""}`}
+                          onClick={() => toggleDay(idx)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Human-readable summary of schedule */}
+                  {schedule.trim() && (
+                    <div className="automation-schedule-summary" style={{ marginTop: 16, padding: "12px 16px", background: "var(--bg-soft)", borderRadius: 8 }}>
+                      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>Schedule Summary</div>
+                      <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                        {cronToHuman(schedule.trim())}
+                      </div>
+                      <div style={{ fontSize: 12, color: "var(--text-soft)", marginTop: 6 }}>
+                        Next 3 runs: {(() => {
+                          try {
+                            const runs = computeNextCronRuns(schedule.trim(), 3);
+                            return runs.join(" · ");
+                          } catch {
+                            return "Unable to compute";
+                          }
+                        })()}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 
@@ -592,8 +871,10 @@ export function AutomationDesigner({
                 <div className="automation-flow-node automation-flow-end">⏹ End</div>
               </div>
               <div className="automation-preview-summary">
-                <p><strong>{steps.length}</strong> steps · Schedule: <code>{schedule}</code></p>
-                <p>Active days: {DAY_LABELS.filter((_, i) => scheduleDays[i]).join(", ") || "None"}</p>
+                <p><strong>{steps.length}</strong> steps · Schedule: {enableSchedule && schedule.trim() ? <code>{schedule}</code> : <em>Manual only</em>}</p>
+                {enableSchedule && schedule.trim() && (
+                  <p>Next run: {computeNextCronRun(schedule.trim())}</p>
+                )}
               </div>
             </div>
           )}

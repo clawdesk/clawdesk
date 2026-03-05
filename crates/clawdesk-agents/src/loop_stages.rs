@@ -64,6 +64,7 @@ pub(crate) enum RoundOutcome {
     Done {
         content: String,
         round: usize,
+        finish_reason: FinishReason,
     },
 }
 
@@ -100,11 +101,13 @@ mod tests {
         let outcome = RoundOutcome::Done {
             content: "Final answer".to_string(),
             round: 3,
+            finish_reason: FinishReason::Stop,
         };
         match outcome {
-            RoundOutcome::Done { content, round } => {
+            RoundOutcome::Done { content, round, finish_reason } => {
                 assert_eq!(content, "Final answer");
                 assert_eq!(round, 3);
+                assert_eq!(finish_reason, FinishReason::Stop);
             }
             RoundOutcome::Continue => panic!("expected Done"),
         }

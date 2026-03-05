@@ -368,19 +368,23 @@ impl SessionRouter {
                     turns = turn_count,
                     "session affinity hit"
                 );
-                // Update affinity metadata
-                let entry = self.affinity.get_mut(session_key).unwrap();
-                entry.turn_count += 1;
-                entry.last_used = Utc::now();
+                // Update affinity metadata — use `if let` to handle the
+                // (rare) case where the entry was evicted between the read
+                // above and this mutable access (eliminates TOCTOU panic).
+                if let Some(entry) = self.affinity.get_mut(session_key) {
+                    entry.turn_count += 1;
+                    entry.last_used = Utc::now();
 
-                return RoutingDecision::Route {
-                    agent_id,
-                    score: 1.0, // affinity = perfect score
-                    reason: format!(
-                        "session affinity (turn {})",
-                        entry.turn_count
-                    ),
-                };
+                    return RoutingDecision::Route {
+                        agent_id,
+                        score: 1.0, // affinity = perfect score
+                        reason: format!(
+                            "session affinity (turn {})",
+                            entry.turn_count
+                        ),
+                    };
+                }
+                // Entry disappeared — fall through to capability routing
             }
 
             // Affinity invalid — remove stale entry

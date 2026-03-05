@@ -95,6 +95,11 @@ pub struct GatewayState {
     // --- Cross-channel artifact pipeline (GAP-E) ---
     /// Content-addressed artifact store backed by MediaCache.
     pub artifact_pipeline: Arc<clawdesk_media::ArtifactPipeline>,
+
+    // --- Browser automation (optional) ---
+    /// Browser session manager for CDP-based automation.
+    #[cfg(feature = "browser")]
+    pub browser_manager: Arc<clawdesk_browser::BrowserManager>,
 }
 
 impl GatewayState {
@@ -152,6 +157,8 @@ impl GatewayState {
                     });
                 Arc::new(clawdesk_media::ArtifactPipeline::new(Arc::new(cache)))
             },
+            #[cfg(feature = "browser")]
+            browser_manager: clawdesk_browser::BrowserManager::new(clawdesk_browser::manager::BrowserConfig::default()),
         }
     }
 

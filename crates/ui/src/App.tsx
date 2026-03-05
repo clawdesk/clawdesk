@@ -44,8 +44,13 @@ import { A2APage } from "./pages/A2APage";
 import { RuntimePage } from "./pages/RuntimePage";
 import { ExtensionsPage } from "./pages/ExtensionsPage";
 import { McpPage } from "./pages/McpPage";
+import { AgentsPage } from "./pages/AgentsPage";
+import { ChannelsPage } from "./pages/ChannelsPage";
+import { ExecutionProgress, type ExecutionEvent, type EventKind } from "./components/ExecutionProgress";
+import { AgentJourneyWizard } from "./components/AgentJourneyWizard";
+import { TeamBuilderCanvas } from "./components/TeamBuilderCanvas";
 
-type NavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "settings" | "logs" | "extensions" | "mcp";
+type NavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "settings" | "logs" | "extensions" | "mcp";
 type RiskLevel = "low" | "medium" | "high";
 type StatusLevel = "ok" | "warn" | "error";
 type InspectorTab = "plan" | "approvals" | "proof" | "undo" | "trace" | "memory" | "graph";
@@ -265,10 +270,12 @@ const NAV_ITEMS: { key: NavKey; label: string; shortcut: string; icon: string }[
   { key: "a2a", label: "A2A Directory", shortcut: "3", icon: "users" },
   { key: "runtime", label: "Runtime", shortcut: "4", icon: "activity" },
   { key: "skills", label: "Skills", shortcut: "5", icon: "library" },
-  { key: "automations", label: "Automations", shortcut: "6", icon: "routines" },
-  { key: "extensions", label: "Extensions", shortcut: "7", icon: "puzzle" },
-  { key: "mcp", label: "MCP", shortcut: "8", icon: "plug" },
-  { key: "settings", label: "Settings", shortcut: "9", icon: "settings" },
+  { key: "automations", label: "Scheduled Jobs", shortcut: "6", icon: "clock" },
+  { key: "agents", label: "Agents", shortcut: "7", icon: "bot" },
+  { key: "channels", label: "Channels", shortcut: "8", icon: "globe" },
+  { key: "extensions", label: "Extensions", shortcut: "9", icon: "puzzle" },
+  { key: "mcp", label: "MCP", shortcut: "", icon: "plug" },
+  { key: "settings", label: "Settings", shortcut: "", icon: "settings" },
   { key: "logs", label: "Logs", shortcut: "0", icon: "scroll-text" },
 ];
 
@@ -276,8 +283,9 @@ const NAV_GROUPS: ShellNavGroup[] = [
   { label: "", items: [NAV_ITEMS[0], NAV_ITEMS[1]] },
   { label: "Cluster", items: [NAV_ITEMS[2], NAV_ITEMS[3]] },
   { label: "Build", items: [NAV_ITEMS[4], NAV_ITEMS[5]] },
-  { label: "Connect", items: [NAV_ITEMS[6], NAV_ITEMS[7]] },
-  { label: "System", items: [NAV_ITEMS[8], NAV_ITEMS[9]] },
+  { label: "Workspace", items: [NAV_ITEMS[6], NAV_ITEMS[7]] },
+  { label: "Connect", items: [NAV_ITEMS[8], NAV_ITEMS[9]] },
+  { label: "System", items: [NAV_ITEMS[10], NAV_ITEMS[11]] },
 ];
 
 const INITIAL_THREADS: ThreadItem[] = [];
@@ -573,6 +581,31 @@ export default function App() {
   const [inspectorModalOpen, setInspectorModalOpen] = useState(false);
   const [showTerminal, setShowTerminal] = useState(false);
 
+  // ── Agent Create Picker / Journey Wizard / Team Builder ──
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
+  const [showJourneyWizard, setShowJourneyWizard] = useState(false);
+  const [showTeamBuilder, setShowTeamBuilder] = useState(false);
+  const [journeyEditAgentId, setJourneyEditAgentId] = useState<string | null>(null);
+
+  /** Called from chat/appshell "Create Agent" — if editing, go straight to wizard; else show picker */
+  const openJourneyWizard = useCallback((agentId?: string) => {
+    if (agentId) {
+      // Editing existing agent → go straight to wizard
+      setJourneyEditAgentId(agentId);
+      setShowJourneyWizard(true);
+    } else {
+      // New agent → show the single/team picker
+      setShowAgentPicker(true);
+    }
+  }, []);
+
+  const closeJourneyWizard = useCallback(() => {
+    setShowJourneyWizard(false);
+    setShowTeamBuilder(false);
+    setShowAgentPicker(false);
+    setJourneyEditAgentId(null);
+  }, []);
+
   // ── Backend-connected state ──────────────────────────────
   const [backendAgents, setBackendAgents] = useState<DesktopAgent[]>([]);
   const [backendSkills, setBackendSkills] = useState<SkillDescriptor[]>([]);
@@ -584,6 +617,13 @@ export default function App() {
   const [streamingAgentId, setStreamingAgentId] = useState<string | null>(null);
   const [streamingThreadId, setStreamingThreadId] = useState<string | null>(null);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
+
+  // ── Execution progress tracking ──
+  const [execEvents, setExecEvents] = useState<ExecutionEvent[]>([]);
+  const [execRound, setExecRound] = useState(0);
+  const [execMaxRounds, setExecMaxRounds] = useState(25);
+  const execEventCounter = useRef(0);
+
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── New backend-connected state ─────────────────────────
@@ -602,6 +642,7 @@ export default function App() {
   const [backendObservability, setBackendObservability] = useState<ObservabilityStatus | null>(null);
   const [backendGraphNodes, setBackendGraphNodes] = useState<GraphNodeInfo[]>([]);
   const [backendGraphEdges, setBackendGraphEdges] = useState<GraphEdgeInfo[]>([]);
+  const [storageHealthDetail, setStorageHealthDetail] = useState<api.StorageHealthResponse | null>(null);
 
   const [viewportWidth, setViewportWidth] = useState<number>(window.innerWidth);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
@@ -886,6 +927,7 @@ export default function App() {
       api.getMemoryStats().then((s) => setBackendMemoryStats(s)).catch(() => { });
       api.listNotifications().then((n) => setBackendNotifications(n)).catch(() => { });
       api.listCanvases().then((c) => setBackendCanvases(c)).catch(() => { });
+      api.storageHealth().then((h) => setStorageHealthDetail(h)).catch(() => { });
 
       // Fetch fresh auth profiles and determine actual account health
       let freshNeedsSignIn = needsSignIn;
@@ -1353,6 +1395,36 @@ export default function App() {
         if (data.agent_id !== streamingAgentId) return;
 
         const event = data.event;
+
+        // ── Track execution progress events ──
+        // Skip StreamChunk/ThinkingChunk from detailed log to avoid noise,
+        // but do track them as the latest event type for phase detection.
+        const trackableKinds: EventKind[] = [
+          "RoundStart", "Response", "ToolStart", "ToolEnd",
+          "Compaction", "Done", "Error", "PromptAssembled",
+          "IdentityVerified", "ContextGuardAction", "FallbackTriggered",
+        ];
+        if (trackableKinds.includes(event.type as EventKind)) {
+          execEventCounter.current += 1;
+          const execEv: ExecutionEvent = {
+            id: `exec_${execEventCounter.current}`,
+            timestamp: Date.now(),
+            kind: event.type as EventKind,
+            detail: typeof event.name === "string"
+              ? event.name
+              : typeof event.error === "string"
+                ? event.error
+                : event.type,
+          };
+          setExecEvents((prev) => [...prev.slice(-200), execEv]);
+        }
+        if (event.type === "RoundStart") {
+          const roundNum = typeof event.round === "number" ? event.round : execRound + 1;
+          setExecRound(roundNum);
+        }
+        if (event.type === "Done" || event.type === "Error") {
+          // Execution ended — keep events for review
+        }
         if (event.type === "StreamChunk") {
           const chunkText = typeof event.text === "string" ? event.text : "";
           const done = Boolean(event.done);
@@ -1700,6 +1772,10 @@ export default function App() {
     setStreamingAgentId(agentId);
     setStreamingThreadId(threadId);
     setStreamingMessageId(streamedMessageId);
+    // Reset execution progress for new request
+    setExecEvents([]);
+    setExecRound(0);
+    execEventCounter.current = 0;
 
     let matchedSkills: string[] = [];
     let routeSummary = "";
@@ -3025,6 +3101,22 @@ export default function App() {
             )}
           </div>
 
+          {/* ── Execution Progress ── */}
+          {(streamingAgentId || execEvents.length > 0) && (
+            <div style={{ padding: "0 16px 8px" }}>
+              <ExecutionProgress
+                isRunning={!!streamingAgentId}
+                events={execEvents}
+                round={execRound}
+                maxRounds={execMaxRounds}
+                agentName={activeAgent?.name}
+                tokensUsed={activeAgent?.tokens_used ?? 0}
+                tokenBudget={activeAgent?.token_budget ?? 128000}
+                defaultCollapsed={!streamingAgentId}
+              />
+            </div>
+          )}
+
           <div className="chat-composer">
             <textarea
               placeholder={selectedAgentId ? "Type your request..." : "Create or select an agent to send a request."}
@@ -4119,6 +4211,11 @@ export default function App() {
         >
           ⚠ Storage is running in ephemeral mode — your chat history will NOT survive a restart.
           Check disk permissions for <code style={{ background: "rgba(0,0,0,0.2)", padding: "1px 4px", borderRadius: 3 }}>~/.clawdesk/sochdb/</code>
+          {storageHealthDetail && storageHealthDetail.recommendations.length > 0 && (
+            <span style={{ display: "block", fontSize: 12, marginTop: 2, opacity: 0.85 }}>
+              {storageHealthDetail.recommendations[0]}
+            </span>
+          )}
         </div>
       )}
       <AppShell
@@ -4137,6 +4234,10 @@ export default function App() {
         inspectorOpen={inspectorOpen}
         onToggleInspector={() => setInspectorOpen((prev) => !prev)}
         onToggleTerminal={() => setShowTerminal((prev) => !prev)}
+        agents={backendAgents}
+        selectedAgentId={selectedAgentId}
+        onSelectAgent={setSelectedAgentId}
+        onOpenJourney={openJourneyWizard}
       >
         {activeNav === "chat" && (
           <ChatPage
@@ -4145,6 +4246,7 @@ export default function App() {
             selectedAgentId={selectedAgentId}
             onSelectAgent={setSelectedAgentId}
             onCreateAgent={(t) => createBackendAgent(t)}
+            onOpenJourney={openJourneyWizard}
             pushToast={pushToast}
             showTerminal={showTerminal}
             setShowTerminal={setShowTerminal}
@@ -4170,7 +4272,7 @@ export default function App() {
         )}
 
         {activeNav === "runtime" && (
-          <RuntimePage pushToast={pushToast} />
+          <RuntimePage pushToast={pushToast} agents={backendAgents} />
         )}
 
         {activeNav === "skills" && (
@@ -4210,6 +4312,33 @@ export default function App() {
             onResetOnboarding={resetOnboarding}
             pushToast={pushToast}
             onNavigate={navigateLoose}
+          />
+        )}
+        {activeNav === "agents" && (
+          <AgentsPage
+            agents={backendAgents}
+            onCreateAgent={(t) => createBackendAgent(t)}
+            onDeleteAgent={(id) => deleteBackendAgent(id)}
+            onAgentSaved={(agent) => {
+              setBackendAgents((prev) => {
+                const idx = prev.findIndex((a) => a.id === agent.id);
+                if (idx >= 0) {
+                  const updated = [...prev];
+                  updated[idx] = agent;
+                  return updated;
+                }
+                return [...prev, agent];
+              });
+            }}
+            pushToast={pushToast}
+            onNavigate={navigateLoose}
+          />
+        )}
+        {activeNav === "channels" && (
+          <ChannelsPage
+            channels={backendChannels}
+            onRefreshChannels={() => api.listChannels().then((c) => setBackendChannels(c)).catch(() => { })}
+            pushToast={pushToast}
           />
         )}
         {activeNav === "logs" && (
@@ -4504,6 +4633,77 @@ export default function App() {
             </div>
           ))}
         </div>
+      )}
+
+      {/* Agent Create Picker — choose Single or Team */}
+      {showAgentPicker && !showJourneyWizard && !showTeamBuilder && (
+        <div className="agent-pick-backdrop" onClick={closeJourneyWizard}>
+          <div className="agent-pick-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="agent-pick-header">
+              <h2>Create Agent</h2>
+              <p>How would you like to get started?</p>
+            </div>
+            <div className="agent-pick-options">
+              <button
+                className="agent-pick-card"
+                onClick={() => { setShowAgentPicker(false); setShowJourneyWizard(true); }}
+              >
+                <div className="agent-pick-card-icon">🤖</div>
+                <div className="agent-pick-card-body">
+                  <h3>Single Agent</h3>
+                  <p>Create one agent with a specific role, persona, skills, and model. Best for focused tasks.</p>
+                </div>
+                <span className="agent-pick-arrow">→</span>
+              </button>
+              <button
+                className="agent-pick-card"
+                onClick={() => { setShowAgentPicker(false); setShowTeamBuilder(true); }}
+              >
+                <div className="agent-pick-card-icon">👥</div>
+                <div className="agent-pick-card-body">
+                  <h3>Agent Team</h3>
+                  <p>Build a team of agents that work together — with roles, delegation, and shared memory. Start from a template or blank canvas.</p>
+                </div>
+                <span className="agent-pick-arrow">→</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Agent Journey Wizard */}
+      {showJourneyWizard && (
+        <AgentJourneyWizard
+          existingAgent={journeyEditAgentId ? backendAgents.find((a) => a.id === journeyEditAgentId) : null}
+          allAgents={backendAgents}
+          onClose={closeJourneyWizard}
+          onSaved={(agent) => {
+            setBackendAgents((prev) => {
+              const idx = prev.findIndex((a) => a.id === agent.id);
+              if (idx >= 0) {
+                const updated = [...prev];
+                updated[idx] = agent;
+                return updated;
+              }
+              return [...prev, agent];
+            });
+            setSelectedAgentId(agent.id);
+          }}
+          pushToast={pushToast}
+        />
+      )}
+
+      {/* Team Builder Canvas */}
+      {showTeamBuilder && (
+        <TeamBuilderCanvas
+          allAgents={backendAgents}
+          onClose={closeJourneyWizard}
+          onTeamCreated={() => {
+            api.listAgents().then((a) => setBackendAgents(a)).catch(() => {});
+            closeJourneyWizard();
+          }}
+          pushToast={pushToast}
+        />
       )}
     </div>
   );

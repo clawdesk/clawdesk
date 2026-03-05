@@ -130,15 +130,26 @@ impl CronManager {
 
     /// Enable/disable a task.
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), CronError> {
-        let mut tasks = self.tasks.write().await;
-        let arc_task = tasks.get_mut(id).ok_or_else(|| CronError::InvalidExpression {
-            expr: format!("Task '{}' not found", id),
-        })?;
-        // Must replace the Arc since CronTask fields aren't mutable through Arc.
-        let mut task = (**arc_task).clone();
-        task.enabled = enabled;
-        task.updated_at = Utc::now();
-        *arc_task = Arc::new(task);
+        let task_snapshot = {
+            let mut tasks = self.tasks.write().await;
+            let arc_task = tasks.get_mut(id).ok_or_else(|| CronError::InvalidExpression {
+                expr: format!("Task '{}' not found", id),
+            })?;
+            // Must replace the Arc since CronTask fields aren't mutable through Arc.
+            let mut task = (**arc_task).clone();
+            task.enabled = enabled;
+            task.updated_at = Utc::now();
+            let snapshot = task.clone();
+            *arc_task = Arc::new(task);
+            snapshot
+        };
+
+        // Persist the change outside the write lock to avoid holding it during I/O.
+        if let Some(persistence) = &self.persistence {
+            persistence.save_task(&task_snapshot).await.map_err(|e| CronError::InvalidExpression {
+                expr: format!("Persistence error: {}", e),
+            })?;
+        }
         Ok(())
     }
 
@@ -165,7 +176,15 @@ impl CronManager {
     /// pointers for matched tasks (no deep clones).
     /// Phase 2: check dependencies and spawn execution futures.
     async fn tick(&self) {
-        let now = Utc::now();
+        // Use local time for cron evaluation — users configure schedules
+        // in their local timezone (e.g. "06 23 * * 0" means 11:06 PM local).
+        // We create a DateTime<Utc> with local-time components so the parser
+        // matches against the user's intended hours/minutes/days.
+        let local_now = chrono::Local::now();
+        let now = chrono::DateTime::<Utc>::from_naive_utc_and_offset(
+            local_now.naive_local(),
+            Utc,
+        );
 
         // Phase 1: collect matched task Arcs under read lock.
         let (matched, all_tasks): (Vec<Arc<CronTask>>, HashMap<String, Arc<CronTask>>) = {

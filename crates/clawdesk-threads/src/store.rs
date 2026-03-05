@@ -56,6 +56,10 @@ pub struct ThreadStore {
     /// writers (put/delete/commit). This eliminates the global chokepoint
     /// where read-heavy workloads (multi-channel chat) were bottlenecked.
     lock: RwLock<()>,
+    /// Filesystem path this store was opened at (for diagnostics / health checks).
+    path: std::path::PathBuf,
+    /// Whether this store is running on ephemeral (temp) storage.
+    is_ephemeral: bool,
 }
 
 impl ThreadStore {
@@ -149,6 +153,8 @@ impl ThreadStore {
                     return Ok(Self {
                         db: Arc::new(db),
                         lock: RwLock::new(()),
+                        path: path.to_path_buf(),
+                        is_ephemeral: false,
                     });
                 }
                 Err(e) => {
@@ -178,7 +184,12 @@ impl ThreadStore {
     /// Wrap an existing `Arc<EmbeddedConnection>` (for sharing with other subsystems
     /// that already have a SochDB handle, e.g. `SochStore`).
     pub fn from_shared(db: Arc<EmbeddedConnection>) -> Self {
-        Self { db, lock: RwLock::new(()) }
+        Self {
+            db,
+            lock: RwLock::new(()),
+            path: std::path::PathBuf::from("<shared>"),
+            is_ephemeral: false,
+        }
     }
 
     /// Get a reference to the underlying EmbeddedConnection.
@@ -639,6 +650,26 @@ impl ThreadStore {
         let threads = self.read_counter(keys::META_THREAD_COUNT)?;
         let msgs = self.read_counter(keys::META_MSG_COUNT)?;
         Ok((threads, msgs))
+    }
+
+    /// Returns `true` if this store is running on ephemeral (temp) storage.
+    pub fn is_ephemeral(&self) -> bool {
+        self.is_ephemeral
+    }
+
+    /// Returns the filesystem path this store was opened at.
+    pub fn store_path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Get the current thread count from the global counter.
+    pub fn thread_count(&self) -> Result<u64> {
+        self.read_counter(keys::META_THREAD_COUNT)
+    }
+
+    /// Mark this store as ephemeral (used by fallback initialization).
+    pub fn mark_ephemeral(&mut self) {
+        self.is_ephemeral = true;
     }
 
     // ════════════════════════════════════════════════════════════════════════

@@ -195,11 +195,22 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
             post(webhook::receive_webhook).delete(webhook::delete_webhook),
         );
 
-    api.merge(openai)
+    let mut router = api.merge(openai)
         .merge(admin)
         .merge(ws)
         .merge(a2a)
-        .merge(webhooks)
+        .merge(webhooks);
+
+    // Browser automation routes (conditionally compiled)
+    #[cfg(feature = "browser")]
+    {
+        let browser_mgr = state.browser_manager.clone();
+        // Ensure the idle-session reaper is running now that we have a runtime.
+        browser_mgr.ensure_reaper();
+        router = router.nest_service("/api/browser", browser_routes::browser_routes(browser_mgr));
+    }
+
+    router
         .layer(axum::middleware::from_fn(middleware::request_tracing))
         .with_state(state)
 }

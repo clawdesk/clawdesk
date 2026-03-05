@@ -383,10 +383,12 @@ You have persistent long-term memory about the user. This is YOUR primary knowle
             };
 
             let a2a_section = "\n\n## Agent Delegation\n\n\
-**sessions_send(target_agent, message)** — Delegate a task to another agent.\n\
-  • target_agent: agent id from agents_list.\n\
-  • The target agent runs with full tool access.\n\n\
-**agents_list()** — Discover available agents and channels.";
+**spawn_subagent(agent_id, task, timeout_secs)** — Delegate a task to another agent and get the result.\n\
+  • agent_id: the target agent's ID (see Your Team section for IDs).\n\
+  • task: a clear description of what the agent should do.\n\
+  • timeout_secs: max seconds to wait (default: 120).\n\
+  • The target agent runs with full tool access and returns its response.\n\
+  • You can call spawn_subagent multiple times in parallel for independent tasks.";
 
             let directive = format!("{}{}", channel_section, a2a_section);
 

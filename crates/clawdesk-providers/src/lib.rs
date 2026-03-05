@@ -19,6 +19,7 @@ pub mod glm;
 pub mod negotiator;
 pub mod ollama;
 pub mod openai;
+pub mod openai_compat;
 pub mod openrouter;
 pub mod profile_rotation;
 pub mod registry;
@@ -156,14 +157,8 @@ pub struct ProviderResponse {
     pub latency: Duration,
 }
 
-/// Token usage statistics.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: Option<u64>,
-    pub cache_write_tokens: Option<u64>,
-}
+/// Token usage statistics — re-exported from the canonical `clawdesk-types` definition.
+pub use clawdesk_types::TokenUsage;
 
 /// A tool call requested by the model.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -111,6 +111,10 @@ export interface DesktopAgent {
   source: string;
   /** Channels this agent is assigned to (e.g. ["telegram","discord"]). Empty = any/all. */
   channels?: string[];
+  /** If this agent belongs to a team, the shared team identifier. */
+  team_id?: string;
+  /** Role within the team (e.g. "router", "researcher", "developer"). */
+  team_role?: string;
 }
 
 export interface CreateAgentRequest {
@@ -122,6 +126,20 @@ export interface CreateAgentRequest {
   model: string;
   source?: string;
   channels?: string[];
+  team_id?: string;
+  team_role?: string;
+}
+
+export interface UpdateAgentRequest {
+  name?: string;
+  icon?: string;
+  color?: string;
+  persona?: string;
+  skills?: string[];
+  model?: string;
+  channels?: string[];
+  team_id?: string;
+  team_role?: string;
 }
 
 export interface ImportResult {
@@ -207,6 +225,7 @@ export interface PipelineDescriptor {
   steps: PipelineNodeDescriptor[];
   edges: [number, number][];
   created: string;
+  schedule?: string | null;
 }
 
 export interface PipelineNodeDescriptor {
@@ -216,6 +235,8 @@ export interface PipelineNodeDescriptor {
   agent_id: string | null;
   x: number;
   y: number;
+  condition?: string | null;
+  config?: Record<string, string>;
 }
 
 export interface CostMetrics {
@@ -1142,6 +1163,12 @@ export interface IntegrationInfo {
   credentials_required: CredentialRequirementInfo[];
   has_oauth: boolean;
   health_check_url?: string;
+  /** Per-extension configuration schema (typed fields). */
+  config_fields: ConfigFieldInfo[];
+  /** Current user-configured values (non-secret only). */
+  config_values: Record<string, string>;
+  /** Transport type: "stdio" | "sse" | "api" */
+  transport_type: string;
 }
 
 export interface CredentialRequirementInfo {
@@ -1149,6 +1176,24 @@ export interface CredentialRequirementInfo {
   description: string;
   env_var?: string;
   required: boolean;
+}
+
+export interface ConfigFieldInfo {
+  key: string;
+  label: string;
+  description: string;
+  field_type: string; // "text" | "number" | "boolean" | "secret" | "select" | "url" | "filepath" | "port"
+  default?: string;
+  required: boolean;
+  placeholder?: string;
+  validation?: string;
+  options: ConfigFieldOptionInfo[];
+  group?: string;
+}
+
+export interface ConfigFieldOptionInfo {
+  label: string;
+  value: string;
 }
 
 export interface IntegrationCategoryInfo {

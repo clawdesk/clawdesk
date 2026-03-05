@@ -13,6 +13,7 @@ doctest = false
 [dependencies]
 clawdesk-types = { workspace = true }
 clawdesk-storage = { workspace = true }
+clawdesk-threads = { workspace = true }
 sochdb = { workspace = true }
 sochdb-core = { workspace = true }
 sochdb-storage = { workspace = true }

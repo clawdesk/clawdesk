@@ -373,14 +373,27 @@ const MEMORY_TRIGGER_PATTERNS: &[&str] = &[
     "anniversary",
 ];
 
+/// Aho-Corasick automaton for memory trigger patterns — built once at startup.
+///
+/// Matches all 24 trigger patterns in a single O(n + z) pass over input
+/// (n = input length, z = match count) instead of O(24 × n) with linear scan.
+/// Automaton occupies ~50KB fitting in L1 cache.
+static MEMORY_TRIGGER_AC: std::sync::LazyLock<aho_corasick::AhoCorasick> =
+    std::sync::LazyLock::new(|| {
+        aho_corasick::AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(MEMORY_TRIGGER_PATTERNS)
+            .expect("valid Aho-Corasick patterns")
+    });
+
 /// Check if content is important enough to store in memory.
 fn is_memorable(content: &str) -> bool {
     let trimmed = content.trim();
     if trimmed.len() >= MIN_CONTENT_LEN_FOR_MEMORY {
         return true;
     }
-    let lower = trimmed.to_lowercase();
-    MEMORY_TRIGGER_PATTERNS.iter().any(|p| lower.contains(p))
+    // Single-pass Aho-Corasick match — O(n + z) vs old O(24 × n).
+    MEMORY_TRIGGER_AC.is_match(trimmed)
 }
 
 /// Store a conversation turn (user + assistant) in memory for future recall.

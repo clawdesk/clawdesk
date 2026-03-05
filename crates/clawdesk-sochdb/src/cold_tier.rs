@@ -410,6 +410,173 @@ impl SochStore {
     }
 }
 
+// =========================================================================
+// GAP-16: Time-based automatic archival
+// =========================================================================
+
+/// Archival policy configuration.
+#[derive(Debug, Clone)]
+pub struct ArchivalPolicy {
+    /// Maximum messages to keep in hot tier per session.
+    pub hot_tier_size: usize,
+    /// Maximum age (in seconds) for hot-tier messages. Messages older
+    /// than this are automatically archived.
+    pub max_hot_age_secs: u64,
+    /// Maximum age (in seconds) for archive chunks. Chunks older than
+    /// this are purged by `enforce_retention()`.
+    pub max_archive_age_secs: Option<u64>,
+}
+
+impl Default for ArchivalPolicy {
+    fn default() -> Self {
+        Self {
+            hot_tier_size: 50,
+            max_hot_age_secs: 7 * 24 * 3600, // 7 days
+            max_archive_age_secs: Some(90 * 24 * 3600), // 90 days
+        }
+    }
+}
+
+impl SochStore {
+    /// Apply the archival policy to a single session.
+    ///
+    /// Archives messages exceeding either the count or age threshold,
+    /// then purges expired archive chunks.
+    ///
+    /// Returns `(archived_count, purged_count)`.
+    pub async fn enforce_archival_policy(
+        &self,
+        key: &SessionKey,
+        policy: &ArchivalPolicy,
+    ) -> Result<(usize, usize), StorageError> {
+        // Phase 1: Archive by count threshold
+        let archived = self
+            .archive_and_compact(key, None, policy.hot_tier_size)
+            .await?
+            .map(|r| r.messages_archived)
+            .unwrap_or(0);
+
+        // Phase 2: Archive by age threshold
+        let age_archived = {
+            let cutoff = Utc::now() - chrono::Duration::seconds(policy.max_hot_age_secs as i64);
+            let prefix = format!("sessions/{}/messages/", key.as_str());
+            let results = self.scan(&prefix)?;
+
+            let mut old_messages = Vec::new();
+            for (k, v) in &results {
+                if let Ok(msg) = serde_json::from_slice::<AgentMessage>(v) {
+                    if msg.timestamp < cutoff {
+                        old_messages.push((k.clone(), v.clone()));
+                    }
+                }
+            }
+
+            if !old_messages.is_empty() {
+                // Archive the old messages
+                let now = Utc::now();
+                let chunk_id = now.timestamp_millis();
+
+                let messages: Vec<AgentMessage> = old_messages.iter()
+                    .filter_map(|(_, v)| serde_json::from_slice(v).ok())
+                    .collect();
+
+                if !messages.is_empty() {
+                    let earliest = messages.first().map(|m| m.timestamp).unwrap_or(now);
+                    let latest = messages.last().map(|m| m.timestamp).unwrap_or(now);
+                    let raw_bytes: usize = old_messages.iter().map(|(_, v)| v.len()).sum();
+
+                    let chunk = ArchiveChunk {
+                        chunk_id,
+                        session_key: key.as_str().to_string(),
+                        archived_at: now,
+                        message_count: messages.len(),
+                        earliest_message: earliest,
+                        latest_message: latest,
+                        uncompressed_bytes: raw_bytes,
+                        messages,
+                    };
+
+                    let archive_key = format!("archive/{}/{}", key.as_str(), chunk_id);
+                    let archive_bytes = serde_json::to_vec(&chunk).map_err(|e| {
+                        StorageError::SerializationFailed { detail: e.to_string() }
+                    })?;
+                    self.put_durable(&archive_key, &archive_bytes)?;
+
+                    // Delete from hot tier
+                    for (k, _) in &old_messages {
+                        let _ = self.delete(k);
+                    }
+
+                    old_messages.len()
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+
+        // Phase 3: Purge expired archive chunks
+        let purged = if let Some(max_age) = policy.max_archive_age_secs {
+            let cutoff = Utc::now() - chrono::Duration::seconds(max_age as i64);
+            self.purge_archive_before(key, cutoff).await?
+        } else {
+            0
+        };
+
+        debug!(
+            %key,
+            archived = archived + age_archived,
+            purged,
+            "archival policy enforced"
+        );
+
+        Ok((archived + age_archived, purged))
+    }
+
+    /// Enforce archival policy across ALL sessions.
+    ///
+    /// Scans for sessions and applies the policy to each one.
+    /// Returns total `(archived, purged)` across all sessions.
+    pub async fn enforce_archival_policy_all(
+        &self,
+        policy: &ArchivalPolicy,
+    ) -> Result<(usize, usize), StorageError> {
+        let sessions = self.scan("sessions/")?;
+        let mut session_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (key, _) in &sessions {
+            // Extract session ID from "sessions/{id}/..."
+            if let Some(rest) = key.strip_prefix("sessions/") {
+                if let Some(id) = rest.split('/').next() {
+                    session_keys.insert(id.to_string());
+                }
+            }
+        }
+
+        let mut total_archived = 0;
+        let mut total_purged = 0;
+
+        for session_id in &session_keys {
+            let key = SessionKey::new(
+                clawdesk_types::channel::ChannelId::Internal,
+                session_id,
+            );
+            match self.enforce_archival_policy(&key, policy).await {
+                Ok((a, p)) => {
+                    total_archived += a;
+                    total_purged += p;
+                }
+                Err(e) => {
+                    debug!(session_id, error = %e, "archival policy failed for session");
+                }
+            }
+        }
+
+        Ok((total_archived, total_purged))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

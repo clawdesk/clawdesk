@@ -43,8 +43,9 @@ pub struct McpBridgeTool {
     /// Tool input schema from MCP discovery.
     input_schema: serde_json::Value,
     /// Shared MCP client for dispatching calls.
-    #[cfg(feature = "mcp-bridge")]
-    mcp_client: Arc<crate::client::McpClient>,
+    /// Previously gated behind a never-declared `mcp-bridge` feature flag.
+    /// Now always included — the MCP feature is default-on.
+    mcp_client: Option<Arc<crate::client::McpClient>>,
 }
 
 impl McpBridgeTool {
@@ -62,7 +63,57 @@ impl McpBridgeTool {
             server_name,
             description,
             input_schema,
+            mcp_client: None,
         }
+    }
+
+    /// Create a new bridge tool with an MCP client for live dispatch.
+    pub fn with_client(
+        namespaced_name: String,
+        original_name: String,
+        server_name: String,
+        description: String,
+        input_schema: serde_json::Value,
+        mcp_client: Arc<crate::client::McpClient>,
+    ) -> Self {
+        Self {
+            namespaced_name,
+            original_name,
+            server_name,
+            description,
+            input_schema,
+            mcp_client: Some(mcp_client),
+        }
+    }
+
+    /// Get the MCP client, if available.
+    pub fn client(&self) -> Option<&Arc<crate::client::McpClient>> {
+        self.mcp_client.as_ref()
+    }
+
+    /// Get the namespaced tool name.
+    pub fn namespaced_name(&self) -> &str {
+        &self.namespaced_name
+    }
+
+    /// Get the original MCP tool name.
+    pub fn original_name(&self) -> &str {
+        &self.original_name
+    }
+
+    /// Get the MCP server name.
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    /// Get the tool description.
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// Get the tool input schema.
+    pub fn input_schema(&self) -> &serde_json::Value {
+        &self.input_schema
     }
 }
 

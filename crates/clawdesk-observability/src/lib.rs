@@ -1,40 +1,18 @@
 //! Observability for ClawDesk AI Agent Gateway
 //!
-//! Provides comprehensive tracing, metrics, and instrumentation following
-//! OpenTelemetry semantic conventions for GenAI operations.
+//! Provides GenAI-specific instrumentation, tracers, and semantic conventions.
 //!
-//! # Architecture
+//! # Delineation with `clawdesk-telemetry`
 //!
-//! ClawDesk observes itself using structured tracing with optional OTLP export:
+//! - **`clawdesk-telemetry`** owns OTel initialization (TracerProvider, MeterProvider,
+//!   tracing_subscriber, OTLP export). It provides the `Metrics` registry and
+//!   `init_telemetry()` entry point.
+//! - **`clawdesk-observability`** (this crate) owns GenAI-specific spans, cost
+//!   calculation, semantic convention constants, and domain tracers (`LLMTracer`,
+//!   `AgentTracer`, `EvaluationTracer`). It does NOT initialize the subscriber.
 //!
-//! ```text
-//! ┌─────────────────────┐
-//! │  Agent / LLM Call    │  ← #[instrument] spans
-//! └──────────┬──────────┘
-//!            │
-//!     ┌──────▼──────┐
-//!     │  Batcher     │  ← async batch span collector
-//!     └──────┬──────┘
-//!            │
-//!   ┌────────▼────────┐
-//!   │  OTLP Exporter   │  ← gRPC/HTTP to collector
-//!   └────────┬────────┘
-//!            │
-//!   ┌────────▼────────┐
-//!   │  Jaeger / Tempo  │  ← or any OTLP-compatible backend
-//!   └─────────────────┘
-//! ```
-//!
-//! # Modules
-//!
-//! - [`config`] — OTEL-standard env var configuration
-//! - [`tracer`] — TracerProvider initialization with OTLP export
-//! - [`genai_conventions`] — GenAI semantic convention constants (OTEL v1.36)
-//! - [`genai_instrumentation`] — Ergonomic span builders for LLM calls
-//! - [`batcher`] — Async batch exporter with circuit breaker
-//! - [`metrics`] — Pre-aggregated metrics for dashboards
-//! - [`span_mapper`] — Map span types to OTEL GenAI operations
-//! - [`storage_metrics`] — Write amplification tracking for storage engine
+//! Call `clawdesk_telemetry::init_telemetry()` first, then optionally call
+//! `init_observability()` to register the observability config.
 
 pub mod batcher;
 pub mod config;
@@ -52,7 +30,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{span, Level, Span};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Observability configuration
@@ -137,26 +114,25 @@ impl ObservabilityConfig {
 // Initialization
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Initialize observability with structured logging.
+/// Initialize observability configuration.
 ///
-/// Sets up a `tracing_subscriber` with `EnvFilter` + pretty-printed output.
-/// Traces can optionally be batched and shipped to an OTLP backend.
+/// **Note:** This does NOT initialize the tracing subscriber — that is owned by
+/// `clawdesk_telemetry::init_telemetry()`. This function registers the
+/// observability config and logs the active settings. Call it after telemetry
+/// is already initialized.
 pub fn init_observability(config: ObservabilityConfig) -> Result<()> {
     if !config.enabled {
         tracing::info!("ClawDesk observability disabled");
         return Ok(());
     }
 
-    tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
+    // Tracing subscriber is initialized by clawdesk-telemetry.
+    // We only log the config state here.
     tracing::info!(
         service = %config.service_name,
         environment = %config.environment,
         endpoint = %config.clawdesk_endpoint,
-        "ClawDesk observability initialized"
+        "ClawDesk observability config loaded (tracing owned by clawdesk-telemetry)"
     );
 
     Ok(())
@@ -211,12 +187,27 @@ pub mod evaluation {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Token and cost usage for a single LLM invocation.
+///
+/// Wraps the presentation layer around the canonical `clawdesk_types::TokenUsage`.
+/// The `cost_usd` field is observability-specific (not part of the core type).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub total_tokens: u32,
     pub cost_usd: f64,
+}
+
+impl LLMUsage {
+    /// Create from raw counts. `cost_usd` is calculated externally.
+    pub fn new(input_tokens: u32, output_tokens: u32, cost_usd: f64) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens + output_tokens,
+            cost_usd,
+        }
+    }
 }
 
 /// Response wrapper carrying content + usage metadata.

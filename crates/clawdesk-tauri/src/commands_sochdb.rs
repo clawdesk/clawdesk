@@ -952,3 +952,158 @@ pub fn sochdb_sync(state: State<'_, AppState>) -> Result<(), String> {
         .sync()
         .map_err(|e| format!("Sync failed: {e}"))
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 10. STORAGE HEALTH — unified status for all storage subsystems
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Get storage health across all subsystems.
+///
+/// Returns overall status + per-store details + recommendations.
+/// The UI should show a persistent banner when `any_ephemeral` is true.
+#[tauri::command]
+pub fn storage_health(
+    state: State<'_, AppState>,
+) -> Result<clawdesk_sochdb::health::StorageHealth, String> {
+    Ok(clawdesk_sochdb::health::StorageHealth::check(
+        &state.soch_store,
+        Some(&state.thread_store),
+    ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 11. LIFECYCLE — cascading delete operations
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Delete a session with full cascade (state + messages + summaries + indexes +
+/// tool history + graph + traces + checkpoints + memory namespace).
+#[tauri::command]
+pub fn lifecycle_delete_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    agent_id: Option<String>,
+) -> Result<clawdesk_sochdb::lifecycle::LifecycleReport, String> {
+    state.lifecycle_manager.delete_session_full(
+        &session_id,
+        agent_id.as_deref(),
+    )
+}
+
+/// Delete a thread with full cascade (ThreadStore + memory namespace + graph + traces).
+#[tauri::command]
+pub fn lifecycle_delete_thread(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<clawdesk_sochdb::lifecycle::LifecycleReport, String> {
+    let id = u128::from_str_radix(&thread_id.replace('-', ""), 16)
+        .map_err(|e| format!("Invalid thread ID: {e}"))?;
+    state.lifecycle_manager.delete_thread_full(id)
+}
+
+/// Delete an agent and ALL related data (sessions, threads, config).
+#[tauri::command]
+pub fn lifecycle_delete_agent(
+    state: State<'_, AppState>,
+    agent_id: String,
+) -> Result<clawdesk_sochdb::lifecycle::LifecycleReport, String> {
+    state.lifecycle_manager.delete_agent_full(&agent_id)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 12. STRUCTURED TRACING — queryable span attributes
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Set structured attributes on a trace span.
+#[tauri::command]
+pub fn trace_set_span_attributes(
+    state: State<'_, AppState>,
+    trace_id: String,
+    span_id: String,
+    attributes: HashMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    state.structured_tracing.set_span_attributes(&trace_id, &span_id, &attributes)
+}
+
+/// Add a structured event to a trace span.
+#[tauri::command]
+pub fn trace_add_span_event(
+    state: State<'_, AppState>,
+    trace_id: String,
+    span_id: String,
+    event_name: String,
+    attributes: HashMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    state.structured_tracing.add_span_event(&trace_id, &span_id, &event_name, &attributes)
+}
+
+/// Get structured attributes for a trace span.
+#[tauri::command]
+pub fn trace_get_span_attributes(
+    state: State<'_, AppState>,
+    trace_id: String,
+    span_id: String,
+) -> Result<Option<clawdesk_sochdb::structured_trace::SpanAttributes>, String> {
+    state.structured_tracing.get_span_attributes(&trace_id, &span_id)
+}
+
+/// Query spans by a specific attribute value.
+#[tauri::command]
+pub fn trace_query_spans_by_attribute(
+    state: State<'_, AppState>,
+    trace_id: String,
+    filter_key: String,
+    filter_value: serde_json::Value,
+) -> Result<Vec<(String, clawdesk_sochdb::structured_trace::SpanAttributes)>, String> {
+    state.structured_tracing.query_spans_by_attribute(&trace_id, &filter_key, &filter_value)
+}
+
+/// Set run-level structured attributes.
+#[tauri::command]
+pub fn trace_set_run_attributes(
+    state: State<'_, AppState>,
+    trace_id: String,
+    attributes: HashMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    state.structured_tracing.set_run_attributes(&trace_id, &attributes)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 13. SESSION INDEXES — efficient session listing
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// List session IDs ordered by last activity (most recent first).
+#[tauri::command]
+pub fn sessions_by_activity(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<String>, String> {
+    state.session_index.list_by_activity(limit.unwrap_or(100))
+}
+
+/// List session IDs filtered by channel.
+#[tauri::command]
+pub fn sessions_by_channel(
+    state: State<'_, AppState>,
+    channel: String,
+    limit: Option<usize>,
+) -> Result<Vec<String>, String> {
+    state.session_index.list_by_channel(&channel, limit.unwrap_or(100))
+}
+
+/// List session IDs filtered by agent.
+#[tauri::command]
+pub fn sessions_by_agent(
+    state: State<'_, AppState>,
+    agent_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<String>, String> {
+    state.session_index.list_by_agent(&agent_id, limit.unwrap_or(100))
+}
+
+/// Rebuild all session indexes from primary data.
+#[tauri::command]
+pub fn sessions_rebuild_indexes(
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    state.session_index.rebuild_all()
+}

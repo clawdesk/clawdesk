@@ -25,9 +25,46 @@ use chrono::Utc;
 use clawdesk_agents::pipeline::{
     AgentPipeline, ErrorPolicy, GateDefault, PipelineResult, PipelineStep, StepResult,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
+
+/// Registry mapping agent IDs to their configurations.
+///
+/// Resolves the TODO in `execute_step` — pipeline steps can now reference
+/// pre-configured agents by ID instead of using the agent_id as a model name.
+pub struct AgentConfigRegistry {
+    configs: tokio::sync::RwLock<HashMap<String, clawdesk_agents::runner::AgentConfig>>,
+}
+
+impl AgentConfigRegistry {
+    pub fn new() -> Self {
+        Self {
+            configs: tokio::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register an agent configuration.
+    pub async fn register(&self, agent_id: impl Into<String>, config: clawdesk_agents::runner::AgentConfig) {
+        self.configs.write().await.insert(agent_id.into(), config);
+    }
+
+    /// Look up an agent configuration by ID.
+    pub async fn get(&self, agent_id: &str) -> Option<clawdesk_agents::runner::AgentConfig> {
+        self.configs.read().await.get(agent_id).cloned()
+    }
+
+    /// List all registered agent IDs.
+    pub async fn list_ids(&self) -> Vec<String> {
+        self.configs.read().await.keys().cloned().collect()
+    }
+
+    /// Remove an agent configuration.
+    pub async fn remove(&self, agent_id: &str) -> Option<clawdesk_agents::runner::AgentConfig> {
+        self.configs.write().await.remove(agent_id)
+    }
+}
 
 /// Executes pipelines with durable per-step checkpointing.
 pub struct DagExecutor {
@@ -36,6 +73,11 @@ pub struct DagExecutor {
     lease_manager: Arc<LeaseManager>,
     runner_factory: Arc<dyn RunnerFactory>,
     worker_id: String,
+    /// Agent configuration registry for looking up pre-configured agents.
+    /// When a pipeline step references an agent_id, the executor first checks
+    /// this registry. If found, uses the stored config. Otherwise, falls back
+    /// to creating a default config with agent_id as the model name.
+    agent_configs: Arc<AgentConfigRegistry>,
 }
 
 impl DagExecutor {
@@ -52,7 +94,32 @@ impl DagExecutor {
             lease_manager,
             runner_factory,
             worker_id,
+            agent_configs: Arc::new(AgentConfigRegistry::new()),
         }
+    }
+
+    /// Create a new DagExecutor with an existing agent config registry.
+    pub fn with_agent_configs(
+        checkpoint_store: Arc<CheckpointStore>,
+        journal: Arc<ActivityJournal>,
+        lease_manager: Arc<LeaseManager>,
+        runner_factory: Arc<dyn RunnerFactory>,
+        worker_id: String,
+        agent_configs: Arc<AgentConfigRegistry>,
+    ) -> Self {
+        Self {
+            checkpoint_store,
+            journal,
+            lease_manager,
+            runner_factory,
+            worker_id,
+            agent_configs,
+        }
+    }
+
+    /// Get a reference to the agent config registry.
+    pub fn agent_configs(&self) -> &Arc<AgentConfigRegistry> {
+        &self.agent_configs
     }
 
     /// Execute a pipeline durably, creating a WorkflowRun and managing its lifecycle.
@@ -255,19 +322,29 @@ impl DagExecutor {
                 timeout_secs,
                 ..
             } => {
-                // TODO: Look up agent config from registry by agent_id.
-                // For now, create a default config with the agent_id as model.
-                debug!(
-                    run_id = %run.id,
-                    step = step_idx,
-                    agent = agent_id,
-                    skill = ?skill_id,
-                    "executing agent step"
-                );
-
-                let config = clawdesk_agents::runner::AgentConfig {
-                    model: agent_id.clone(),
-                    ..Default::default()
+                // Look up agent config from registry by agent_id.
+                // Falls back to default config with agent_id as model if not found.
+                let config = match self.agent_configs.get(agent_id).await {
+                    Some(registered_config) => {
+                        debug!(
+                            run_id = %run.id,
+                            agent = agent_id,
+                            model = %registered_config.model,
+                            "using registered agent config"
+                        );
+                        registered_config
+                    }
+                    None => {
+                        debug!(
+                            run_id = %run.id,
+                            agent = agent_id,
+                            "no registered config, using agent_id as model"
+                        );
+                        clawdesk_agents::runner::AgentConfig {
+                            model: agent_id.clone(),
+                            ..Default::default()
+                        }
+                    }
                 };
 
                 let runner = self

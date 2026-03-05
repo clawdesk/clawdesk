@@ -1,9 +1,9 @@
-//! OpenAI-compatible provider adapter (OpenAI, Azure, compatible APIs).
+//! OpenAI provider adapter.
 
 use async_trait::async_trait;
 use clawdesk_types::error::ProviderError;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -14,7 +14,9 @@ use crate::{
 
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
 
-/// OpenAI-compatible provider.
+/// Standard OpenAI provider.
+///
+/// For Azure OpenAI, use `AzureOpenAiProvider` from the `azure` module instead.
 pub struct OpenAiProvider {
     client: Client,
     api_key: String,
@@ -24,32 +26,17 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new(api_key: String, base_url: Option<String>, default_model: Option<String>) -> Self {
+        let url = base_url.unwrap_or_else(|| DEFAULT_OPENAI_URL.to_string());
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(120))
                 .build()
                 .expect("failed to build HTTP client"),
             api_key,
-            base_url: base_url.unwrap_or_else(|| DEFAULT_OPENAI_URL.to_string()),
+            base_url: url,
             default_model: default_model.unwrap_or_else(|| "gpt-4o".to_string()),
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiRequest {
-    model: String,
-    messages: Vec<OpenAiMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiMessage {
-    role: String,
-    content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,29 +104,22 @@ impl Provider for OpenAiProvider {
 
         debug!(%model, messages = request.messages.len(), "calling OpenAI API");
 
-        let mut messages = Vec::new();
-        if let Some(system) = &request.system_prompt {
-            messages.push(OpenAiMessage {
-                role: "system".into(),
-                content: system.clone(),
-            });
-        }
-        for m in &request.messages {
-            messages.push(OpenAiMessage {
-                role: m.role.as_str().to_string(),
-                content: m.content.to_string(),
-            });
-        }
+        // Use openai_compat to properly format tool call exchanges
+        let messages = crate::openai_compat::build_openai_api_messages(
+            request.system_prompt.as_deref(),
+            &request.messages,
+        );
 
-        let api_request = OpenAiRequest {
-            model: model.clone(),
-            messages,
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
-        };
-
-        // Build JSON body and add tools if present
-        let mut body = serde_json::to_value(&api_request).map_err(|e| ProviderError::format_error("openai", e.to_string()))?;
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+        });
+        if let Some(max_tokens) = request.max_tokens {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
+        if let Some(temp) = request.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
         if !request.tools.is_empty() {
             let tools: Vec<serde_json::Value> = request.tools.iter().map(|t| {
                 serde_json::json!({
@@ -174,10 +154,15 @@ impl Provider for OpenAiProvider {
 
         if !status.is_success() {
             let status_code = status.as_u16();
+            // Read error body for better diagnostics
+            let err_body = response.text().await.unwrap_or_default();
+            if !err_body.is_empty() {
+                warn!(status = status_code, body = %err_body.chars().take(500).collect::<String>(), "OpenAI API error response");
+            }
             return match status_code {
                 429 => Err(ProviderError::rate_limit("openai", None)),
                 401 | 403 => Err(ProviderError::auth_failure("openai", "default")),
-                _ => Err(ProviderError::server_error("openai", status_code)),
+                _ => Err(ProviderError::format_error("openai", format!("HTTP {} — {}", status_code, err_body.chars().take(300).collect::<String>()))),
             };
         }
 
@@ -253,26 +238,19 @@ impl Provider for OpenAiProvider {
 
         debug!(%model, "streaming OpenAI API");
 
-        let mut messages = Vec::new();
-        if let Some(ref system) = request.system_prompt {
-            messages.push(serde_json::json!({
-                "role": "system",
-                "content": system,
-            }));
-        }
-        for m in &request.messages {
-            messages.push(serde_json::json!({
-                "role": m.role.as_str(),
-                "content": &*m.content,
-            }));
-        }
+        // Use openai_compat to properly format tool call exchanges
+        let messages = crate::openai_compat::build_openai_api_messages(
+            request.system_prompt.as_deref(),
+            &request.messages,
+        );
 
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
             "stream": true,
-            "stream_options": { "include_usage": true },
         });
+
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
 
         if let Some(max_tokens) = request.max_tokens {
             body["max_tokens"] = serde_json::json!(max_tokens);
@@ -307,15 +285,22 @@ impl Provider for OpenAiProvider {
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            // Read the error body for diagnostics
+            let err_body = response.text().await.unwrap_or_default();
+            if !err_body.is_empty() {
+                warn!(status, body = %err_body.chars().take(500).collect::<String>(), "OpenAI stream: HTTP error response");
+            }
             return match status {
                 429 => Err(ProviderError::rate_limit("openai", None)),
-                _ => Err(ProviderError::server_error("openai", status)),
+                401 | 403 => Err(ProviderError::auth_failure("openai", "default")),
+                _ => Err(ProviderError::format_error("openai", format!("HTTP {} — {}", status, err_body.chars().take(300).collect::<String>()))),
             };
         }
 
         // Parse SSE event stream
         let mut buffer = String::new();
         let mut response = response;
+        let mut received_any_content = false;
 
         // Accumulate tool call deltas during streaming.
         // OpenAI sends tool calls as incremental fragments:
@@ -343,13 +328,34 @@ impl Provider for OpenAiProvider {
 
                     // Terminal signal
                     if data == "[DONE]" {
+                        if !received_any_content {
+                            warn!("OpenAI stream completed with [DONE] but produced no content or tool calls");
+                        }
                         return Ok(());
                     }
 
                     // Parse chunk JSON
                     let Ok(chunk_json) = serde_json::from_str::<serde_json::Value>(data) else {
+                        warn!(raw_data = %data.chars().take(200).collect::<String>(), "OpenAI stream: unparseable SSE chunk");
                         continue;
                     };
+
+                    // ── Check for error responses embedded in the stream ──
+                    // Some proxies can return error JSON mid-stream
+                    // (e.g., content filter violations, quota exceeded, etc.).
+                    if let Some(error_obj) = chunk_json.get("error") {
+                        let err_msg = error_obj.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+                        let err_code = error_obj.get("code").and_then(|c| c.as_str()).unwrap_or("unknown");
+                        warn!(
+                            error_code = %err_code,
+                            error_message = %err_msg,
+                            "OpenAI stream: error response received in SSE stream"
+                        );
+                        return Err(ProviderError::format_error(
+                            "openai",
+                            format!("Stream error [{}]: {}", err_code, err_msg),
+                        ));
+                    }
 
                     // Extract usage (may appear in final chunk or separate)
                     let usage = chunk_json.get("usage").and_then(|u| {
@@ -366,12 +372,20 @@ impl Provider for OpenAiProvider {
                         .and_then(|c| c.as_array());
 
                     if let Some(choices) = choices {
+                        if choices.is_empty() {
+                            // Azure content filter can return empty choices array
+                            warn!("OpenAI stream: empty choices array (possible content filter)");
+                        }
                         for choice in choices {
                             let delta = choice.get("delta");
                             let content = delta
                                 .and_then(|d| d.get("content"))
                                 .and_then(|c| c.as_str())
                                 .unwrap_or("");
+
+                            if !content.is_empty() {
+                                received_any_content = true;
+                            }
 
                             // ── Accumulate tool call deltas ──
                             // OpenAI streams tool calls as incremental fragments
@@ -449,9 +463,22 @@ impl Provider for OpenAiProvider {
                                 tool_calls: Vec::new(),
                             })
                             .await;
+                    } else {
+                        // Chunk has neither choices nor usage — log for debugging
+                        debug!(
+                            chunk_keys = %chunk_json.as_object()
+                                .map(|o| o.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(","))
+                                .unwrap_or_default(),
+                            "OpenAI stream: chunk without choices or usage"
+                        );
                     }
                 }
             }
+        }
+
+        // Stream ended without [DONE] signal
+        if !received_any_content {
+            warn!("OpenAI stream: connection closed without [DONE] and no content was received");
         }
 
         Ok(())

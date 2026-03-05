@@ -54,11 +54,9 @@ pub struct ProviderResponse {
     pub latency: Duration,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct TokenUsage {
-    pub input: u64,
-    pub output: u64,
-}
+/// Token usage — re-exported from the canonical `clawdesk-types` definition.
+/// Legacy alias: `input` → `input_tokens`, `output` → `output_tokens`.
+pub use clawdesk_types::TokenUsage;
 
 /// Record of a fallback attempt.
 #[derive(Debug, Clone)]

@@ -25,11 +25,15 @@ impl ConfigStore for SochStore {
             detail: e.to_string(),
         })?;
 
-        self.put("config/main", &bytes)?;
-
-        // Increment version
+        // GAP-01: Use put_batch() to atomically write both config blob and
+        // version counter. Individual put() calls rely on group-commit batching
+        // and risk partial writes (config updated but version not, or vice versa).
         let version = self.config_version().await.unwrap_or(0) + 1;
-        self.put("config/version", &version.to_le_bytes())?;
+        let version_bytes = version.to_le_bytes();
+        self.put_batch(&[
+            ("config/main", &bytes),
+            ("config/version", &version_bytes),
+        ])?;
 
         Ok(())
     }
@@ -74,7 +78,8 @@ impl ConfigStore for SochStore {
             detail: e.to_string(),
         })?;
 
-        self.put(&key, &bytes)?;
+        // GAP-01: Config values are user-facing settings — use durable writes.
+        self.put_durable(&key, &bytes)?;
 
         Ok(())
     }

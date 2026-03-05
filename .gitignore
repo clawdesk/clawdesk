@@ -24,3 +24,5 @@ crates/jj.js
 crates/ui/clawdesk_ui_rust.txt
 fix_providers.py
 move_providers.py
+senarios/
+sochdb.md

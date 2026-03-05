@@ -8,6 +8,7 @@
 //! an agent can discover another agent's capabilities without prior
 //! configuration, enabling zero-config agent-to-agent communication.
 
+use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use crate::capability::{CapabilityId, CapSet};
 
@@ -31,9 +32,10 @@ pub struct AgentCard {
     /// Capabilities this agent offers (typed capability IDs).
     pub capabilities: Vec<CapabilityId>,
     /// Precomputed capability bitset with hierarchical closure.
+    /// Lazily initialised on first access (e.g. after deserialization).
     /// Call `rebuild_capset()` after directly mutating `capabilities`.
     #[serde(skip)]
-    pub cap_set: CapSet,
+    pub cap_set: OnceLock<CapSet>,
     /// Skills this agent can perform (more granular than capabilities).
     pub skills: Vec<AgentSkill>,
     /// Supported protocol versions.
@@ -122,7 +124,7 @@ impl AgentCard {
             },
             auth: AgentAuth::None,
             capabilities: vec![],
-            cap_set: CapSet::empty(),
+            cap_set: OnceLock::new(),
             skills: vec![],
             protocol_versions: vec!["1.0".into()],
             max_concurrent_tasks: Some(10),
@@ -130,7 +132,7 @@ impl AgentCard {
         }
     }
 
-    /// Add a capability, rebuilding the closed capset.
+    /// Add a capability, invalidating the cached capset.
     pub fn with_capability(mut self, cap: CapabilityId) -> Self {
         if !self.capabilities.contains(&cap) {
             self.capabilities.push(cap);
@@ -143,7 +145,17 @@ impl AgentCard {
     /// Call after directly mutating `capabilities`.
     pub fn rebuild_capset(&mut self) {
         let raw: CapSet = self.capabilities.iter().copied().collect();
-        self.cap_set = raw.close();
+        // Replace the OnceCell — take the old one and create a new pre-filled one.
+        self.cap_set = OnceLock::new();
+        let _ = self.cap_set.set(raw.close());
+    }
+
+    /// Get the closed capability set, computing it lazily if needed.
+    fn closed_capset(&self) -> &CapSet {
+        self.cap_set.get_or_init(|| {
+            let raw: CapSet = self.capabilities.iter().copied().collect();
+            raw.close()
+        })
     }
 
     /// Add a skill.
@@ -156,27 +168,31 @@ impl AgentCard {
     ///
     /// Uses the closed CapSet for O(1) check, including hierarchical
     /// implication (e.g., `AudioProcessing` implies `MediaProcessing`).
+    /// The capset is lazily computed on first access and cached via OnceCell,
+    /// so repeated calls are O(1) even after deserialization.
     pub fn has_capability(&self, cap: CapabilityId) -> bool {
-        let set = if self.cap_set.is_empty() && !self.capabilities.is_empty() {
-            // Lazy rebuild: capset not yet computed (e.g., after deserialization).
-            let raw: CapSet = self.capabilities.iter().copied().collect();
-            raw.close()
-        } else {
-            self.cap_set
-        };
-        set.contains(cap)
+        self.closed_capset().contains(cap)
     }
 
-    /// Content-addressed structural fingerprint.
+    /// Content-addressed structural fingerprint — true zero-heap-allocation.
     ///
-    /// Hashes: capabilities (sorted) + skills (IDs + tags) + endpoint URL +
-    /// max_concurrent_tasks + protocol_versions. Excludes description, metadata,
-    /// and version string — those are "cosmetic" changes that don't affect routing.
+    /// Hashes: capabilities (via closed CapSet bits) + skills (sorted indices) +
+    /// endpoint URL + max_concurrent_tasks + protocol_versions. Excludes
+    /// description, metadata, and version string — those are "cosmetic" changes
+    /// that don't affect routing.
     ///
-    /// Returns a 64-bit FNV-1a hash as hex ETag (e.g., `"W/\"a3f7c20b1e4d9851\""`).
-    /// Use with `DiscoveryCache::put_if_changed()` to skip re-indexing when only
-    /// metadata changed.
+    /// **Zero heap allocations**: Uses fixed-size stack arrays `[usize; 64]`
+    /// for index sorting. Capabilities use the CapSet's native `[u64; N]`
+    /// representation (consistent with the CapSet width, currently 64 bits).
+    ///
+    /// Total: O(k log k) comparisons, 0 heap allocations, O(Σ|bytes|) hash ops.
+    ///
+    /// Returns a 64-bit FNV-1a hash.
     pub fn structural_fingerprint(&self) -> u64 {
+        /// Maximum skills/tags/protocol versions before this function would
+        /// need a heap fallback. 64 is generous — most agents have < 10 skills.
+        const MAX_INDICES: usize = 64;
+
         let mut h = 0xcbf29ce484222325u64; // FNV-1a offset basis
 
         #[inline(always)]
@@ -187,37 +203,70 @@ impl AgentCard {
             }
         }
 
-        // Capabilities (sorted for determinism).
-        let mut caps: Vec<u8> = self.capabilities.iter().map(|c| *c as u8).collect();
-        caps.sort_unstable();
-        fnv_bytes(&mut h, &caps);
-
-        // Skill IDs + tags (sorted).
-        let mut skill_keys: Vec<String> = self.skills.iter().map(|s| {
-            let mut key = s.id.clone();
-            let mut tags = s.tags.clone();
-            tags.sort_unstable();
-            key.push(':');
-            key.push_str(&tags.join(","));
-            key
-        }).collect();
-        skill_keys.sort_unstable();
-        for sk in &skill_keys {
-            fnv_bytes(&mut h, sk.as_bytes());
+        // Capabilities — use the closed CapSet's native bits representation.
+        // This is consistent with the CapSet width (currently N=1 → u64, but
+        // automatically scales if CapSet is expanded to N=2 → u128, etc.).
+        let cap_set = self.closed_capset();
+        // Hash each word of the CapSet backing store
+        for word in cap_set.bits() {
+            fnv_bytes(&mut h, &word.to_le_bytes());
         }
 
-        // Endpoint URL.
+        // Skill IDs + tags — index-sort on stack, no heap allocation.
+        let skill_count = self.skills.len();
+        if skill_count > 0 {
+            assert!(skill_count <= MAX_INDICES, "skill count {} exceeds stack limit {}", skill_count, MAX_INDICES);
+            let mut indices = [0usize; MAX_INDICES];
+            for i in 0..skill_count {
+                indices[i] = i;
+            }
+            indices[..skill_count].sort_unstable_by(|&a, &b| self.skills[a].id.cmp(&self.skills[b].id));
+
+            for &idx in &indices[..skill_count] {
+                let skill = &self.skills[idx];
+                fnv_bytes(&mut h, skill.id.as_bytes());
+                fnv_bytes(&mut h, b":");
+
+                // Sort tag indices on stack.
+                let tag_count = skill.tags.len();
+                if tag_count > 0 {
+                    assert!(tag_count <= MAX_INDICES, "tag count {} exceeds stack limit {}", tag_count, MAX_INDICES);
+                    let mut tag_indices = [0usize; MAX_INDICES];
+                    for i in 0..tag_count {
+                        tag_indices[i] = i;
+                    }
+                    tag_indices[..tag_count].sort_unstable_by(|&a, &b| skill.tags[a].cmp(&skill.tags[b]));
+                    for (i, &ti) in tag_indices[..tag_count].iter().enumerate() {
+                        if i > 0 {
+                            fnv_bytes(&mut h, b",");
+                        }
+                        fnv_bytes(&mut h, skill.tags[ti].as_bytes());
+                    }
+                }
+            }
+        }
+
+        // Endpoint URL — direct hash, no allocation.
         fnv_bytes(&mut h, self.endpoint.url.as_bytes());
 
         // Max concurrent tasks.
         let max_tasks = self.max_concurrent_tasks.unwrap_or(0);
         fnv_bytes(&mut h, &max_tasks.to_le_bytes());
 
-        // Protocol versions (sorted).
-        let mut pvs = self.protocol_versions.clone();
-        pvs.sort_unstable();
-        for pv in &pvs {
-            fnv_bytes(&mut h, pv.as_bytes());
+        // Protocol versions — index-sort on stack.
+        let pv_count = self.protocol_versions.len();
+        if pv_count > 0 {
+            assert!(pv_count <= MAX_INDICES, "protocol version count {} exceeds stack limit {}", pv_count, MAX_INDICES);
+            let mut pv_indices = [0usize; MAX_INDICES];
+            for i in 0..pv_count {
+                pv_indices[i] = i;
+            }
+            pv_indices[..pv_count].sort_unstable_by(|&a, &b| {
+                self.protocol_versions[a].cmp(&self.protocol_versions[b])
+            });
+            for &pi in &pv_indices[..pv_count] {
+                fnv_bytes(&mut h, self.protocol_versions[pi].as_bytes());
+            }
         }
 
         h
@@ -244,12 +293,7 @@ impl AgentCard {
             return 1.0;
         }
 
-        let offered = if self.cap_set.is_empty() && !self.capabilities.is_empty() {
-            let raw: CapSet = self.capabilities.iter().copied().collect();
-            raw.close()
-        } else {
-            self.cap_set
-        };
+        let offered = self.closed_capset();
 
         let required_set: CapSet = required.iter().copied().collect();
         let required_closed = required_set.close();

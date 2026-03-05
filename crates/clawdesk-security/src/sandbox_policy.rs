@@ -27,40 +27,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-/// Isolation level — forms a total order (lattice).
+/// Canonical isolation level — re-exported from `clawdesk-types`.
 ///
 /// ```text
 /// None < PathScope < ProcessIsolation < FullSandbox
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum IsolationLevel {
-    /// No isolation — tool runs in the main process.
-    None = 0,
-    /// Path-scope only — file operations confined to workspace directory.
-    PathScope = 1,
-    /// Process isolation — tool runs in a child process with limited capabilities.
-    ProcessIsolation = 2,
-    /// Full sandbox — seccomp/seatbelt + namespace isolation + resource limits.
-    FullSandbox = 3,
-}
-
-impl IsolationLevel {
-    /// Whether this level provides at least the given minimum.
-    pub fn satisfies(&self, minimum: IsolationLevel) -> bool {
-        *self >= minimum
-    }
-}
-
-impl std::fmt::Display for IsolationLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::None => write!(f, "none"),
-            Self::PathScope => write!(f, "path_scope"),
-            Self::ProcessIsolation => write!(f, "process_isolation"),
-            Self::FullSandbox => write!(f, "full_sandbox"),
-        }
-    }
-}
+pub use clawdesk_types::IsolationLevel;
 
 /// Resource limits for sandboxed tool execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -180,6 +180,12 @@ impl<const N: usize> CapSet<N> {
         self.bits.iter().all(|&w| w == 0)
     }
 
+    /// Access the backing `[u64; N]` store (for hashing / serialization).
+    #[inline]
+    pub fn bits(&self) -> &[u64; N] {
+        &self.bits
+    }
+
     /// Compute the hierarchical closure.
     ///
     /// For each set bit, also set all ancestor bits via the implication DAG.

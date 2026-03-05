@@ -11,6 +11,10 @@ rust-version.workspace = true
 name = "clawdesk"
 path = "src/main.rs"
 
+[features]
+default = ["tui"]
+tui = ["dep:clawdesk-tui"]
+
 [dependencies]
 clawdesk-types = { workspace = true }
 clawdesk-storage = { workspace = true }
@@ -24,6 +28,7 @@ clawdesk-gateway = { workspace = true }
 clawdesk-plugin = { workspace = true }
 clawdesk-skills = { workspace = true }
 clawdesk-cron = { workspace = true }
+clawdesk-tui = { workspace = true, optional = true }
 async-trait = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"

@@ -38,7 +38,7 @@ pub use processor::{MediaProcessor, ProcessorResult};
 pub use selector::AdaptiveSelector;
 pub use cache::MediaCache;
 pub use artifact_pipeline::{ArtifactPipeline, AcpArtifactInput, AcpDataInput};
-pub use video::{VideoProcessor, VideoMetadata, VideoFormat};
+pub use video::{VideoProcessor, VideoMetadata, VideoFormat, FfmpegVideoProcessor, StubVideoProcessor, create_video_processor};
 pub use voice::{VoicePipeline, VoiceActivityDetector, VoicePipelineConfig, VoiceEvent};
 pub use link_understanding::{LinkUnderstanding, LinkPreview, LinkConfig};
 pub use understanding::{UnderstandingDispatcher, UnderstandingProvider, MediaCapability, UnderstandingResult};

@@ -217,6 +217,22 @@ impl std::fmt::Debug for StdioTransport {
     }
 }
 
+impl Drop for StdioTransport {
+    fn drop(&mut self) {
+        // Ensure the child process is killed when the transport is dropped,
+        // even if the caller forgot to call close().  This prevents orphaned
+        // MCP server processes that leak PIDs and file descriptors.
+        //
+        // `try_lock()` is safe in Drop — we must not block.
+        // `start_kill()` is non-async and sends SIGKILL on Unix.
+        if let Ok(mut guard) = self.child.try_lock() {
+            if let Some(ref mut child) = *guard {
+                let _ = child.start_kill();
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SSE Transport
 // ---------------------------------------------------------------------------

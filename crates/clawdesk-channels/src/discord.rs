@@ -885,26 +885,110 @@ impl Threaded for DiscordChannel {
         parent_msg_id: &str,
         title: &str,
     ) -> Result<String, String> {
-        // Discord: POST /channels/{channel_id}/messages/{message_id}/threads
-        // We need the channel_id which isn't available from just the msg_id.
-        // For now, log and return a placeholder; a full impl would store channel_id.
-        debug!(parent_msg_id, title, "creating Discord thread (stub)");
-        Ok(format!("thread-{}", uuid::Uuid::new_v4()))
+        // Use compound message ID format: "channel_id:message_id"
+        let (channel_id, message_id) = parse_compound_msg_id(parent_msg_id);
+
+        let url = self.api_url(&format!(
+            "/channels/{channel_id}/messages/{message_id}/threads"
+        ));
+
+        let body = json!({
+            "name": &title[..title.len().min(100)], // Discord thread names max 100 chars
+            "auto_archive_duration": 1440, // 24 hours
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bot {}", self.bot_token))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Discord create_thread failed: {e}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err = response.text().await.unwrap_or_default();
+            return Err(format!("Discord create_thread API error ({status}): {err}"));
+        }
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse thread response: {e}"))?;
+
+        let thread_id = result
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("no thread id in response")?
+            .to_string();
+
+        debug!(thread_id = %thread_id, parent = parent_msg_id, title, "Discord thread created");
+        Ok(thread_id)
     }
 }
 
 #[async_trait]
 impl Streaming for DiscordChannel {
     async fn send_streaming(&self, initial: OutboundMessage) -> Result<StreamHandle, String> {
+        // Extract channel_id from the origin BEFORE sending, so we can capture
+        // it in the streaming update closure.
+        let channel_id = match &initial.origin {
+            clawdesk_types::message::MessageOrigin::Discord { channel_id, .. } => {
+                channel_id.to_string()
+            }
+            _ => return Err("cannot stream Discord message without Discord origin".into()),
+        };
+
         let receipt = self.send(initial).await?;
         let msg_id = receipt.message_id.clone();
 
-        // Discord streaming uses edit-in-place via PATCH /channels/{id}/messages/{msg_id}
-        // The channel_id is needed but not available from StreamHandle alone.
-        // For a full implementation, you'd capture channel_id in the closure.
+        // Capture bot_token and async client for the edit-in-place closure.
+        let bot_token = self.bot_token.clone();
+        let client = self.client.clone();
+
+        let edit_url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{msg_id}");
+
+        // Grab a handle to the current tokio runtime so the sync closure can
+        // dispatch async work without pulling in reqwest/blocking.
+        let handle = tokio::runtime::Handle::current();
+
+        // Discord streaming: edit the initial message in place via PATCH.
         Ok(StreamHandle {
             message_id: msg_id,
-            update_fn: Box::new(|_text| Ok(())),
+            update_fn: Box::new(move |text| {
+                // Truncate to Discord's 2000-char limit.
+                let content: String = text.chars().take(DISCORD_MAX_MESSAGE_LENGTH).collect();
+                let body = serde_json::json!({ "content": content });
+
+                // Run the async PATCH on a dedicated thread to avoid
+                // "cannot block inside a runtime" panics.
+                let client = client.clone();
+                let edit_url = edit_url.clone();
+                let bot_token = bot_token.clone();
+                let h = handle.clone();
+
+                let join = std::thread::spawn(move || {
+                    h.block_on(async {
+                        let resp = client
+                            .patch(&edit_url)
+                            .header("Authorization", format!("Bot {}", bot_token))
+                            .json(&body)
+                            .send()
+                            .await
+                            .map_err(|e| format!("Discord edit request failed: {e}"))?;
+
+                        if resp.status().is_success() {
+                            Ok(())
+                        } else {
+                            Err(format!("Discord edit failed: {}", resp.status()))
+                        }
+                    })
+                });
+
+                join.join()
+                    .map_err(|_| "Discord edit thread panicked".to_string())?
+            }),
         })
     }
 }

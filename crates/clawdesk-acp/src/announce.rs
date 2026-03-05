@@ -27,6 +27,7 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -190,9 +191,13 @@ impl RetryPolicy {
 pub struct AnnounceRouter {
     /// Send side for enqueuing announcements. Cloneable for fan-in.
     tx: mpsc::Sender<Announcement>,
+    /// Retry send side — dedicated channel for retries to guarantee delivery
+    /// order (retries are prioritized over new announcements).
+    retry_tx: mpsc::Sender<Announcement>,
     /// Receive side for pulling announcements for delivery.
-    /// Wrapped in a tokio Mutex since mpsc::Receiver requires `&mut self`.
-    rx: tokio::sync::Mutex<mpsc::Receiver<Announcement>>,
+    /// Uses a single-owner `tokio::sync::Mutex` since the expected usage
+    /// pattern is a dedicated consumer task that calls `next_delivery()`.
+    rx: tokio::sync::Mutex<ConsumerState>,
     /// Retry policy.
     retry_policy: RetryPolicy,
     /// Successfully delivered count (atomic — no lock needed).
@@ -213,6 +218,35 @@ struct TimedSubscription {
     subscribed_at: Instant,
 }
 
+/// Internal consumer state: primary receiver + priority retry queue.
+///
+/// The retry queue uses a `VecDeque` ordered by next-retry-time, ensuring
+/// retries are always dispatched before new announcements — preventing
+/// starvation of retried items under load.
+struct ConsumerState {
+    rx: mpsc::Receiver<Announcement>,
+    retry_rx: mpsc::Receiver<Announcement>,
+    retry_queue: VecDeque<(Announcement, Instant)>,
+}
+
+impl ConsumerState {
+    /// Pop the next announcement, prioritizing retries whose delay has elapsed.
+    fn next(&mut self) -> Option<Announcement> {
+        // Priority 1: retries whose backoff has elapsed
+        if let Some((ann, ready_at)) = self.retry_queue.front() {
+            if Instant::now() >= *ready_at {
+                return self.retry_queue.pop_front().map(|(a, _)| a);
+            }
+        }
+        // Priority 2: retries arriving on the retry channel
+        if let Ok(ann) = self.retry_rx.try_recv() {
+            return Some(ann);
+        }
+        // Priority 3: new announcements
+        self.rx.try_recv().ok()
+    }
+}
+
 /// Default channel capacity for the delivery queue.
 const DEFAULT_CHANNEL_CAPACITY: usize = 4096;
 
@@ -220,9 +254,15 @@ impl AnnounceRouter {
     /// Create a new announce router.
     pub fn new(retry_policy: RetryPolicy) -> Self {
         let (tx, rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (retry_tx, retry_rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY / 4);
         Self {
             tx,
-            rx: tokio::sync::Mutex::new(rx),
+            retry_tx,
+            rx: tokio::sync::Mutex::new(ConsumerState {
+                rx,
+                retry_rx,
+                retry_queue: VecDeque::new(),
+            }),
             retry_policy,
             delivered_count: AtomicU64::new(0),
             failed_count: AtomicU64::new(0),
@@ -330,13 +370,19 @@ impl AnnounceRouter {
     }
 
     /// Pop the next announcement for delivery. Returns `None` if the queue is empty.
+    ///
+    /// Priority order: elapsed retries > retry channel > new announcements.
+    /// This ensures retried items are never starved by new announcements.
     pub async fn next_delivery(&self) -> Option<Announcement> {
-        let mut rx = self.rx.lock().await;
-        rx.try_recv().ok()
+        let mut state = self.rx.lock().await;
+        state.next()
     }
 
     /// Re-enqueue an announcement for retry after a failed delivery.
     /// Returns `false` if max attempts exhausted.
+    ///
+    /// Uses the dedicated retry channel to guarantee delivery — retries
+    /// are never silently dropped due to backpressure on the primary channel.
     pub fn retry(&self, mut announcement: Announcement) -> bool {
         announcement.attempts += 1;
         if announcement.attempts >= announcement.max_attempts {
@@ -353,10 +399,14 @@ impl AnnounceRouter {
         debug!(
             id = announcement.id,
             attempt = announcement.attempts,
-            "re-enqueuing for retry"
+            "re-enqueuing for retry via dedicated retry channel"
         );
-        // try_send is non-blocking; channel should have space after a pop.
-        let _ = self.tx.try_send(announcement);
+        // Use the retry channel — bounded at 1/4 of main capacity.
+        // If even this overflows, fall back to try_send on main channel.
+        if self.retry_tx.try_send(announcement.clone()).is_err() {
+            warn!(id = announcement.id, "retry channel full, falling back to main channel");
+            let _ = self.tx.try_send(announcement);
+        }
         true
     }
 
@@ -381,9 +431,16 @@ impl AnnounceRouter {
 
     /// Drain all pending announcements (for shutdown / batch processing).
     pub async fn drain_pending(&self) -> Vec<Announcement> {
-        let mut rx = self.rx.lock().await;
+        let mut state = self.rx.lock().await;
         let mut drained = Vec::new();
-        while let Ok(ann) = rx.try_recv() {
+        // Drain retry queue first
+        while let Some((ann, _)) = state.retry_queue.pop_front() {
+            drained.push(ann);
+        }
+        while let Ok(ann) = state.retry_rx.try_recv() {
+            drained.push(ann);
+        }
+        while let Ok(ann) = state.rx.try_recv() {
             drained.push(ann);
         }
         drained

@@ -260,8 +260,26 @@ impl ReplyPipeline {
                 }
             }
         } else {
-            // No executor registered — return a placeholder.
-            format!("[agent:{agent_id}] would respond to: {}", enriched_msg.body)
+            // No executor registered — fail explicitly instead of sending
+            // debug placeholder strings to end users.
+            warn!(
+                msg_id = %msg.id,
+                agent = %agent_id,
+                "pipeline: no agent executor registered — cannot process message"
+            );
+            timings.push(("execute", t.elapsed()));
+            return PipelineResult {
+                stage_timings: timings,
+                delivery: DeliveryStatus {
+                    message_id: msg.id.to_string(),
+                    channel: msg.sender.channel.to_string(),
+                    status: DeliveryState::Failed,
+                    timestamp: chrono::Utc::now(),
+                    retry_count: 0,
+                    error: Some("no agent executor registered".to_string()),
+                },
+                response_parts: vec![],
+            };
         };
         timings.push(("execute", t.elapsed()));
 

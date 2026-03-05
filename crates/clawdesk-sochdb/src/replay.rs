@@ -42,26 +42,28 @@ impl ChatReplayStore for SochStore {
             detail: e.to_string(),
         })?;
 
-        // Store the turn data keyed by sequence
+        // GAP-01: Use put_batch() to atomically write all three related keys
+        // (turn data, ID→seq index, count) in a single commit+fsync.
+        // Individual put() calls risk partial writes on crash: e.g. count
+        // updated but turn data missing, or index entry without turn data.
         let skey = seq_key(&session_str, turn.sequence);
-        self.put(&skey, &bytes)?;
-
-        // Store ID → sequence reverse index
         let ikey = id_key(&session_str, turn.id.as_str());
         let seq_bytes = turn.sequence.to_le_bytes();
-        self.put(&ikey, &seq_bytes)?;
-
-        // Update count
         let ckey = count_key(&session_str);
         let new_count = turn.sequence + 1;
         let count_bytes = new_count.to_le_bytes();
-        self.put(&ckey, &count_bytes)?;
+
+        self.put_batch(&[
+            (&skey, bytes.as_slice()),
+            (&ikey, &seq_bytes),
+            (&ckey, &count_bytes),
+        ])?;
 
         debug!(
             session = %session_str,
             sequence = turn.sequence,
             tokens = turn.total_tokens(),
-            "chat turn stored"
+            "chat turn stored (batch durable)"
         );
 
         Ok(())
@@ -140,19 +142,19 @@ impl ChatReplayStore for SochStore {
         to_sequence: u64,
     ) -> Result<Vec<ChatTurn>, StorageError> {
         let session_str = session_key.as_str();
-        let prefix = format!("turns/{}/seq/", session_str);
-        let results = self
-            .scan(&prefix)?;
 
+        // GAP-09: Use scan_range() for O(R) bounded retrieval instead of
+        // scanning ALL turns then filtering in-memory. Keys are zero-padded
+        // to 20 digits precisely to enable lexicographic range scans.
         let from_key = seq_key(&session_str, from_sequence);
         let to_key = seq_key(&session_str, to_sequence);
 
-        let mut turns = Vec::new();
-        for (key, value) in &results {
-            if key.as_str() >= from_key.as_str() && key.as_str() <= to_key.as_str() {
-                if let Ok(turn) = serde_json::from_slice::<ChatTurn>(value) {
-                    turns.push(turn);
-                }
+        let results = self.scan_range(&from_key, &to_key)?;
+
+        let mut turns = Vec::with_capacity(results.len());
+        for (_key, value) in &results {
+            if let Ok(turn) = serde_json::from_slice::<ChatTurn>(value) {
+                turns.push(turn);
             }
         }
 

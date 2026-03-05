@@ -2,6 +2,7 @@
 //!
 //! Wraps clawdesk-extensions for the Tauri IPC surface. Exposes:
 //! - 25+ bundled integrations (GitHub, Slack, Jira, AWS, etc.)
+//! - Per-extension configuration with typed schema
 //! - AES-256-GCM encrypted credential vault
 //! - Health monitoring with exponential backoff
 //! - OAuth 2.0 PKCE flows for browser-based auth
@@ -23,6 +24,12 @@ pub struct IntegrationInfo {
     pub credentials_required: Vec<CredentialRequirementInfo>,
     pub has_oauth: bool,
     pub health_check_url: Option<String>,
+    /// Per-extension configuration schema (typed fields).
+    pub config_fields: Vec<ConfigFieldInfo>,
+    /// Current user-configured values (non-secret only).
+    pub config_values: HashMap<String, String>,
+    /// Transport type: "stdio" | "sse" | "api"
+    pub transport_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,6 +38,26 @@ pub struct CredentialRequirementInfo {
     pub description: String,
     pub env_var: Option<String>,
     pub required: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigFieldInfo {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+    pub field_type: String,
+    pub default: Option<String>,
+    pub required: bool,
+    pub placeholder: Option<String>,
+    pub validation: Option<String>,
+    pub options: Vec<ConfigFieldOptionInfo>,
+    pub group: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigFieldOptionInfo {
+    pub label: String,
+    pub value: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,6 +101,62 @@ pub struct OAuthFlowInfo {
 
 // ── Integration Registry Commands ─────────────────────────────
 
+/// Convert an `Integration` + its config values into the IPC response type.
+fn integration_to_info(
+    i: &clawdesk_extensions::Integration,
+    config_values: HashMap<String, String>,
+) -> IntegrationInfo {
+    let transport_type = match &i.transport {
+        clawdesk_extensions::registry::TransportConfig::Stdio { .. } => "stdio",
+        clawdesk_extensions::registry::TransportConfig::Sse { .. } => "sse",
+        clawdesk_extensions::registry::TransportConfig::DirectApi { .. } => "api",
+    };
+    IntegrationInfo {
+        name: i.name.clone(),
+        description: i.description.clone(),
+        category: format!("{:?}", i.category),
+        icon: i.icon.clone().unwrap_or_default(),
+        enabled: i.enabled,
+        credentials_required: i
+            .credentials
+            .iter()
+            .map(|c| CredentialRequirementInfo {
+                name: c.name.clone(),
+                description: c.description.clone(),
+                env_var: c.env_var.clone(),
+                required: c.required,
+            })
+            .collect(),
+        has_oauth: i.oauth.is_some(),
+        health_check_url: i.health_check_url.clone(),
+        config_fields: i
+            .config_fields
+            .iter()
+            .map(|f| ConfigFieldInfo {
+                key: f.key.clone(),
+                label: f.label.clone(),
+                description: f.description.clone(),
+                field_type: format!("{:?}", f.field_type).to_lowercase(),
+                default: f.default.clone(),
+                required: f.required,
+                placeholder: f.placeholder.clone(),
+                validation: f.validation.clone(),
+                options: f
+                    .options
+                    .iter()
+                    .map(|o| ConfigFieldOptionInfo {
+                        label: o.label.clone(),
+                        value: o.value.clone(),
+                    })
+                    .collect(),
+                group: f.group.clone(),
+            })
+            .collect(),
+        config_values,
+        transport_type: transport_type.to_string(),
+    }
+}
+
 /// List all available integrations (bundled + user-defined).
 #[tauri::command]
 pub async fn list_integrations(
@@ -83,24 +166,9 @@ pub async fn list_integrations(
     let integrations = registry.list();
     Ok(integrations
         .iter()
-        .map(|i| IntegrationInfo {
-            name: i.name.clone(),
-            description: i.description.clone(),
-            category: format!("{:?}", i.category),
-            icon: i.icon.clone().unwrap_or_default(),
-            enabled: i.enabled,
-            credentials_required: i
-                .credentials
-                .iter()
-                .map(|c| CredentialRequirementInfo {
-                    name: c.name.clone(),
-                    description: c.description.clone(),
-                    env_var: c.env_var.clone(),
-                    required: c.required,
-                })
-                .collect(),
-            has_oauth: i.oauth.is_some(),
-            health_check_url: i.health_check_url.clone(),
+        .map(|i| {
+            let config_values = registry.get_config(&i.name).unwrap_or_default();
+            integration_to_info(i, config_values)
         })
         .collect())
 }
@@ -115,25 +183,8 @@ pub async fn get_integration_detail(
     let integration = registry
         .get(&name)
         .ok_or_else(|| format!("Integration '{}' not found", name))?;
-    Ok(IntegrationInfo {
-        name: integration.name.clone(),
-        description: integration.description.clone(),
-        category: format!("{:?}", integration.category),
-        icon: integration.icon.clone().unwrap_or_default(),
-        enabled: integration.enabled,
-        credentials_required: integration
-            .credentials
-            .iter()
-            .map(|c| CredentialRequirementInfo {
-                name: c.name.clone(),
-                description: c.description.clone(),
-                env_var: c.env_var.clone(),
-                required: c.required,
-            })
-            .collect(),
-        has_oauth: integration.oauth.is_some(),
-        health_check_url: integration.health_check_url.clone(),
-    })
+    let config_values = registry.get_config(&name).unwrap_or_default();
+    Ok(integration_to_info(&integration, config_values))
 }
 
 /// List integration categories with counts.
@@ -260,6 +311,139 @@ pub async fn get_integration_stats(
         "enabled": enabled.len(),
         "disabled": registry.count() - enabled.len(),
     }))
+}
+
+// ── Extension Configuration Commands ──────────────────────────
+
+/// Get the current configuration values for an extension.
+#[tauri::command]
+pub async fn get_extension_config(
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, String>, String> {
+    let registry = state.integration_registry.read().await;
+    Ok(registry.get_config(&name).unwrap_or_default())
+}
+
+/// Save configuration values for an extension.
+///
+/// Validates against the integration's config schema, persists to SochDB,
+/// and updates the in-memory registry. If the integration is currently
+/// enabled with an MCP transport, reconnects with the new config.
+#[tauri::command]
+pub async fn save_extension_config(
+    name: String,
+    values: HashMap<String, String>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    // 1. Update in-memory config (schema-validated)
+    {
+        let registry = state.integration_registry.read().await;
+        registry
+            .set_config(&name, values.clone())
+            .map_err(|e| format!("{:?}", e))?;
+    }
+
+    // 2. Persist to SochDB
+    persist_extension_config(&state, &name).await;
+
+    // 3. If enabled + MCP, reconnect with new config
+    let integration = {
+        let registry = state.integration_registry.read().await;
+        registry.get(&name)
+    };
+    if let Some(ref integ) = integration {
+        if integ.enabled && integ.is_mcp_connectable() {
+            // Disconnect old, connect new
+            let mcp = state.mcp_client.read().await;
+            let _ = mcp.disconnect(&name).await;
+            drop(mcp);
+            if let Err(e) = connect_mcp_for_integration(&state, integ).await {
+                tracing::warn!(
+                    name = %name, error = %e,
+                    "MCP reconnect failed after config change"
+                );
+            }
+        }
+    }
+
+    tracing::info!(name = %name, "extension config saved");
+    Ok(true)
+}
+
+/// Validate an extension's configuration.
+///
+/// Returns the list of missing required field keys (empty = valid).
+#[tauri::command]
+pub async fn validate_extension_config(
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let registry = state.integration_registry.read().await;
+    registry.validate_config(&name).map_err(|e| format!("{:?}", e))
+}
+
+/// Store a credential for a specific extension (combines name + vault key).
+///
+/// Uses the pattern `{integration_name}_{credential_name}` as the vault key,
+/// matching what `resolve_credentials()` expects.
+#[tauri::command]
+pub async fn store_extension_credential(
+    integration_name: String,
+    credential_name: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let vault_key = format!("{}_{}", integration_name, credential_name);
+    let vault = state.credential_vault.read().await;
+    vault
+        .store(&vault_key, &value)
+        .await
+        .map_err(|e| format!("{:?}", e))?;
+    tracing::info!(
+        integration = %integration_name,
+        credential = %credential_name,
+        "stored extension credential"
+    );
+    Ok(true)
+}
+
+/// Check which credentials for an extension are already stored in the vault.
+///
+/// Returns a map of credential_name → true/false.
+#[tauri::command]
+pub async fn check_extension_credentials(
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, bool>, String> {
+    let registry = state.integration_registry.read().await;
+    let integration = registry
+        .get(&name)
+        .ok_or_else(|| format!("Integration '{}' not found", name))?;
+
+    let mut result = HashMap::new();
+    let vault = state.credential_vault.read().await;
+    let vault_unlocked = vault.is_unlocked().await;
+
+    for cred in &integration.credentials {
+        let mut found = false;
+        // Check env var first
+        if let Some(ref env_var) = cred.env_var {
+            if std::env::var(env_var).is_ok() {
+                found = true;
+            }
+        }
+        // Check vault
+        if !found && vault_unlocked {
+            let vault_key = format!("{}_{}", name, cred.name);
+            if let Ok(Some(_)) = vault.get(&vault_key).await {
+                found = true;
+            }
+        }
+        result.insert(cred.name.clone(), found);
+    }
+
+    Ok(result)
 }
 
 // ── Credential Vault Commands ─────────────────────────────────
@@ -621,13 +805,69 @@ pub(crate) fn restore_enabled_state(
     }
 }
 
-/// Convert an extension `Integration` to an MCP `McpServerConfig` so the
-/// MCP client can connect to it.
-fn integration_to_mcp_config(
+/// SochDB key prefix for per-extension configuration.
+const EXTENSIONS_CONFIG_PREFIX: &str = "extensions/config/";
+
+/// Persist a single extension's configuration to SochDB.
+async fn persist_extension_config(state: &AppState, name: &str) {
+    let config = {
+        let registry = state.integration_registry.read().await;
+        registry.get_config(name).unwrap_or_default()
+    };
+    let key = format!("{}{}", EXTENSIONS_CONFIG_PREFIX, name);
+    match serde_json::to_vec(&config) {
+        Ok(bytes) => {
+            if let Err(e) = state.soch_store.put_durable(&key, &bytes) {
+                tracing::warn!(name, error = %e, "failed to persist extension config");
+            } else {
+                tracing::debug!(name, "persisted extension config");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(name, error = %e, "failed to serialize extension config");
+        }
+    }
+}
+
+/// Restore all persisted extension configs from SochDB into the registry.
+///
+/// Called once during app startup (after `restore_enabled_state()`).
+pub(crate) fn restore_extension_configs(
+    registry: &clawdesk_extensions::IntegrationRegistry,
+    soch_store: &clawdesk_sochdb::SochStore,
+) {
+    // Iterate all integrations and check for stored config
+    let names: Vec<String> = registry.list().iter().map(|i| i.name.clone()).collect();
+    let mut restored = 0;
+    for name in &names {
+        let key = format!("{}{}", EXTENSIONS_CONFIG_PREFIX, name);
+        if let Ok(Some(bytes)) = soch_store.get(&key) {
+            if let Ok(config) = serde_json::from_slice::<HashMap<String, String>>(&bytes) {
+                if !config.is_empty() {
+                    if let Err(e) = registry.set_config(name, config) {
+                        tracing::warn!(name, error = %e, "failed to restore extension config");
+                    } else {
+                        restored += 1;
+                    }
+                }
+            }
+        }
+    }
+    if restored > 0 {
+        tracing::info!(count = restored, "restored extension configs from SochDB");
+    }
+}
+
+/// Convert a resolved `TransportConfig` to an MCP `McpServerConfig`.
+///
+/// Uses `IntegrationRegistry::resolve_transport()` to interpolate `${KEY}`
+/// placeholders from user config → vault credentials → env vars → defaults.
+fn resolved_transport_to_mcp_config(
     integration: &clawdesk_extensions::Integration,
+    resolved_transport: &clawdesk_extensions::registry::TransportConfig,
     credential_env: HashMap<String, String>,
 ) -> Option<clawdesk_mcp::McpServerConfig> {
-    let transport = match &integration.transport {
+    let transport = match resolved_transport {
         clawdesk_extensions::registry::TransportConfig::Stdio { command, args } => {
             clawdesk_mcp::McpTransportConfig::Stdio {
                 command: command.clone(),
@@ -651,11 +891,12 @@ fn integration_to_mcp_config(
     })
 }
 
-/// Resolve credentials for an integration from environment + vault.
+/// Resolve credentials for an integration from environment + vault + user config.
 ///
 /// For each `CredentialRequirement` with an `env_var`, check:
-/// 1. Process environment (std::env::var)
-/// 2. Vault (if unlocked)
+/// 1. User-configured values (stored via `save_extension_config`)
+/// 2. Process environment (std::env::var)
+/// 3. Vault (if unlocked)
 ///
 /// Returns a map of env_var_name → value for all resolved credentials.
 async fn resolve_credentials(
@@ -663,14 +904,28 @@ async fn resolve_credentials(
     state: &AppState,
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
+
+    // Load user config for this integration
+    let user_config = {
+        let registry = state.integration_registry.read().await;
+        registry.get_config(&integration.name).unwrap_or_default()
+    };
+
     for cred in &integration.credentials {
         if let Some(ref env_var) = cred.env_var {
-            // 1. Check process environment first
+            // 1. Check user config first (key = env_var or credential name)
+            if let Some(val) = user_config.get(env_var).or_else(|| user_config.get(&cred.name)) {
+                if !val.is_empty() {
+                    env.insert(env_var.clone(), val.clone());
+                    continue;
+                }
+            }
+            // 2. Check process environment
             if let Ok(val) = std::env::var(env_var) {
                 env.insert(env_var.clone(), val);
                 continue;
             }
-            // 2. Check vault
+            // 3. Check vault
             let vault_key = format!("{}_{}", integration.name, cred.name);
             let vault = state.credential_vault.read().await;
             if vault.is_unlocked().await {
@@ -684,12 +939,23 @@ async fn resolve_credentials(
 }
 
 /// Connect an integration's MCP server (spawn process + handshake + tool discovery).
+///
+/// Uses `resolve_transport` for `${KEY}` variable interpolation.
 async fn connect_mcp_for_integration(
     state: &AppState,
     integration: &clawdesk_extensions::Integration,
 ) -> Result<(), String> {
     let cred_env = resolve_credentials(integration, state).await;
-    let config = integration_to_mcp_config(integration, cred_env)
+
+    // Resolve transport with variable interpolation
+    let resolved_transport = {
+        let registry = state.integration_registry.read().await;
+        registry.resolve_transport(&integration.name, &cred_env)
+    };
+    let resolved = resolved_transport
+        .ok_or_else(|| format!("Integration '{}' not found for transport resolution", integration.name))?;
+
+    let config = resolved_transport_to_mcp_config(integration, &resolved, cred_env)
         .ok_or_else(|| format!("Integration '{}' has no MCP transport", integration.name))?;
 
     let mcp = state.mcp_client.read().await;

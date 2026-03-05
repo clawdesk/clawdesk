@@ -10,6 +10,7 @@ import type {
   HealthResponse,
   DesktopAgent,
   CreateAgentRequest,
+  UpdateAgentRequest,
   ImportResult,
   SendMessageResponse,
   SessionSummary,
@@ -632,6 +633,10 @@ export async function listAgents(): Promise<DesktopAgent[]> {
   return invoke<DesktopAgent[]>("list_agents");
 }
 
+export async function updateAgent(agentId: string, request: UpdateAgentRequest): Promise<DesktopAgent> {
+  return invoke<DesktopAgent>("update_agent", { agentId, request });
+}
+
 export async function deleteAgent(agentId: string): Promise<boolean> {
   return invoke<boolean>("delete_agent", { agentId });
 }
@@ -733,15 +738,54 @@ export async function createPipeline(
   name: string,
   description: string,
   steps: PipelineNodeDescriptor[],
-  edges: [number, number][]
+  edges: [number, number][],
+  schedule?: string | null
 ): Promise<PipelineDescriptor> {
   return invoke<PipelineDescriptor>("create_pipeline", {
-    request: { name, description, steps, edges },
+    request: { name, description, steps, edges, schedule: schedule ?? null },
   });
+}
+
+export async function updatePipeline(
+  pipelineId: string,
+  name: string,
+  description: string,
+  steps: PipelineNodeDescriptor[],
+  edges: [number, number][],
+  schedule?: string | null
+): Promise<PipelineDescriptor> {
+  return invoke<PipelineDescriptor>("update_pipeline", {
+    pipelineId,
+    request: { name, description, steps, edges, schedule: schedule ?? null },
+  });
+}
+
+export async function deletePipeline(pipelineId: string): Promise<boolean> {
+  return invoke<boolean>("delete_pipeline", { pipelineId });
 }
 
 export async function runPipeline(pipelineId: string): Promise<PipelineRunResult> {
   return invoke<PipelineRunResult>("run_pipeline", { pipelineId });
+}
+
+export async function getPipelineRuns(pipelineId: string): Promise<any[]> {
+  return invoke<any[]>("get_pipeline_runs", { pipelineId });
+}
+
+// ══════════════════════════════════════════════════════════════
+// Cron / Scheduled Tasks
+// ══════════════════════════════════════════════════════════════
+
+export async function listCronTasks(): Promise<any[]> {
+  return invoke<any[]>("list_cron_tasks");
+}
+
+export async function triggerCronTask(taskId: string): Promise<any> {
+  return invoke<any>("trigger_cron_task", { taskId });
+}
+
+export async function getCronLogs(limit?: number): Promise<any[]> {
+  return invoke<any[]>("get_cron_logs", { limit: limit ?? 50 });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1462,6 +1506,75 @@ export async function sochdbSync(): Promise<void> {
 }
 
 // ══════════════════════════════════════════════════════════════
+// SochDB — Storage Health + Lifecycle + Session Indexes
+// ══════════════════════════════════════════════════════════════
+
+export interface StoreHealth {
+  name: string;
+  status: "healthy" | "ephemeral" | "failed";
+  path: string | null;
+  key_count: number | null;
+  detail: string;
+}
+
+export interface StorageHealthResponse {
+  overall: "healthy" | "ephemeral" | "failed";
+  stores: StoreHealth[];
+  any_ephemeral: boolean;
+  recommendations: string[];
+  checked_at: string;
+}
+
+export interface LifecycleReport {
+  entity_id: string;
+  entity_type: string;
+  total_deleted: number;
+  stores_touched: number;
+  warnings: string[];
+  duration_us: number;
+}
+
+/** Deep storage health check across all subsystems. */
+export async function storageHealth(): Promise<StorageHealthResponse> {
+  return invoke<StorageHealthResponse>("storage_health");
+}
+
+/** Cascade-delete a session and all related data. */
+export async function lifecycleDeleteSession(sessionId: string, agentId?: string): Promise<LifecycleReport> {
+  return invoke<LifecycleReport>("lifecycle_delete_session", { session_id: sessionId, agent_id: agentId ?? null });
+}
+
+/** Cascade-delete a thread and all related data. */
+export async function lifecycleDeleteThread(threadId: string): Promise<LifecycleReport> {
+  return invoke<LifecycleReport>("lifecycle_delete_thread", { thread_id: threadId });
+}
+
+/** Cascade-delete an agent and ALL related data. */
+export async function lifecycleDeleteAgent(agentId: string): Promise<LifecycleReport> {
+  return invoke<LifecycleReport>("lifecycle_delete_agent", { agent_id: agentId });
+}
+
+/** List sessions ordered by last activity. */
+export async function sessionsByActivity(limit?: number): Promise<string[]> {
+  return invoke<string[]>("sessions_by_activity", { limit: limit ?? null });
+}
+
+/** List sessions filtered by channel. */
+export async function sessionsByChannel(channel: string, limit?: number): Promise<string[]> {
+  return invoke<string[]>("sessions_by_channel", { channel, limit: limit ?? null });
+}
+
+/** List sessions filtered by agent. */
+export async function sessionsByAgent(agentId: string, limit?: number): Promise<string[]> {
+  return invoke<string[]>("sessions_by_agent", { agent_id: agentId, limit: limit ?? null });
+}
+
+/** Rebuild all session indexes from primary data. */
+export async function sessionsRebuildIndexes(): Promise<number> {
+  return invoke<number>("sessions_rebuild_indexes");
+}
+
+// ══════════════════════════════════════════════════════════════
 // Terminal — Shell command execution
 // ══════════════════════════════════════════════════════════════
 
@@ -1813,15 +1926,15 @@ export async function disconnectAllMcp(): Promise<boolean> {
 }
 
 // ══════════════════════════════════════════════════════════════
-// Extensions — Integration Registry + Vault + Health (19)
+// Extensions — Integration Registry + Config + Vault + Health (24)
 // ══════════════════════════════════════════════════════════════
 
 export async function listIntegrations(): Promise<IntegrationInfo[]> {
   if (isBrowserDev) {
     return [
-      { name: "github", description: "GitHub API", category: "DevTools", icon: "🐙", enabled: true, credentials_required: [{ name: "token", description: "Personal access token", env_var: "GITHUB_TOKEN", required: true }], has_oauth: true, health_check_url: "https://api.github.com" },
-      { name: "slack", description: "Slack workspace", category: "Communication", icon: "💼", enabled: false, credentials_required: [{ name: "bot_token", description: "Bot token", env_var: "SLACK_BOT_TOKEN", required: true }], has_oauth: true, health_check_url: "https://slack.com/api/api.test" },
-      { name: "jira", description: "Atlassian Jira", category: "Productivity", icon: "📋", enabled: false, credentials_required: [{ name: "api_token", description: "API token", env_var: "JIRA_API_TOKEN", required: true }], has_oauth: false, health_check_url: undefined },
+      { name: "github", description: "GitHub API", category: "DevTools", icon: "🐙", enabled: true, credentials_required: [{ name: "token", description: "Personal access token", env_var: "GITHUB_TOKEN", required: true }], has_oauth: true, health_check_url: "https://api.github.com", config_fields: [{ key: "GITHUB_API_URL", label: "API URL", description: "GitHub API endpoint", field_type: "url", default: "https://api.github.com", required: false, placeholder: "https://api.github.com", options: [], group: "Connection" }], config_values: {}, transport_type: "stdio" },
+      { name: "slack", description: "Slack workspace", category: "Communication", icon: "💼", enabled: false, credentials_required: [{ name: "bot_token", description: "Bot token", env_var: "SLACK_BOT_TOKEN", required: true }], has_oauth: true, health_check_url: "https://slack.com/api/api.test", config_fields: [], config_values: {}, transport_type: "stdio" },
+      { name: "jira", description: "Atlassian Jira", category: "Productivity", icon: "📋", enabled: false, credentials_required: [{ name: "api_token", description: "API token", env_var: "JIRA_API_TOKEN", required: true }], has_oauth: false, health_check_url: undefined, config_fields: [{ key: "JIRA_BASE_URL", label: "Jira URL", description: "Your Jira instance URL", field_type: "url", required: true, placeholder: "https://your-company.atlassian.net", options: [], group: "Connection" }], config_values: {}, transport_type: "api" },
     ];
   }
   return invoke<IntegrationInfo[]>("list_integrations");
@@ -1829,7 +1942,7 @@ export async function listIntegrations(): Promise<IntegrationInfo[]> {
 
 export async function getIntegrationDetail(name: string): Promise<IntegrationInfo> {
   if (isBrowserDev) {
-    return { name, description: `${name} integration`, category: "DevTools", icon: "🔌", enabled: false, credentials_required: [], has_oauth: false, health_check_url: undefined };
+    return { name, description: `${name} integration`, category: "DevTools", icon: "🔌", enabled: false, credentials_required: [], has_oauth: false, health_check_url: undefined, config_fields: [], config_values: {}, transport_type: "api" };
   }
   return invoke<IntegrationInfo>("get_integration_detail", { name });
 }
@@ -1861,6 +1974,33 @@ export async function disableIntegration(name: string): Promise<boolean> {
 export async function getIntegrationStats(): Promise<IntegrationStatsInfo> {
   if (isBrowserDev) return { total: 25, enabled: 3, disabled: 22 };
   return invoke<IntegrationStatsInfo>("get_integration_stats");
+}
+
+// ── Extension Configuration ──────────────────────────────────
+
+export async function getExtensionConfig(name: string): Promise<Record<string, string>> {
+  if (isBrowserDev) return {};
+  return invoke<Record<string, string>>("get_extension_config", { name });
+}
+
+export async function saveExtensionConfig(name: string, values: Record<string, string>): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("save_extension_config", { name, values });
+}
+
+export async function validateExtensionConfig(name: string): Promise<string[]> {
+  if (isBrowserDev) return [];
+  return invoke<string[]>("validate_extension_config", { name });
+}
+
+export async function storeExtensionCredential(integrationName: string, credentialName: string, value: string): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("store_extension_credential", { integrationName, credentialName, value });
+}
+
+export async function checkExtensionCredentials(name: string): Promise<Record<string, boolean>> {
+  if (isBrowserDev) return {};
+  return invoke<Record<string, boolean>>("check_extension_credentials", { name });
 }
 
 export async function vaultStatus(): Promise<VaultStatusInfo> {

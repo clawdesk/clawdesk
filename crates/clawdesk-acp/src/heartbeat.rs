@@ -264,22 +264,27 @@ impl HeartbeatMonitor {
             }
         }
 
-        // Check for health state change
-        let state = self.agents.get_mut(agent_id).unwrap();
-        if state.consecutive_failures >= self.config.max_consecutive_failures {
-            state.healthy = false;
-        }
+        // Check for health state change — use `if let` to avoid panic if
+        // the agent was concurrently deregistered between the match arms above
+        // and this point (TOCTOU guard).
+        if let Some(state) = self.agents.get_mut(agent_id) {
+            if state.consecutive_failures >= self.config.max_consecutive_failures {
+                state.healthy = false;
+            }
 
-        // Schedule next ping
-        state.next_ping = Instant::now() + self.config.interval;
+            // Schedule next ping
+            state.next_ping = Instant::now() + self.config.interval;
 
-        if was_healthy != state.healthy {
-            info!(
-                agent = agent_id,
-                healthy = state.healthy,
-                "agent health changed"
-            );
-            self.callback.on_health_change(agent_id, state.healthy);
+            if was_healthy != state.healthy {
+                info!(
+                    agent = agent_id,
+                    healthy = state.healthy,
+                    "agent health changed"
+                );
+                self.callback.on_health_change(agent_id, state.healthy);
+            }
+        } else {
+            warn!(agent = agent_id, "agent deregistered during health check cycle");
         }
     }
 

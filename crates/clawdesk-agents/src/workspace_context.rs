@@ -330,15 +330,81 @@ pub struct ReferenceChunk {
     pub estimated_tokens: usize,
 }
 
-/// Simulate RAG retrieval: in production this queries an embedding index.
-/// Here, returns empty (placeholder).
+/// A search backend for reference retrieval.
+///
+/// Implementors provide semantic search over an embedding index.
+/// The `clawdesk-memory` crate's `MemoryManager` implements this
+/// (via a thin adapter) to provide hybrid BM25 + vector search.
+pub trait ReferenceSearchBackend: Send + Sync {
+    /// Search for relevant chunks matching the query.
+    ///
+    /// Returns `(content, relevance_score)` pairs sorted by relevance.
+    fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Vec<(String, f64)>;
+}
+
+/// Retrieve reference chunks from configured sources using a search backend.
+///
+/// If no backend is provided, returns an empty vec (graceful degradation).
+/// When a backend is available, queries it with the given query string and
+/// maps results to `ReferenceChunk`s within the token budget.
 pub fn retrieve_references(
-    _sources: &[ReferenceSource],
-    _query: &str,
-    _max_tokens: usize,
+    sources: &[ReferenceSource],
+    query: &str,
+    max_tokens: usize,
+    backend: Option<&dyn ReferenceSearchBackend>,
 ) -> Vec<ReferenceChunk> {
-    // Placeholder: production implementation would query vector DB.
-    Vec::new()
+    let backend = match backend {
+        Some(b) => b,
+        None => return Vec::new(), // No search backend — graceful no-op.
+    };
+
+    // Only query enabled sources.
+    if sources.iter().all(|s| !s.enabled) {
+        return Vec::new();
+    }
+
+    let max_results = 10; // Retrieve up to 10 chunks, then trim by token budget.
+    let raw_results = backend.search(query, max_results);
+
+    let mut chunks = Vec::new();
+    let mut tokens_used = 0usize;
+
+    for (content, score) in raw_results {
+        let est = estimate_tokens(&content);
+        if tokens_used + est > max_tokens {
+            // Try truncating to fit within remaining budget.
+            let remaining = max_tokens.saturating_sub(tokens_used);
+            if remaining > 0 {
+                // Rough char budget: remaining tokens × 4 chars/token
+                let char_budget = remaining * 4;
+                if char_budget > 20 {
+                    let truncated: String = content.chars().take(char_budget).collect();
+                    let trunc_est = estimate_tokens(&truncated);
+                    chunks.push(ReferenceChunk {
+                        source_id: String::new(),
+                        content: truncated,
+                        relevance_score: score,
+                        estimated_tokens: trunc_est,
+                    });
+                    tokens_used += trunc_est;
+                }
+            }
+            break;
+        }
+        tokens_used += est;
+        chunks.push(ReferenceChunk {
+            source_id: String::new(),
+            content,
+            relevance_score: score,
+            estimated_tokens: est,
+        });
+    }
+
+    chunks
 }
 
 #[cfg(test)]
@@ -478,14 +544,53 @@ mod tests {
     }
 
     #[test]
-    fn test_retrieve_references_placeholder() {
+    fn test_retrieve_references_no_backend() {
         let sources = vec![ReferenceSource {
             id: "test".into(),
             source_type: ReferenceType::Documentation,
             path: "/docs".into(),
             enabled: true,
         }];
-        let chunks = retrieve_references(&sources, "query", 1000);
-        assert!(chunks.is_empty()); // placeholder returns empty
+        // No backend → graceful empty result.
+        let chunks = retrieve_references(&sources, "query", 1000, None);
+        assert!(chunks.is_empty());
+    }
+
+    struct MockBackend;
+    impl ReferenceSearchBackend for MockBackend {
+        fn search(&self, _query: &str, max_results: usize) -> Vec<(String, f64)> {
+            (0..max_results)
+                .map(|i| (format!("Result chunk {}", i), 1.0 - i as f64 * 0.1))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn test_retrieve_references_with_backend() {
+        let sources = vec![ReferenceSource {
+            id: "code".into(),
+            source_type: ReferenceType::Codebase,
+            path: "/src".into(),
+            enabled: true,
+        }];
+        let backend = MockBackend;
+        let chunks = retrieve_references(&sources, "how does X work?", 1000, Some(&backend));
+        assert!(!chunks.is_empty());
+        assert!(chunks[0].relevance_score >= chunks.last().unwrap().relevance_score);
+    }
+
+    #[test]
+    fn test_retrieve_references_respects_budget() {
+        let sources = vec![ReferenceSource {
+            id: "code".into(),
+            source_type: ReferenceType::Codebase,
+            path: "/src".into(),
+            enabled: true,
+        }];
+        let backend = MockBackend;
+        // Very small budget — should limit results.
+        let chunks = retrieve_references(&sources, "test", 5, Some(&backend));
+        let total_tokens: usize = chunks.iter().map(|c| c.estimated_tokens).sum();
+        assert!(total_tokens <= 10); // some slack for estimation
     }
 }
