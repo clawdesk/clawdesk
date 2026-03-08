@@ -28,6 +28,9 @@ export function AgentsPage({
   const [createMode, setCreateMode] = useState<CreateMode | null>(null);
   const [editingAgent, setEditingAgent] = useState<DesktopAgent | null>(null);
   const [collapsedTeams, setCollapsedTeams] = useState<Set<string>>(new Set());
+  const soloCount = agents.filter((a) => !a.team_id).length;
+  const readyCount = agents.filter((a) => a.status === "ready" || a.status === "active").length;
+  const teamCount = new Set(agents.filter((a) => a.team_id).map((a) => a.team_id)).size;
 
   const toggleTeam = (teamId: string) =>
     setCollapsedTeams((prev) => {
@@ -55,6 +58,19 @@ export function AgentsPage({
       }
     >
       <div className="agents-page-content">
+        <section className="agents-hero">
+          <div className="agents-hero__intro">
+            <span className="agents-hero__eyebrow">Agent roster</span>
+            <h2>Shape your operator lineup, specialist teams, and verified identities in one place.</h2>
+            <p>{agents.length} total agents, {soloCount} solo operators, {teamCount} teams, and {readyCount} agents currently ready.</p>
+          </div>
+          <div className="agents-hero__stats">
+            <AgentSummaryStat label="Total" value={agents.length.toString()} meta="Configured agents" />
+            <AgentSummaryStat label="Teams" value={teamCount.toString()} meta="Collaborative groups" />
+            <AgentSummaryStat label="Ready" value={readyCount.toString()} meta="Available for work" />
+          </div>
+        </section>
+
         {(() => {
           const soloAgents = agents.filter((a) => !a.team_id);
           const teamMap = new Map<string, DesktopAgent[]>();
@@ -111,9 +127,18 @@ export function AgentsPage({
             <>
               {/* Solo agents */}
               {soloAgents.length > 0 && (
-                <div className="agent-list">
+                <section className="agents-section">
+                  <div className="agents-section-head">
+                    <div>
+                      <span className="agents-section-kicker">Solo operators</span>
+                      <h2>Individual agents</h2>
+                    </div>
+                    <div className="agents-section-badge">{soloAgents.length}</div>
+                  </div>
+                <div className="agent-list agent-list--modern">
                   {soloAgents.map((a) => renderAgentCard(a))}
                 </div>
+                </section>
               )}
 
               {/* Teams */}
@@ -146,7 +171,7 @@ export function AgentsPage({
               })}
 
               {agents.length === 0 && (
-                <div className="empty-state-action" style={{ padding: 24, textAlign: "center" }}>
+                <div className="empty-state-action agents-empty-state" style={{ padding: 24, textAlign: "center" }}>
                   <p style={{ marginBottom: 12 }}>No agents created yet. Create one to start chatting.</p>
                   <button className="btn primary" onClick={openCreate}>
                     Create your first agent
@@ -225,5 +250,15 @@ export function AgentsPage({
         />
       )}
     </PageLayout>
+  );
+}
+
+function AgentSummaryStat({ label, value, meta }: { label: string; value: string; meta: string }) {
+  return (
+    <div className="agents-hero-stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{meta}</small>
+    </div>
   );
 }

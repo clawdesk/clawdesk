@@ -199,7 +199,7 @@ export function AppShell({
           style={dragStyle}
           onMouseDown={handleTopBarMouseDown}
         >
-          {/* ── LEFT: Status + Brand ── */}
+          {/* ── LEFT: Status + Agent ── */}
           <div className="tb-left" style={noDragStyle}>
             <div className="tb-status-wrap">
               <button
@@ -245,13 +245,6 @@ export function AppShell({
               )}
             </div>
 
-            <button className="tb-icon-btn" title="ClawDesk" aria-label="ClawDesk">
-              <img src="/logo.svg" alt="" className="tb-logo" />
-            </button>
-          </div>
-
-          {/* ── CENTER: Agent Selector (prominent) ── */}
-          <div className="tb-center" style={noDragStyle}>
             {agents && agents.length > 0 && onSelectAgent ? (
               <div className="top-agent-selector" data-no-drag>
                 <button
@@ -372,6 +365,8 @@ export function AppShell({
               <span className="tb-agent-placeholder">No agents</span>
             )}
           </div>
+
+          <div className="tb-center" aria-hidden="true" />
 
           {/* ── RIGHT: Toggles + Search + Actions ── */}
           <div className="tb-right" style={noDragStyle}>

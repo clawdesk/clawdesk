@@ -41,7 +41,7 @@ import { AutomationsPage } from "./pages/AutomationsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { LogsPage } from "./pages/LogsPage";
 import { A2APage } from "./pages/A2APage";
-import { RuntimePage } from "./pages/RuntimePage";
+
 import { ExtensionsPage } from "./pages/ExtensionsPage";
 import { McpPage } from "./pages/McpPage";
 import { AgentsPage } from "./pages/AgentsPage";
@@ -53,7 +53,7 @@ import { ExecutionProgress, type ExecutionEvent, type EventKind } from "./compon
 import { AgentJourneyWizard } from "./components/AgentJourneyWizard";
 import { TeamBuilderCanvas } from "./components/TeamBuilderCanvas";
 
-type NavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "files" | "settings" | "logs" | "extensions" | "mcp" | "local-models" | "documents";
+type NavKey = "chat" | "overview" | "a2a" | "skills" | "automations" | "agents" | "channels" | "files" | "settings" | "logs" | "extensions" | "mcp" | "local-models" | "documents";
 type RiskLevel = "low" | "medium" | "high";
 type StatusLevel = "ok" | "warn" | "error";
 type InspectorTab = "plan" | "approvals" | "proof" | "undo" | "trace" | "memory" | "graph";
@@ -271,12 +271,11 @@ const NAV_ITEMS: { key: NavKey; label: string; shortcut: string; icon: string }[
   { key: "chat", label: "Chat", shortcut: "1", icon: "ask" },
   { key: "overview", label: "Overview", shortcut: "2", icon: "bar-chart" },
   { key: "a2a", label: "A2A Directory", shortcut: "3", icon: "users" },
-  { key: "runtime", label: "Runtime", shortcut: "4", icon: "activity" },
-  { key: "skills", label: "Skills", shortcut: "5", icon: "library" },
-  { key: "automations", label: "Scheduled Jobs", shortcut: "6", icon: "clock" },
-  { key: "agents", label: "Agents", shortcut: "7", icon: "bot" },
-  { key: "channels", label: "Channels", shortcut: "8", icon: "globe" },
-  { key: "extensions", label: "Extensions", shortcut: "9", icon: "puzzle" },
+  { key: "skills", label: "Skills", shortcut: "4", icon: "library" },
+  { key: "automations", label: "Scheduled Jobs", shortcut: "5", icon: "clock" },
+  { key: "agents", label: "Agents", shortcut: "6", icon: "bot" },
+  { key: "channels", label: "Channels", shortcut: "7", icon: "globe" },
+  { key: "extensions", label: "Extensions", shortcut: "8", icon: "puzzle" },
   { key: "mcp", label: "MCP", shortcut: "", icon: "plug" },
   { key: "files", label: "Files", shortcut: "", icon: "folder" },
   { key: "settings", label: "Settings", shortcut: "", icon: "settings" },
@@ -287,11 +286,11 @@ const NAV_ITEMS: { key: NavKey; label: string; shortcut: string; icon: string }[
 
 const NAV_GROUPS: ShellNavGroup[] = [
   { label: "", items: [NAV_ITEMS[0], NAV_ITEMS[1]] },
-  { label: "Cluster", items: [NAV_ITEMS[2], NAV_ITEMS[3]] },
-  { label: "Build", items: [NAV_ITEMS[4], NAV_ITEMS[5]] },
-  { label: "Workspace", items: [NAV_ITEMS[6], NAV_ITEMS[7], NAV_ITEMS[10]] },
-  { label: "Connect", items: [NAV_ITEMS[8], NAV_ITEMS[9]] },
-  { label: "System", items: [NAV_ITEMS[11], NAV_ITEMS[12], NAV_ITEMS[13]] },
+  { label: "Cluster", items: [NAV_ITEMS[2]] },
+  { label: "Build", items: [NAV_ITEMS[3], NAV_ITEMS[4]] },
+  { label: "Workspace", items: [NAV_ITEMS[5], NAV_ITEMS[6], NAV_ITEMS[9]] },
+  { label: "Connect", items: [NAV_ITEMS[7], NAV_ITEMS[8]] },
+  { label: "System", items: [NAV_ITEMS[10], NAV_ITEMS[11], NAV_ITEMS[12]] },
 ];
 
 const INITIAL_THREADS: ThreadItem[] = [];
@@ -4302,10 +4301,6 @@ export default function App() {
 
         {activeNav === "a2a" && (
           <A2APage pushToast={pushToast} />
-        )}
-
-        {activeNav === "runtime" && (
-          <RuntimePage pushToast={pushToast} agents={backendAgents} />
         )}
 
         {activeNav === "skills" && (

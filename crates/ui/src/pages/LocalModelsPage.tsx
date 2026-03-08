@@ -1,15 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as api from "../api";
-import type {
-  LocalModelsStatus,
-  ModelFit,
-  RunningModel,
-  DownloadedModel,
-  SystemSpecs,
-} from "../api";
-
-/* ────────────────────────── helpers ──────────────────────────── */
+import type { LocalModelsStatus, ModelFit, RunningModel } from "../api";
+import { PageLayout } from "../components/PageLayout";
+import { Icon } from "../components/Icon";
 
 const FIT_COLORS: Record<string, string> = {
   perfect: "#22c55e",
@@ -33,16 +27,6 @@ const STATE_COLORS: Record<string, string> = {
   failed: "#ef4444",
 };
 
-function fmtGb(n: number): string {
-  return n < 1 ? `${(n * 1024).toFixed(0)} MB` : `${n.toFixed(1)} GB`;
-}
-
-function fmtTps(n: number): string {
-  return `${n.toFixed(1)} tok/s`;
-}
-
-/* ────────────────────────── types ────────────────────────────── */
-
 interface DownloadProgress {
   model_name: string;
   percent: number;
@@ -54,29 +38,49 @@ interface Props {
   pushToast: (text: string) => void;
 }
 
-/* ────────────────────────── component ───────────────────────── */
+function fmtGb(n: number): string {
+  return n < 1 ? `${(n * 1024).toFixed(0)} MB` : `${n.toFixed(1)} GB`;
+}
+
+function fmtTps(n: number): string {
+  return `${n.toFixed(1)} tok/s`;
+}
+
+function formatStateLabel(state: RunningModel["state"]): string {
+  return state.charAt(0).toUpperCase() + state.slice(1);
+}
+
+function findMatchingRunningModel(name: string, runningModels: RunningModel[]): RunningModel | undefined {
+  const normalizedName = name.toLowerCase();
+  return runningModels.find((running) => {
+    const runningName = running.name.toLowerCase();
+    return runningName.includes(normalizedName) || normalizedName.includes(runningName);
+  });
+}
+
+function isModelActive(state?: RunningModel["state"]): boolean {
+  return state === "ready" || state === "starting" || state === "stopping";
+}
+
+function pluralize(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
 
 export function LocalModelsPage({ pushToast }: Props) {
   const [status, setStatus] = useState<LocalModelsStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<
-    "recommended" | "downloaded" | "running"
-  >("recommended");
-  const [downloads, setDownloads] = useState<Record<string, DownloadProgress>>(
-    {}
-  );
+  const [activeTab, setActiveTab] = useState<"recommended" | "downloaded" | "running">("recommended");
+  const [downloads, setDownloads] = useState<Record<string, DownloadProgress>>({});
   const [filter, setFilter] = useState<"all" | "runnable" | "perfect">("all");
   const [serverPath, setServerPath] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [importPath, setImportPath] = useState("");
   const [ttlSecs, setTtlSecs] = useState(0);
 
-  /* ── load status ─────────────────────────────────────────── */
-
   const refresh = useCallback(async () => {
     try {
-      const s = await api.localModelsStatus();
-      setStatus(s);
+      const nextStatus = await api.localModelsStatus();
+      setStatus(nextStatus);
     } catch (e) {
       console.error("Failed to load local models status:", e);
     } finally {
@@ -87,8 +91,6 @@ export function LocalModelsPage({ pushToast }: Props) {
   useEffect(() => {
     refresh();
   }, [refresh]);
-
-  /* ── listen for download progress ────────────────────────── */
 
   useEffect(() => {
     const unlisten = listen<any>("local-model-download", (event) => {
@@ -122,11 +124,9 @@ export function LocalModelsPage({ pushToast }: Props) {
     });
 
     return () => {
-      unlisten.then((f) => f());
+      unlisten.then((fn) => fn());
     };
   }, [pushToast, refresh]);
-
-  /* ── actions ─────────────────────────────────────────────── */
 
   const handleDownload = async (model: ModelFit) => {
     try {
@@ -199,418 +199,423 @@ export function LocalModelsPage({ pushToast }: Props) {
     }
   };
 
-  /* ── filter models ───────────────────────────────────────── */
-
-  const filteredModels = (status?.recommended_models ?? []).filter((m) => {
+  const filteredModels = (status?.recommended_models ?? []).filter((model) => {
     if (filter === "all") return true;
-    if (filter === "runnable") return m.fit_level !== "too_tight";
-    if (filter === "perfect") return m.fit_level === "perfect";
+    if (filter === "runnable") return model.fit_level !== "too_tight";
+    if (filter === "perfect") return model.fit_level === "perfect";
     return true;
   });
 
-  /* ── render ──────────────────────────────────────────────── */
+  const sys = status?.system;
+  const downloadEntries = Object.values(downloads);
+  const recommendedCount = status?.recommended_models.length ?? 0;
+  const runnableCount = (status?.recommended_models ?? []).filter((model) => model.fit_level !== "too_tight").length;
+  const perfectCount = (status?.recommended_models ?? []).filter((model) => model.fit_level === "perfect").length;
+  const downloadedCount = status?.downloaded_models.length ?? 0;
+  const runningCount = status?.running_models.length ?? 0;
+  const readyCount = (status?.running_models ?? []).filter((model) => model.state === "ready").length;
+  const totalDownloadedSize = (status?.downloaded_models ?? []).reduce((sum, model) => sum + model.size_gb, 0);
 
   if (loading) {
     return (
-      <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100%", color: "var(--text-secondary)" }}>
-        Detecting hardware...
+      <div className="local-models-loading">
+        <Icon name="loader" className="local-models-loading__icon" />
+        <span>Detecting hardware...</span>
       </div>
     );
   }
 
-  const sys = status?.system;
-
   return (
-    <div style={{ height: "100%", overflow: "auto", padding: "24px 32px" }}>
-      {/* ── Header ─────────────────────────────────────────── */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, color: "var(--text-primary)" }}>
-            Local Models
-          </h1>
-          <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--text-secondary)" }}>
-            Run LLMs locally — no Ollama or LM Studio needed
-          </p>
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
+    <PageLayout
+      title="Local Models"
+      subtitle="Run LLMs locally without Ollama or LM Studio"
+      actions={
+        <div className="local-models-header-actions">
           <button
-            onClick={() => setShowSettings(!showSettings)}
-            style={btnStyle("secondary")}
+            className={`local-models-button local-models-button--secondary ${showSettings ? "is-active" : ""}`}
+            onClick={() => setShowSettings((prev) => !prev)}
           >
-            Settings
+            <Icon name="settings" />
+            <span>Settings</span>
           </button>
-          <button onClick={refresh} style={btnStyle("secondary")}>
-            Refresh
+          <button className="local-models-button local-models-button--secondary" onClick={refresh}>
+            <Icon name="refresh" />
+            <span>Refresh</span>
           </button>
         </div>
-      </div>
-
-      {/* ── Settings Panel ─────────────────────────────────── */}
-      {showSettings && (
-        <div style={{ ...cardStyle, marginBottom: 16 }}>
-          <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600 }}>Settings</h3>
-
-          {/* llama-server path */}
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-            <label style={{ fontSize: 13, color: "var(--text-secondary)", minWidth: 120 }}>
-              llama-server path:
-            </label>
-            <input
-              type="text"
-              value={serverPath}
-              onChange={(e) => setServerPath(e.target.value)}
-              placeholder="/usr/local/bin/llama-server"
-              style={inputStyle}
-            />
-            <button onClick={handleSetServerPath} style={btnStyle("primary")}>
-              Save
-            </button>
+      }
+    >
+      <div className="local-models-page">
+        <section className="local-models-hero">
+          <div className="local-models-hero__copy">
+            <div className={`local-models-hero__status ${status?.llama_server_available ? "is-ready" : "is-missing"}`}>
+              <Icon name={status?.llama_server_available ? "check" : "alert"} />
+              <span>{status?.llama_server_available ? "Engine ready" : "llama-server missing"}</span>
+            </div>
+            <h2 className="local-models-hero__title">Private inference tuned to this machine.</h2>
+            <p className="local-models-hero__body">
+              Browse models ranked for your hardware, keep a local library, and launch runtime servers without leaving
+              ClawDesk.
+            </p>
+            <div className="local-models-hero__chips">
+              <span className="local-models-chip">{sys?.backend?.toUpperCase() ?? "UNKNOWN"} backend</span>
+              <span className="local-models-chip">{sys?.has_gpu ? sys?.gpu_name ?? "GPU" : "CPU inference"}</span>
+              <span className="local-models-chip">{fmtGb(sys?.available_ram_gb ?? 0)} free RAM</span>
+            </div>
           </div>
 
-          {/* Import GGUF */}
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-            <label style={{ fontSize: 13, color: "var(--text-secondary)", minWidth: 120 }}>
-              Import GGUF:
-            </label>
-            <input
-              type="text"
-              value={importPath}
-              onChange={(e) => setImportPath(e.target.value)}
-              placeholder="/path/to/model.gguf"
-              style={inputStyle}
-            />
-            <button onClick={handleImport} style={btnStyle("primary")}>
-              Import
-            </button>
+          <div className="local-models-hero__stats">
+            <HeroStat label="Recommended" value={recommendedCount.toString()} sub={`${runnableCount} runnable`} accent />
+            <HeroStat label="Downloaded" value={downloadedCount.toString()} sub={fmtGb(totalDownloadedSize)} />
+            <HeroStat label="Live" value={readyCount.toString()} sub={pluralize(runningCount, "process")} />
+            <HeroStat label="Perfect Fits" value={perfectCount.toString()} sub="Best overall picks" />
           </div>
+        </section>
 
-          {/* Auto-unload TTL */}
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-            <label style={{ fontSize: 13, color: "var(--text-secondary)", minWidth: 120 }}>
-              Auto-unload (sec):
-            </label>
-            <input
-              type="number"
-              value={ttlSecs}
-              min={0}
-              step={60}
-              onChange={(e) => setTtlSecs(Number(e.target.value))}
-              placeholder="0 = never"
-              style={{ ...inputStyle, maxWidth: 120 }}
-            />
-            <button onClick={handleSetTtl} style={btnStyle("primary")}>
-              Set
-            </button>
-            <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
-              {ttlSecs === 0 ? "disabled" : `${Math.floor(ttlSecs / 60)}m ${ttlSecs % 60}s idle`}
-            </span>
-          </div>
-
-          <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
-            Models directory: {status?.models_dir ?? "~/.clawdesk/models"}
-          </div>
-        </div>
-      )}
-
-      {/* ── System Info ────────────────────────────────────── */}
-      {sys && (
-        <div style={{ ...cardStyle, marginBottom: 20 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 16 }}>
-            <InfoTile
-              label="CPU"
-              value={sys.cpu_name}
-              sub={`${sys.total_cpu_cores} cores`}
-            />
-            <InfoTile
-              label="RAM"
-              value={fmtGb(sys.total_ram_gb)}
-              sub={`${fmtGb(sys.available_ram_gb)} available`}
-            />
-            <InfoTile
-              label="GPU"
-              value={sys.gpu_name ?? "None"}
-              sub={
-                sys.has_gpu
-                  ? `${fmtGb(sys.gpu_vram_gb ?? 0)} VRAM • ${sys.backend.toUpperCase()}`
-                  : "CPU-only inference"
-              }
-            />
-            <InfoTile
-              label="Backend"
-              value={sys.backend.toUpperCase()}
-              sub={
-                sys.unified_memory
-                  ? "Unified Memory"
-                  : sys.has_gpu
-                  ? `${sys.gpu_count} GPU(s)`
-                  : "CPU"
-              }
-            />
-            <InfoTile
-              label="llama-server"
-              value={status?.llama_server_available ? "Available" : "Not Found"}
-              sub={
-                status?.llama_server_available
-                  ? "Ready to run models"
-                  : "Install llama.cpp"
-              }
-              valueColor={status?.llama_server_available ? "#22c55e" : "#ef4444"}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* ── Tab Bar ────────────────────────────────────────── */}
-      <div style={{ display: "flex", gap: 0, marginBottom: 16, borderBottom: "1px solid var(--border)" }}>
-        {(
-          [
-            ["recommended", `Recommended (${filteredModels.length})`],
-            ["downloaded", `Downloaded (${status?.downloaded_models.length ?? 0})`],
-            ["running", `Running (${status?.running_models.length ?? 0})`],
-          ] as [string, string][]
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setActiveTab(key as any)}
-            style={{
-              padding: "8px 16px",
-              fontSize: 13,
-              fontWeight: 500,
-              border: "none",
-              background: "none",
-              cursor: "pointer",
-              color:
-                activeTab === key
-                  ? "var(--accent)"
-                  : "var(--text-secondary)",
-              borderBottom:
-                activeTab === key
-                  ? "2px solid var(--accent)"
-                  : "2px solid transparent",
-            }}
-          >
-            {label}
-          </button>
-        ))}
-
-        {activeTab === "recommended" && (
-          <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center", paddingRight: 8 }}>
-            {(["all", "runnable", "perfect"] as const).map((f) => (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                style={{
-                  padding: "4px 10px",
-                  fontSize: 11,
-                  border: "1px solid var(--border)",
-                  borderRadius: 4,
-                  background: filter === f ? "var(--accent)" : "transparent",
-                  color: filter === f ? "#fff" : "var(--text-secondary)",
-                  cursor: "pointer",
-                }}
-              >
-                {f.charAt(0).toUpperCase() + f.slice(1)}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ── Download Progress ──────────────────────────────── */}
-      {Object.values(downloads).length > 0 && (
-        <div style={{ marginBottom: 16 }}>
-          {Object.values(downloads).map((dl) => (
-            <div key={dl.model_name} style={{ ...cardStyle, marginBottom: 8 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                <span style={{ fontSize: 13, fontWeight: 500 }}>
-                  Downloading {dl.model_name}
-                </span>
-                <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-                  {dl.percent.toFixed(1)}% •{" "}
-                  {fmtGb(dl.downloaded_bytes / 1073741824)} /{" "}
-                  {fmtGb(dl.total_bytes / 1073741824)}
-                </span>
+        {showSettings && (
+          <section className="local-models-settings panel-card">
+            <div className="local-models-section-heading">
+              <div>
+                <h3>Runtime Settings</h3>
+                <p>Adjust the llama.cpp binary, import external GGUF files, or control idle auto-unload.</p>
               </div>
-              <div style={{ height: 4, borderRadius: 2, background: "var(--border)", overflow: "hidden" }}>
-                <div
-                  style={{
-                    height: "100%",
-                    width: `${dl.percent}%`,
-                    background: "var(--accent)",
-                    borderRadius: 2,
-                    transition: "width 0.3s",
-                  }}
-                />
+              <span className="local-models-chip">Models dir: {status?.models_dir ?? "~/.clawdesk/models"}</span>
+            </div>
+
+            <div className="local-models-settings__grid">
+              <SettingField
+                label="llama-server path"
+                value={serverPath}
+                placeholder="/usr/local/bin/llama-server"
+                buttonLabel="Save"
+                onChange={setServerPath}
+                onSubmit={handleSetServerPath}
+              />
+              <SettingField
+                label="Import GGUF"
+                value={importPath}
+                placeholder="/path/to/model.gguf"
+                buttonLabel="Import"
+                onChange={setImportPath}
+                onSubmit={handleImport}
+              />
+              <div className="local-models-setting-card">
+                <label className="local-models-setting-card__label">Auto-unload</label>
+                <div className="local-models-setting-card__controls">
+                  <input
+                    type="number"
+                    min={0}
+                    step={60}
+                    value={ttlSecs}
+                    onChange={(e) => setTtlSecs(Number(e.target.value))}
+                    className="local-models-input local-models-input--short"
+                    placeholder="0"
+                  />
+                  <button className="local-models-button local-models-button--primary" onClick={handleSetTtl}>
+                    Set
+                  </button>
+                </div>
+                <p className="local-models-setting-card__meta">
+                  {ttlSecs === 0 ? "Disabled" : `${Math.floor(ttlSecs / 60)}m ${ttlSecs % 60}s idle timeout`}
+                </p>
               </div>
             </div>
-          ))}
-        </div>
-      )}
+          </section>
+        )}
 
-      {/* ── Recommended Tab ────────────────────────────────── */}
-      {activeTab === "recommended" && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 12 }}>
-          {filteredModels.map((m) => (
-            <ModelCard
-              key={m.model.name + m.best_quant}
-              fit={m}
-              downloading={!!downloads[m.model.name]}
-              onDownload={() => handleDownload(m)}
-              onStart={() => handleStart(m.model.name)}
-              isRunning={
-                status?.running_models.some(
-                  (r) =>
-                    r.name.toLowerCase().includes(m.model.name.toLowerCase()) &&
-                    r.state === "ready"
-                ) ?? false
-              }
-            />
-          ))}
-          {filteredModels.length === 0 && (
-            <div style={{ gridColumn: "1/-1", textAlign: "center", padding: 40, color: "var(--text-secondary)" }}>
-              No models match the current filter.
+        {sys && (
+          <section className="local-models-hardware panel-card">
+            <div className="local-models-section-heading">
+              <div>
+                <h3>Hardware Profile</h3>
+                <p>Your model recommendations are ranked against this detected machine profile.</p>
+              </div>
+            </div>
+
+            <div className="local-models-hardware__grid">
+              <HardwareTile icon="cpu" label="CPU" value={sys.cpu_name} detail={`${sys.total_cpu_cores} cores`} />
+              <HardwareTile icon="layers" label="Memory" value={fmtGb(sys.total_ram_gb)} detail={`${fmtGb(sys.available_ram_gb)} available`} />
+              <HardwareTile
+                icon="zap"
+                label="Accelerator"
+                value={sys.gpu_name ?? "CPU-only"}
+                detail={
+                  sys.has_gpu
+                    ? `${fmtGb(sys.gpu_vram_gb ?? sys.total_gpu_vram_gb ?? 0)} VRAM • ${sys.backend.toUpperCase()}`
+                    : "No dedicated GPU detected"
+                }
+              />
+              <HardwareTile
+                icon="activity"
+                label="Runtime"
+                value={status?.llama_server_available ? "Ready" : "Needs setup"}
+                detail={
+                  status?.llama_server_available ? "Launches local inference servers" : "Install llama.cpp or set a custom path"
+                }
+                tone={status?.llama_server_available ? "ok" : "warn"}
+              />
+            </div>
+          </section>
+        )}
+
+        {downloadEntries.length > 0 && (
+          <section className="local-models-downloads panel-card">
+            <div className="local-models-section-heading">
+              <div>
+                <h3>Downloads in Progress</h3>
+                <p>Transfers continue in the background while recommendations and runtime state stay live.</p>
+              </div>
+            </div>
+
+            <div className="local-models-downloads__list">
+              {downloadEntries.map((download) => (
+                <div key={download.model_name} className="local-models-download-row">
+                  <div className="local-models-download-row__header">
+                    <div>
+                      <div className="local-models-download-row__name">{download.model_name}</div>
+                      <div className="local-models-download-row__meta">
+                        {fmtGb(download.downloaded_bytes / 1073741824)} of {fmtGb(download.total_bytes / 1073741824)}
+                      </div>
+                    </div>
+                    <span className="local-models-chip">{download.percent.toFixed(1)}%</span>
+                  </div>
+                  <div className="local-models-progress">
+                    <div className="local-models-progress__bar" style={{ width: `${download.percent}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section className="local-models-library panel-card">
+          <div className="local-models-library__toolbar">
+            <div className="local-models-tabs" role="tablist" aria-label="Local models views">
+              {(
+                [
+                  ["recommended", `Recommended (${filteredModels.length})`],
+                  ["downloaded", `Downloaded (${downloadedCount})`],
+                  ["running", `Running (${runningCount})`],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  className={`local-models-tab ${activeTab === key ? "is-active" : ""}`}
+                  onClick={() => setActiveTab(key)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {activeTab === "recommended" && (
+              <div className="local-models-filters">
+                {([
+                  ["all", `All ${recommendedCount}`],
+                  ["runnable", `Runnable ${runnableCount}`],
+                  ["perfect", `Perfect ${perfectCount}`],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    className={`local-models-filter ${filter === value ? "is-active" : ""}`}
+                    onClick={() => setFilter(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {activeTab === "recommended" && (
+            <div className="local-models-grid">
+              {filteredModels.map((model) => {
+                const runningModel = findMatchingRunningModel(model.model.name, status?.running_models ?? []);
+
+                return (
+                  <ModelCard
+                    key={`${model.model.name}-${model.best_quant}`}
+                    fit={model}
+                    downloading={Boolean(downloads[model.model.name])}
+                    runningState={runningModel?.state}
+                    onDownload={() => handleDownload(model)}
+                    onStart={() => handleStart(model.model.name)}
+                  />
+                );
+              })}
+
+              {filteredModels.length === 0 && (
+                <EmptyState
+                  icon="search"
+                  title="No models match this filter"
+                  description="Try a broader fit filter or refresh recommendations after changing your runtime settings."
+                />
+              )}
             </div>
           )}
-        </div>
-      )}
 
-      {/* ── Downloaded Tab ─────────────────────────────────── */}
-      {activeTab === "downloaded" && (
-        <div>
-          {(status?.downloaded_models ?? []).length === 0 ? (
-            <div style={{ textAlign: "center", padding: 40, color: "var(--text-secondary)" }}>
-              No models downloaded yet. Check the Recommended tab to find models
-              that fit your hardware.
-            </div>
-          ) : (
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--border)", textAlign: "left" }}>
-                  <th style={thStyle}>Model</th>
-                  <th style={thStyle}>Size</th>
-                  <th style={thStyle}>Status</th>
-                  <th style={{ ...thStyle, textAlign: "right" }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(status?.downloaded_models ?? []).map((dm) => {
-                  const running = status?.running_models.find((r) =>
-                    r.name.toLowerCase().includes(dm.name.toLowerCase())
-                  );
+          {activeTab === "downloaded" && (
+            <div className="local-models-list">
+              {downloadedCount === 0 ? (
+                <EmptyState
+                  icon="archive"
+                  title="No downloaded models yet"
+                  description="Start in Recommended to find models that fit this machine and pull them into your local library."
+                />
+              ) : (
+                (status?.downloaded_models ?? []).map((model) => {
+                  const running = findMatchingRunningModel(model.name, status?.running_models ?? []);
+                  const isActive = isModelActive(running?.state);
+
                   return (
-                    <tr key={dm.name} style={{ borderBottom: "1px solid var(--border)" }}>
-                      <td style={tdStyle}>
-                        <span style={{ fontWeight: 500 }}>{dm.name}</span>
-                      </td>
-                      <td style={tdStyle}>{fmtGb(dm.size_gb)}</td>
-                      <td style={tdStyle}>
-                        {running ? (
-                          <span style={{ color: STATE_COLORS[running.state], fontWeight: 500 }}>
-                            {running.state} (:{running.port})
-                          </span>
-                        ) : (
-                          <span style={{ color: "var(--text-tertiary)" }}>
-                            Stopped
-                          </span>
-                        )}
-                      </td>
-                      <td style={{ ...tdStyle, textAlign: "right" }}>
-                        <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                    <LibraryRow
+                      key={model.name}
+                      icon="archive"
+                      title={model.name}
+                      subtitle={`${fmtGb(model.size_gb)} on disk`}
+                      chips={[running ? `${formatStateLabel(running.state)} on :${running.port}` : "Stopped"]}
+                      actions={
+                        <>
                           {running?.state === "ready" ? (
-                            <button onClick={() => handleStop(dm.name)} style={btnStyle("danger")}>
-                              Stop
+                            <button className="local-models-button local-models-button--danger" onClick={() => handleStop(model.name)}>
+                              <Icon name="pause" />
+                              <span>Stop</span>
+                            </button>
+                          ) : isActive ? (
+                            <button className="local-models-button local-models-button--disabled" disabled>
+                              <Icon name="loader" />
+                              <span>{formatStateLabel(running!.state)}</span>
                             </button>
                           ) : (
-                            <button onClick={() => handleStart(dm.name)} style={btnStyle("primary")}>
-                              Start
+                            <button className="local-models-button local-models-button--primary" onClick={() => handleStart(model.name)}>
+                              <Icon name="play" />
+                              <span>Start</span>
                             </button>
                           )}
-                          <button onClick={() => handleDelete(dm.name)} style={btnStyle("danger")}>
-                            Delete
+                          <button className="local-models-button local-models-button--ghost-danger" onClick={() => handleDelete(model.name)}>
+                            <Icon name="trash" />
+                            <span>Delete</span>
                           </button>
-                        </div>
-                      </td>
-                    </tr>
+                        </>
+                      }
+                    />
                   );
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
-      )}
-
-      {/* ── Running Tab ────────────────────────────────────── */}
-      {activeTab === "running" && (
-        <div>
-          {(status?.running_models ?? []).length === 0 ? (
-            <div style={{ textAlign: "center", padding: 40, color: "var(--text-secondary)" }}>
-              No models currently running. Start a model from the Downloaded tab.
+                })
+              )}
             </div>
-          ) : (
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--border)", textAlign: "left" }}>
-                  <th style={thStyle}>Model</th>
-                  <th style={thStyle}>State</th>
-                  <th style={thStyle}>Port</th>
-                  <th style={thStyle}>PID</th>
-                  <th style={{ ...thStyle, textAlign: "right" }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(status?.running_models ?? []).map((rm) => (
-                  <tr key={rm.name} style={{ borderBottom: "1px solid var(--border)" }}>
-                    <td style={tdStyle}>
-                      <span style={{ fontWeight: 500 }}>{rm.name}</span>
-                      <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
-                        {rm.model_path}
-                      </div>
-                    </td>
-                    <td style={tdStyle}>
-                      <span style={{ color: STATE_COLORS[rm.state] ?? "#6b7280", fontWeight: 500 }}>
-                        {rm.state}
-                      </span>
-                    </td>
-                    <td style={tdStyle}>{rm.port}</td>
-                    <td style={tdStyle}>{rm.pid ?? "—"}</td>
-                    <td style={{ ...tdStyle, textAlign: "right" }}>
-                      <button onClick={() => handleStop(rm.name)} style={btnStyle("danger")}>
-                        Stop
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           )}
-        </div>
-      )}
-    </div>
+
+          {activeTab === "running" && (
+            <div className="local-models-list">
+              {runningCount === 0 ? (
+                <EmptyState
+                  icon="activity"
+                  title="No models running"
+                  description="Start a downloaded model to launch a local inference endpoint and keep it available to the app."
+                />
+              ) : (
+                (status?.running_models ?? []).map((model) => (
+                  <LibraryRow
+                    key={model.name}
+                    icon="cpu"
+                    title={model.name}
+                    subtitle={model.model_path}
+                    chips={[formatStateLabel(model.state), `Port ${model.port}`, model.pid ? `PID ${model.pid}` : "No PID"]}
+                    stateColor={STATE_COLORS[model.state] ?? "#6b7280"}
+                    actions={
+                      <button className="local-models-button local-models-button--danger" onClick={() => handleStop(model.name)}>
+                        <Icon name="pause" />
+                        <span>Stop</span>
+                      </button>
+                    }
+                  />
+                ))
+              )}
+            </div>
+          )}
+        </section>
+      </div>
+    </PageLayout>
   );
 }
 
-/* ────────────────────────── sub-components ──────────────────── */
-
-function InfoTile({
+function HeroStat({
   label,
   value,
   sub,
-  valueColor,
+  accent = false,
 }: {
   label: string;
   value: string;
   sub: string;
-  valueColor?: string;
+  accent?: boolean;
 }) {
   return (
-    <div>
-      <div style={{ fontSize: 11, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
-        {label}
+    <div className={`local-models-hero-stat ${accent ? "is-accent" : ""}`}>
+      <span className="local-models-hero-stat__label">{label}</span>
+      <strong className="local-models-hero-stat__value">{value}</strong>
+      <span className="local-models-hero-stat__sub">{sub}</span>
+    </div>
+  );
+}
+
+function HardwareTile({
+  icon,
+  label,
+  value,
+  detail,
+  tone = "neutral",
+}: {
+  icon: string;
+  label: string;
+  value: string;
+  detail: string;
+  tone?: "neutral" | "ok" | "warn";
+}) {
+  return (
+    <div className={`local-models-hardware-tile local-models-hardware-tile--${tone}`}>
+      <div className="local-models-hardware-tile__icon">
+        <Icon name={icon} />
       </div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: valueColor ?? "var(--text-primary)", marginBottom: 2 }}>
-        {value}
+      <div className="local-models-hardware-tile__content">
+        <span className="local-models-hardware-tile__label">{label}</span>
+        <strong className="local-models-hardware-tile__value">{value}</strong>
+        <span className="local-models-hardware-tile__detail">{detail}</span>
       </div>
-      <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>{sub}</div>
+    </div>
+  );
+}
+
+function SettingField({
+  label,
+  value,
+  placeholder,
+  buttonLabel,
+  onChange,
+  onSubmit,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  buttonLabel: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="local-models-setting-card">
+      <label className="local-models-setting-card__label">{label}</label>
+      <div className="local-models-setting-card__controls">
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="local-models-input"
+        />
+        <button className="local-models-button local-models-button--primary" onClick={onSubmit}>
+          {buttonLabel}
+        </button>
+      </div>
     </div>
   );
 }
@@ -620,169 +625,163 @@ function ModelCard({
   downloading,
   onDownload,
   onStart,
-  isRunning,
+  runningState,
 }: {
   fit: ModelFit;
   downloading: boolean;
   onDownload: () => void;
   onStart: () => void;
-  isRunning: boolean;
+  runningState?: RunningModel["state"];
 }) {
-  const m = fit.model;
+  const model = fit.model;
+  const fitColor = FIT_COLORS[fit.fit_level];
+  const isActive = isModelActive(runningState);
+  const runningColor = runningState ? STATE_COLORS[runningState] ?? "#6b7280" : "#16a34a";
+
   return (
-    <div style={cardStyle}>
-      {/* header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+    <article className="local-model-card">
+      <div className="local-model-card__top">
         <div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)" }}>
-            {m.name}
-          </div>
-          <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-            {m.provider} • {m.parameter_count} • {m.use_case}
-          </div>
+          <div className="local-model-card__eyebrow">{model.provider}</div>
+          <h3 className="local-model-card__title">{model.name}</h3>
+          <p className="local-model-card__subtitle">
+            {model.parameter_count} parameters • {model.use_case}
+          </p>
         </div>
-        <div
-          style={{
-            fontSize: 11,
-            fontWeight: 600,
-            padding: "2px 8px",
-            borderRadius: 4,
-            background: FIT_COLORS[fit.fit_level] + "20",
-            color: FIT_COLORS[fit.fit_level],
-          }}
-        >
+        <span className="local-model-card__fit" style={{ color: fitColor, backgroundColor: `${fitColor}18` }}>
           {FIT_LABELS[fit.fit_level]}
+        </span>
+      </div>
+
+      <div className="local-model-card__scoreband">
+        <div>
+          <span className="local-model-card__score-label">Fit score</span>
+          <strong className="local-model-card__score-value">{fit.score.toFixed(0)}</strong>
+        </div>
+        <div className="local-model-card__score-meta">
+          <span>{fmtTps(fit.estimated_tps)}</span>
+          <span>{fmtGb(fit.memory_required_gb)}</span>
         </div>
       </div>
 
-      {/* stats */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
-        <MiniStat label="Score" value={fit.score.toFixed(0)} />
-        <MiniStat label="Speed" value={fmtTps(fit.estimated_tps)} />
-        <MiniStat label="Memory" value={fmtGb(fit.memory_required_gb)} />
+      <div className="local-model-card__stats">
         <MiniStat label="Quant" value={fit.best_quant} />
-        <MiniStat label="Context" value={`${(m.context_length / 1024).toFixed(0)}K`} />
+        <MiniStat label="Context" value={`${(model.context_length / 1024).toFixed(0)}K`} />
         <MiniStat label="Mode" value={fit.run_mode.replace("_", " ")} />
       </div>
 
-      {/* utilization bar */}
-      <div style={{ marginBottom: 10 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--text-tertiary)", marginBottom: 3 }}>
+      <div className="local-model-card__utilization">
+        <div className="local-model-card__utilization-head">
           <span>Memory utilization</span>
           <span>{fit.utilization_pct.toFixed(0)}%</span>
         </div>
-        <div style={{ height: 4, borderRadius: 2, background: "var(--border)", overflow: "hidden" }}>
+        <div className="local-models-progress local-models-progress--tight">
           <div
-            style={{
-              height: "100%",
-              width: `${Math.min(fit.utilization_pct, 100)}%`,
-              background: FIT_COLORS[fit.fit_level],
-              borderRadius: 2,
-            }}
+            className="local-models-progress__bar"
+            style={{ width: `${Math.min(fit.utilization_pct, 100)}%`, background: fitColor }}
           />
         </div>
       </div>
 
-      {/* actions */}
-      <div style={{ display: "flex", gap: 6 }}>
+      <div className="local-model-card__footer">
+        <div className="local-model-card__chips">
+          <span className="local-models-chip">{fit.installed ? "Downloaded" : "Remote"}</span>
+          <span className="local-models-chip">{fit.use_case}</span>
+        </div>
+
         {fit.installed ? (
-          isRunning ? (
-            <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 500 }}>
-              Running
-            </span>
+          isActive ? (
+            <div className="local-model-card__running" style={{ color: runningColor }}>
+              <span
+                className="local-model-card__running-dot"
+                style={{ background: runningColor, boxShadow: `0 0 0 5px ${runningColor}1f` }}
+              />
+              <span>{formatStateLabel(runningState!)}</span>
+            </div>
           ) : (
-            <button onClick={onStart} style={btnStyle("primary")}>
-              Start
+            <button className="local-models-button local-models-button--primary" onClick={onStart}>
+              <Icon name="play" />
+              <span>Start</span>
             </button>
           )
         ) : (
           <button
+            className={`local-models-button ${fit.fit_level === "too_tight" ? "local-models-button--disabled" : "local-models-button--primary"}`}
             onClick={onDownload}
             disabled={downloading || fit.fit_level === "too_tight"}
-            style={btnStyle(
-              fit.fit_level === "too_tight" ? "disabled" : "primary"
-            )}
           >
-            {downloading ? "Downloading..." : "Download"}
+            <Icon name={downloading ? "loader" : "archive"} />
+            <span>{downloading ? "Downloading..." : fit.fit_level === "too_tight" ? "Too Tight" : "Download"}</span>
           </button>
         )}
       </div>
-    </div>
+    </article>
   );
 }
 
 function MiniStat({ label, value }: { label: string; value: string }) {
   return (
-    <div>
-      <div style={{ fontSize: 10, color: "var(--text-tertiary)", textTransform: "uppercase" }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 13, fontWeight: 500, color: "var(--text-primary)" }}>
-        {value}
-      </div>
+    <div className="local-model-card__stat">
+      <span className="local-model-card__stat-label">{label}</span>
+      <strong className="local-model-card__stat-value">{value}</strong>
     </div>
   );
 }
 
-/* ────────────────────────── styles ──────────────────────────── */
+function LibraryRow({
+  icon,
+  title,
+  subtitle,
+  chips,
+  actions,
+  stateColor,
+}: {
+  icon: string;
+  title: string;
+  subtitle: string;
+  chips: string[];
+  actions: React.ReactNode;
+  stateColor?: string;
+}) {
+  return (
+    <div className="local-models-row">
+      <div className="local-models-row__identity">
+        <div className="local-models-row__icon" style={stateColor ? { color: stateColor, borderColor: `${stateColor}33` } : undefined}>
+          <Icon name={icon} />
+        </div>
+        <div className="local-models-row__copy">
+          <div className="local-models-row__title">{title}</div>
+          <div className="local-models-row__subtitle">{subtitle}</div>
+        </div>
+      </div>
+      <div className="local-models-row__chips">
+        {chips.map((chip) => (
+          <span key={chip} className="local-models-chip">
+            {chip}
+          </span>
+        ))}
+      </div>
+      <div className="local-models-row__actions">{actions}</div>
+    </div>
+  );
+}
 
-const cardStyle: React.CSSProperties = {
-  background: "var(--surface)",
-  border: "1px solid var(--border)",
-  borderRadius: 8,
-  padding: 16,
-};
-
-const thStyle: React.CSSProperties = {
-  padding: "10px 12px",
-  fontSize: 12,
-  fontWeight: 600,
-  color: "var(--text-secondary)",
-  textTransform: "uppercase",
-  letterSpacing: 0.5,
-};
-
-const tdStyle: React.CSSProperties = {
-  padding: "10px 12px",
-};
-
-const inputStyle: React.CSSProperties = {
-  flex: 1,
-  padding: "6px 10px",
-  fontSize: 13,
-  border: "1px solid var(--border)",
-  borderRadius: 6,
-  background: "var(--surface)",
-  color: "var(--text-primary)",
-  outline: "none",
-};
-
-function btnStyle(
-  variant: "primary" | "secondary" | "danger" | "disabled"
-): React.CSSProperties {
-  const base: React.CSSProperties = {
-    padding: "6px 14px",
-    fontSize: 12,
-    fontWeight: 500,
-    border: "none",
-    borderRadius: 6,
-    cursor: variant === "disabled" ? "not-allowed" : "pointer",
-    transition: "opacity 0.15s",
-  };
-
-  switch (variant) {
-    case "primary":
-      return { ...base, background: "var(--accent)", color: "#fff" };
-    case "secondary":
-      return {
-        ...base,
-        background: "transparent",
-        border: "1px solid var(--border)",
-        color: "var(--text-secondary)",
-      };
-    case "danger":
-      return { ...base, background: "#ef444420", color: "#ef4444" };
-    case "disabled":
-      return { ...base, background: "var(--border)", color: "var(--text-tertiary)", opacity: 0.6 };
-  }
+function EmptyState({
+  icon,
+  title,
+  description,
+}: {
+  icon: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="local-models-empty-state">
+      <div className="local-models-empty-state__icon">
+        <Icon name={icon} />
+      </div>
+      <h3>{title}</h3>
+      <p>{description}</p>
+    </div>
+  );
 }

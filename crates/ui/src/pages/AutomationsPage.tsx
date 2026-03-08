@@ -134,6 +134,8 @@ export function AutomationsPage({
   const [executionEvents, setExecutionEvents] = useState<Map<number, PipelineStepEvent>>(new Map());
   const [cronTasks, setCronTasks] = useState<any[]>([]);
   const [cronLogs, setCronLogs] = useState<any[]>([]);
+  const scheduledJobs = pipelines.filter((p) => !!p.schedule).length;
+  const manualJobs = pipelines.length - scheduledJobs;
 
   // Fetch cron data
   useEffect(() => {
@@ -251,12 +253,24 @@ export function AutomationsPage({
       }
       className="page-automations"
     >
+      <div className="automations-page-shell">
+      <section className="automations-hero">
+        <div className="automations-hero__intro">
+          <span className="automations-hero__eyebrow">Automation control</span>
+          <h2>Build routines that run on a schedule, on demand, or from a quick prompt.</h2>
+          <p>{pipelines.length} jobs configured, {scheduledJobs} scheduled, {manualJobs} manual, and {cronLogs.length} recent run records available.</p>
+        </div>
+        <div className="automations-hero__stats">
+          <AutomationStat label="Jobs" value={pipelines.length.toString()} meta="Total configured pipelines" />
+          <AutomationStat label="Scheduled" value={scheduledJobs.toString()} meta="Cron-backed routines" />
+          <AutomationStat label="Manual" value={manualJobs.toString()} meta="Run on demand" />
+        </div>
+      </section>
 
-      {/* Quick create */}
       {agents.length > 0 && (
-        <section className="section-card" style={{ padding: "12px 16px" }}>
+        <section className="section-card automations-quick-create">
           <div className="quick-create-row">
-            <span style={{ fontSize: 18 }}>✨</span>
+            <span className="automations-quick-create__icon">✨</span>
             <input
               className="input quick-create-input"
               placeholder="What would you like to automate? Describe it here and press Enter..."
@@ -288,7 +302,7 @@ export function AutomationsPage({
 
       {/* ── Unified Job List ── */}
       {pipelines.length > 0 && (
-        <section className="section-card">
+        <section className="section-card automations-jobs-card">
           <div className="section-head">
             <h2>Your Jobs ({pipelines.length})</h2>
             <button className="btn subtle" onClick={() => {
@@ -482,7 +496,7 @@ export function AutomationsPage({
 
       {/* Template grid */}
       {agents.length > 0 && (
-        <section className="section-card">
+        <section className="section-card automations-templates-card">
           <div className="section-head">
             <h2>Quick Start Templates</h2>
             <p className="section-desc">Pick a template to get started quickly.</p>
@@ -505,6 +519,8 @@ export function AutomationsPage({
         </section>
       )}
 
+      </div>
+
     </PageLayout>
 
     {designerOpen && (
@@ -516,5 +532,15 @@ export function AutomationsPage({
       />
     )}
     </>
+  );
+}
+
+function AutomationStat({ label, value, meta }: { label: string; value: string; meta: string }) {
+  return (
+    <div className="automations-hero-stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{meta}</small>
+    </div>
   );
 }

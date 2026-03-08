@@ -77,6 +77,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
   const breadcrumbs = currentPath
     ? currentPath.split("/").filter(Boolean)
     : [];
+  const currentFolderName = breadcrumbs[breadcrumbs.length - 1] ?? "workspace";
 
   return (
     <PageLayout
@@ -89,10 +90,23 @@ export function FilesPage({ pushToast }: FilesPageProps) {
       }
     >
       <div className="files-page">
+        <section className="files-hero">
+          <div className="files-hero__intro">
+            <span className="files-hero__eyebrow">Workspace explorer</span>
+            <h2>Browse folders, inspect file contents, and stay oriented inside the current workspace.</h2>
+            <p>{entries.length} items in {currentFolderName}, with {selectedFile ? "a file preview open" : "no file selected yet"}.</p>
+          </div>
+          <div className="files-hero__stats">
+            <FileHeroStat label="Current folder" value={currentFolderName} meta={currentPath || "/"} />
+            <FileHeroStat label="Entries" value={entries.length.toString()} meta={loading ? "Refreshing directory" : "Visible in the current view"} />
+            <FileHeroStat label="Preview" value={selectedFile ? "Open" : "Idle"} meta={selectedFile ?? "Select a file to inspect"} />
+          </div>
+        </section>
+
         {/* Breadcrumbs */}
         <div className="files-breadcrumbs">
           <button className="files-crumb" onClick={goRoot}>
-            <Icon name="home" />
+            <Icon name="search" />
           </button>
           {breadcrumbs.map((crumb, i) => {
             const crumbPath = breadcrumbs.slice(0, i + 1).join("/");
@@ -119,9 +133,13 @@ export function FilesPage({ pushToast }: FilesPageProps) {
         <div className="files-layout">
           {/* File list panel */}
           <div className="files-list-panel">
+            <div className="files-list-panel__head">
+              <span>Explorer</span>
+              <strong>{currentFolderName}</strong>
+            </div>
             {pathStack.length > 1 && (
               <div className="files-entry files-back" onClick={goBack}>
-                <Icon name="arrow-left" />
+                <Icon name="collapse-left" />
                 <span>..</span>
               </div>
             )}
@@ -153,7 +171,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
             {selectedFile ? (
               <>
                 <div className="files-preview-header">
-                  <Icon name="file" />
+                  <Icon name="search" />
                   <span>{selectedFile}</span>
                 </div>
                 <pre className="files-preview-content">
@@ -162,7 +180,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
               </>
             ) : (
               <div className="files-preview-empty">
-                <Icon name="file-text" />
+                <Icon name="search" />
                 <span>Select a file to preview</span>
               </div>
             )}
@@ -170,5 +188,15 @@ export function FilesPage({ pushToast }: FilesPageProps) {
         </div>
       </div>
     </PageLayout>
+  );
+}
+
+function FileHeroStat({ label, value, meta }: { label: string; value: string; meta: string }) {
+  return (
+    <div className="files-hero-stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{meta}</small>
+    </div>
   );
 }

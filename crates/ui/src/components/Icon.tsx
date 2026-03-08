@@ -56,6 +56,44 @@ export function Icon({ name, className }: { name: string; className?: string }) 
         <path d="m20 20-4-4" />
       </svg>
     ),
+    home: (
+      <svg {...common}>
+        <path d="M3 10.5 12 3l9 7.5" />
+        <path d="M5 9.5V21h14V9.5" />
+      </svg>
+    ),
+    folder: (
+      <svg {...common}>
+        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V7z" />
+      </svg>
+    ),
+    file: (
+      <svg {...common}>
+        <path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z" />
+        <path d="M14 2v5h5" />
+      </svg>
+    ),
+    "file-text": (
+      <svg {...common}>
+        <path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z" />
+        <path d="M14 2v5h5" />
+        <path d="M9 13h6" />
+        <path d="M9 17h6" />
+        <path d="M9 9h2" />
+      </svg>
+    ),
+    "arrow-left": (
+      <svg {...common}>
+        <path d="m12 19-7-7 7-7" />
+        <path d="M19 12H5" />
+      </svg>
+    ),
+    "refresh-cw": (
+      <svg {...common}>
+        <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+        <path d="M21 3v6h-6" />
+      </svg>
+    ),
     bell: (
       <svg {...common}>
         <path d="M15 17H5l1.5-2v-4A5.5 5.5 0 0 1 12 5.5V5a2 2 0 1 1 4 0v.5A5.5 5.5 0 0 1 21.5 11v4L23 17h-8" />

@@ -45,6 +45,8 @@ export function ChannelsPage({
   const connected = channels.filter((c) => c.status === "active" || c.status === "configured");
   const available = channels.filter((c) => c.status === "available");
   const spec = configuring ? specFor(configuring) : null;
+  const activeConnected = connected.filter((c) => c.status === "active").length;
+  const capabilityCount = new Set(channels.flatMap((channel) => channel.capabilities ?? [])).size;
 
   return (
     <PageLayout
@@ -58,8 +60,21 @@ export function ChannelsPage({
       }
     >
       <div className="channels-page-content">
+        <section className="channels-hero">
+          <div className="channels-hero__intro">
+            <span className="channels-hero__eyebrow">Messaging network</span>
+            <h2>Keep inbound and outbound channels connected, healthy, and easy to configure.</h2>
+            <p>{connected.length} connected, {activeConnected} active now, and {capabilityCount} exposed channel capabilities across the workspace.</p>
+          </div>
+          <div className="channels-hero__stats">
+            <ChannelHeroStat label="Connected" value={connected.length.toString()} meta="Saved or live integrations" />
+            <ChannelHeroStat label="Active" value={activeConnected.toString()} meta="Currently receiving traffic" />
+            <ChannelHeroStat label="Available" value={available.length.toString()} meta="Ready to connect" />
+          </div>
+        </section>
+
         {connected.length > 0 && (
-          <div className="settings-group">
+          <div className="settings-group channels-section-card">
             <div className="settings-group-label">Connected</div>
             <div className="channel-grid">
               {connected.map((ch) => {
@@ -100,7 +115,7 @@ export function ChannelsPage({
         )}
 
         {available.length > 0 && (
-          <div className="settings-group">
+          <div className="settings-group channels-section-card">
             <div className="settings-group-label">Available</div>
             <div className="channel-grid">
               {available.map((ch) => {
@@ -161,5 +176,15 @@ export function ChannelsPage({
         </div>
       )}
     </PageLayout>
+  );
+}
+
+function ChannelHeroStat({ label, value, meta }: { label: string; value: string; meta: string }) {
+  return (
+    <div className="channels-hero-stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{meta}</small>
+    </div>
   );
 }

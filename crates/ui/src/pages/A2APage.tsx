@@ -155,13 +155,17 @@ export function A2APage({ pushToast }: A2APageProps) {
     }
   };
 
+  const healthyAgents = agents.filter((agent) => agent.is_healthy).length;
+  const runningTasks = tasks.filter((task) => !["completed", "cancelled", "failed"].includes(task.state)).length;
+  const totalCapabilities = new Set(agents.flatMap((agent) => agent.capabilities)).size;
+
   return (
     <>
       <PageLayout
         title="A2A Agent Directory"
         subtitle="Manage agent mesh connections, delegate tasks, and monitor capabilities."
         actions={
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="a2a-page-actions">
             <button className="btn subtle" onClick={refresh} disabled={loading}>
               {loading ? "Loading\u2026" : "Refresh"}
             </button>
@@ -174,61 +178,83 @@ export function A2APage({ pushToast }: A2APageProps) {
           </div>
         }
       >
-        {/* Tab Bar */}
-        <div className="tab-bar" style={{ display: "flex", gap: 4, marginBottom: 16 }}>
-          {(["directory", "tasks"] as A2ATab[]).map((t) => (
-            <button
-              key={t}
-              className={`btn ${tab === t ? "primary" : "subtle"}`}
-              onClick={() => setTab(t)}
-              style={{ textTransform: "capitalize" }}
-            >
-              {t === "directory" ? `Directory (${agents.length})` : `Tasks (${tasks.length})`}
-            </button>
-          ))}
-        </div>
+        <div className="a2a-page-shell">
+          <section className="a2a-hero">
+            <div className="a2a-hero__intro">
+              <span className="a2a-hero__eyebrow">Mesh overview</span>
+              <h2>Keep your agent network visible, healthy, and ready to take work.</h2>
+              <p>
+                {healthyAgents}/{agents.length || 0} remote agents are healthy, {runningTasks} tasks are in flight, and {totalCapabilities} capabilities are exposed across the mesh.
+              </p>
+            </div>
+            <div className="a2a-hero__stats">
+              <HeroMetric label="Registered agents" value={agents.length.toString()} meta={`${healthyAgents} healthy`} accent="brand" />
+              <HeroMetric label="Live tasks" value={runningTasks.toString()} meta={`${tasks.length} total tracked`} accent="cyan" />
+              <HeroMetric label="Capabilities" value={totalCapabilities.toString()} meta="Distinct abilities across remote cards" accent="green" />
+            </div>
+          </section>
 
-        {/* ── Directory Tab ────────────────────────────────── */}
-        {tab === "directory" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {/* Self Card */}
-            {selfCard && (
-              <div className="panel-card" style={{ borderLeft: "3px solid var(--brand)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div>
-                    <h3 className="panel-title" style={{ margin: 0 }}>
-                      <Icon name="bot" className="w-4 h-4" /> {selfCard.name ?? "ClawDesk"} <span style={{ color: "var(--text-tertiary)", fontSize: 12 }}>(self)</span>
-                    </h3>
-                    <div style={{ color: "var(--text-secondary)", fontSize: 13, marginTop: 4 }}>
-                      {selfCard.description ?? "Local desktop agent"}
+          <div className="a2a-tabs" role="tablist" aria-label="A2A views">
+            {(["directory", "tasks"] as A2ATab[]).map((t) => (
+              <button
+                key={t}
+                className={`a2a-tab${tab === t ? " active" : ""}`}
+                onClick={() => setTab(t)}
+                role="tab"
+                aria-selected={tab === t}
+              >
+                <span>{t === "directory" ? "Directory" : "Tasks"}</span>
+                <strong>{t === "directory" ? agents.length : tasks.length}</strong>
+              </button>
+            ))}
+          </div>
+
+          {tab === "directory" && (
+            <div className="a2a-directory-view">
+              {selfCard && (
+                <section className="a2a-self-card">
+                  <div className="a2a-self-card__header">
+                    <div>
+                      <span className="a2a-section-label">Local node</span>
+                      <h3>
+                        <Icon name="bot" className="w-4 h-4" /> {selfCard.name ?? "ClawDesk"} <span>(self)</span>
+                      </h3>
+                      <p>{selfCard.description ?? "Local desktop agent"}</p>
                     </div>
+                    <div className="a2a-health-pill ok">Online</div>
                   </div>
-                  <span className="status-dot status-ok" style={{ width: 10, height: 10 }} />
+                  {selfCard.capabilities && (
+                    <div className="a2a-capability-row">
+                      {(Array.isArray(selfCard.capabilities) ? selfCard.capabilities : []).map((c: string, i: number) => (
+                        <span key={i} className="a2a-capability-chip">{formatCapability(c)}</span>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
+
+              <section className="a2a-section-head">
+                <div>
+                  <span className="a2a-section-label">Directory</span>
+                  <h3>Registered agent cards</h3>
+                  <p>Browse remote nodes, inspect exposed capabilities, and prune stale registrations.</p>
                 </div>
-                {selfCard.capabilities && (
-                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 8 }}>
-                    {(Array.isArray(selfCard.capabilities) ? selfCard.capabilities : []).map((c: string, i: number) => (
-                      <span key={i} className="trust-badge">{String(c)}</span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+                <div className="a2a-section-meta">{agents.length} agents</div>
+              </section>
 
-            {/* Agent Cards */}
-            {agents.length === 0 && !loading && (
-              <div className="empty-state centered" style={{ padding: 40 }}>
-                <p>No agents registered in the A2A directory.</p>
-                <button className="btn primary" onClick={() => setShowRegister(true)}>Register First Agent</button>
-              </div>
-            )}
+              {agents.length === 0 && !loading && (
+                <div className="a2a-empty-state">
+                  <h3>No agents registered yet</h3>
+                  <p>Register the first remote node to start sharing skills and delegated work across the mesh.</p>
+                  <button className="btn primary" onClick={() => setShowRegister(true)}>Register First Agent</button>
+                </div>
+              )}
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 12 }}>
-              {agents.map((agent) => (
-                <div key={agent.id} className="panel-card" style={{ position: "relative" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="a2a-agent-grid">
+                {agents.map((agent) => (
+                  <article key={agent.id} className="a2a-agent-card">
+                    <div className="a2a-agent-card__header">
+                      <div className="a2a-agent-card__title">
                         <span
                           className="status-dot-sm"
                           style={{
@@ -236,110 +262,109 @@ export function A2APage({ pushToast }: A2APageProps) {
                             boxShadow: `0 0 4px ${agent.is_healthy ? "var(--green)" : "var(--red)"}40`,
                           }}
                         />
-                        <strong style={{ color: "var(--text-primary)" }}>{agent.name}</strong>
+                        <div>
+                          <h4>{agent.name}</h4>
+                          <p>{agent.id}</p>
+                        </div>
                       </div>
-                      <div style={{ color: "var(--text-tertiary)", fontSize: 12, marginTop: 2 }}>
-                        ID: {agent.id}
-                      </div>
+                      <button
+                        className="btn icon-only subtle a2a-agent-card__remove"
+                        onClick={() => handleDeregister(agent.id)}
+                        title="Remove agent"
+                      >
+                        <Icon name="close" />
+                      </button>
                     </div>
-                    <button
-                      className="btn icon-only subtle"
-                      onClick={() => handleDeregister(agent.id)}
-                      title="Remove agent"
-                      style={{ color: "var(--red)", opacity: 0.6 }}
-                    >
-                      <Icon name="close" />
-                    </button>
-                  </div>
 
-                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 8 }}>
-                    {agent.capabilities.map((c, i) => (
-                      <span key={i} className="trust-badge" style={{ fontSize: 11 }}>{c}</span>
-                    ))}
-                  </div>
+                    <div className="a2a-capability-row">
+                      {agent.capabilities.map((c, i) => (
+                        <span key={i} className="a2a-capability-chip">{formatCapability(c)}</span>
+                      ))}
+                    </div>
 
-                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, color: "var(--text-tertiary)", fontSize: 12 }}>
-                    <span>Active tasks: {agent.active_tasks}</span>
-                    <span style={{ color: agent.is_healthy ? "var(--green)" : "var(--red)" }}>
-                      {agent.is_healthy ? "\u25cf Healthy" : "\u25cf Unhealthy"}
-                    </span>
-                  </div>
-                </div>
-              ))}
+                    <div className="a2a-agent-card__footer">
+                      <span>Active tasks: {agent.active_tasks}</span>
+                      <span className={`a2a-health-pill ${agent.is_healthy ? "ok" : "error"}`}>
+                        {agent.is_healthy ? "Healthy" : "Unhealthy"}
+                      </span>
+                    </div>
+                  </article>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* ── Tasks Tab ────────────────────────────────────── */}
-        {tab === "tasks" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {tab === "tasks" && (
+            <div className="a2a-task-view">
+              <section className="a2a-section-head">
+                <div>
+                  <span className="a2a-section-label">Task timeline</span>
+                  <h3>Delegated work across the mesh</h3>
+                  <p>Track active work, progress updates, failure states, and partial output from remote tasks.</p>
+                </div>
+                <div className="a2a-section-meta">{tasks.length} tasks</div>
+              </section>
+
             {tasks.length === 0 && !loading && (
-              <div className="empty-state centered" style={{ padding: 40 }}>
-                <p>No A2A tasks yet.</p>
+              <div className="a2a-empty-state">
+                <h3>No A2A tasks yet</h3>
+                <p>Send a task to a local or remote agent to populate the task timeline and progress stream.</p>
                 <button className="btn primary" onClick={() => setShowSendTask(true)}>Send First Task</button>
               </div>
             )}
 
-            {tasks.map((task) => (
-              <div key={task.task_id} className="panel-card">
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span
-                        className="status-dot-sm"
-                        style={{ backgroundColor: stateColor(task.state) }}
-                      />
-                      <strong style={{ color: "var(--text-primary)", fontSize: 14 }}>
-                        {task.task_id.substring(0, 12)}\u2026
-                      </strong>
-                      <span className="trust-badge" style={{ textTransform: "capitalize" }}>
-                        {task.state}
-                      </span>
-                    </div>
-                    {task.error && (
-                      <div style={{ color: "var(--red)", fontSize: 12, marginTop: 4 }}>
-                        Error: {task.error}
+              <div className="a2a-task-list">
+                {tasks.map((task) => (
+                  <article key={task.task_id} className="a2a-task-card">
+                    <div className="a2a-task-card__header">
+                      <div>
+                        <div className="a2a-task-card__title">
+                          <span
+                            className="status-dot-sm"
+                            style={{ backgroundColor: stateColor(task.state) }}
+                          />
+                          <strong>{task.task_id.substring(0, 12)}\u2026</strong>
+                          <span className={`a2a-task-state a2a-task-state--${task.state}`}>{formatTaskState(task.state)}</span>
+                        </div>
+                        {task.error ? <div className="a2a-task-error">Error: {task.error}</div> : null}
                       </div>
-                    )}
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
+                      <div className="a2a-task-card__actions">
                     {task.state !== "completed" && task.state !== "cancelled" && task.state !== "failed" && (
                       <button
                         className="btn subtle"
-                        style={{ fontSize: 12 }}
                         onClick={() => handleCancelTask(task.task_id)}
                       >
                         Cancel
                       </button>
                     )}
-                  </div>
-                </div>
+                      </div>
+                    </div>
 
-                {/* Progress bar */}
-                {task.progress > 0 && task.progress < 100 && (
-                  <div style={{ marginTop: 8, height: 4, background: "var(--bg-tertiary)", borderRadius: 2, overflow: "hidden" }}>
-                    <div
-                      style={{
-                        width: `${task.progress}%`,
-                        height: "100%",
-                        background: "var(--brand)",
-                        borderRadius: 2,
-                        transition: "width 0.3s ease",
-                      }}
-                    />
-                  </div>
-                )}
+                    <div className="a2a-task-meta-row">
+                      <span>Progress {typeof task.progress === "number" ? `${task.progress}%` : "Unknown"}</span>
+                      <span>State: {formatTaskState(task.state)}</span>
+                    </div>
 
-                {/* Output preview */}
-                {task.output && (
-                  <div style={{ marginTop: 6, padding: 8, background: "var(--bg-tertiary)", borderRadius: 6, fontSize: 12, color: "var(--text-secondary)", fontFamily: "monospace", maxHeight: 80, overflow: "auto" }}>
-                    {typeof task.output === "string" ? task.output : JSON.stringify(task.output, null, 2)}
-                  </div>
-                )}
+                    {task.progress > 0 && task.progress < 100 && (
+                      <div className="a2a-progress-bar">
+                        <div
+                          className="a2a-progress-bar__fill"
+                          style={{ width: `${task.progress}%` }}
+                        />
+                      </div>
+                    )}
+
+                    {task.output && (
+                      <div className="a2a-task-output">
+                        {typeof task.output === "string" ? task.output : JSON.stringify(task.output, null, 2)}
+                      </div>
+                    )}
+                  </article>
+                ))}
               </div>
-            ))}
-          </div>
-        )}
+            </div>
+          )}
+        </div>
       </PageLayout>
 
       {/* ── Register Agent Modal ───────────────────────────── */}
@@ -364,14 +389,14 @@ export function A2APage({ pushToast }: A2APageProps) {
             </label>
             <div>
               <label className="field-label">Capabilities</label>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <div className="a2a-modal-cap-grid">
                 {CAPABILITIES.map((cap) => {
                   const active = regCaps.includes(cap);
                   return (
                     <button
                       key={cap}
                       className={`btn ${active ? "primary" : "subtle"}`}
-                      style={{ fontSize: 11, padding: "2px 8px" }}
+                      style={{ fontSize: 11, padding: "4px 10px" }}
                       onClick={() => setRegCaps((prev) => active ? prev.filter((c) => c !== cap) : [...prev, cap])}
                     >
                       {cap.replace(/_/g, " ")}
@@ -425,4 +450,22 @@ export function A2APage({ pushToast }: A2APageProps) {
       )}
     </>
   );
+}
+
+function HeroMetric({ label, value, meta, accent }: { label: string; value: string; meta: string; accent: "brand" | "cyan" | "green" }) {
+  return (
+    <div className={`a2a-hero-metric a2a-hero-metric--${accent}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{meta}</small>
+    </div>
+  );
+}
+
+function formatCapability(value: string) {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatTaskState(value: string) {
+  return value.replace(/-/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }

@@ -837,6 +837,15 @@ export function ChatPage({
 
   const agent = agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? null;
   const isNew = messages.length === 0;
+  const currentSession = activeChatId ? sessions.find((session) => session.chat_id === activeChatId) ?? null : null;
+  const heroSuggestions = [
+    { icon: "✍️", title: "Write an email", desc: "Draft a professional response" },
+    { icon: "📋", title: "Summarize this", desc: "Give me the key points" },
+    { icon: "💡", title: "Brainstorm ideas", desc: "Help me think through options" },
+    { icon: "📅", title: "Plan my week", desc: "Organize tasks and priorities" },
+    { icon: "📝", title: "Write a document", desc: "Article, report, or proposal" },
+    { icon: "🔍", title: "Research a topic", desc: "Find and summarize information" },
+  ];
 
   // Auto-select the first agent if none is selected
   useEffect(() => {
@@ -1752,16 +1761,66 @@ export function ChatPage({
 
         {/* Main chat column */}
         <div className="chat-page-main">
+          <div className="chat-stage-header">
+            <div className="chat-stage-header__identity">
+              <div className="chat-stage-header__avatar">{agent?.icon ?? "✦"}</div>
+              <div className="chat-stage-header__copy">
+                <div className="chat-stage-header__eyebrow">
+                  {currentSession ? "Conversation" : "New Session"}
+                </div>
+                <div className="chat-stage-header__title-row">
+                  <h2 className="chat-stage-header__title">
+                    {currentSession?.title || (agent ? `Chat with ${agent.name}` : "Create an assistant to begin")}
+                  </h2>
+                  {agent && <span className="chat-stage-pill chat-stage-pill--brand">{agent.name}</span>}
+                  {effectiveModel && <span className="chat-stage-pill">{effectiveModel}</span>}
+                </div>
+                <div className="chat-stage-header__meta">
+                  <span>{currentSession ? `${currentSession.message_count} messages` : "Fresh context"}</span>
+                  <span>{isSending ? "Agent responding" : "Ready"}</span>
+                  <span>{effectiveProvider}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="chat-stage-header__actions">
+              <button className={`chat-stage-action ${showSidebar ? "is-active" : ""}`} onClick={() => setShowSidebar(!showSidebar)} title="Toggle history">
+                <Icon name="clock" />
+                <span>History</span>
+              </button>
+              <button className="chat-stage-action" onClick={startNewThread} title="New thread">
+                <Icon name="plus" />
+                <span>New</span>
+              </button>
+              <button className={`chat-stage-action ${traceOpen ? "is-active" : ""}`} onClick={() => setTraceOpen(!traceOpen)} title="Toggle trace panel">
+                <Icon name="activity" />
+                <span>Trace</span>
+              </button>
+              <button className={`chat-stage-action ${previewOpen ? "is-active" : ""}`} onClick={() => setPreviewOpen(!previewOpen)} title="Toggle preview panel">
+                <Icon name="eye" />
+                <span>Preview</span>
+              </button>
+            </div>
+          </div>
+
           <div className="chat-page-messages" ref={messagesContainerRef}>
             {isNew ? (
               /* Hero empty state */
               <div className="chat-hero">
+                <div className="chat-hero-orbit chat-hero-orbit--one" />
+                <div className="chat-hero-orbit chat-hero-orbit--two" />
                 <div className="chat-hero-content">
-                  <div className="chat-hero-icon">✨</div>
+                  <div className="chat-hero-icon">✦</div>
+                  <div className="chat-hero-kicker">Private workspace chat</div>
                   <h1 className="chat-hero-title">
                     What can I help you with?
                   </h1>
-                  <p className="chat-hero-tagline">Your private AI assistant — everything runs locally on your device.</p>
+                  <p className="chat-hero-tagline">A cleaner, calmer place to think, build, and ship with your local assistant.</p>
+                  <div className="chat-hero-signal-row">
+                    <span className="chat-stage-pill chat-stage-pill--brand">{agent ? agent.name : "No agent selected"}</span>
+                    <span className="chat-stage-pill">{effectiveProvider}</span>
+                    <span className="chat-stage-pill">{effectiveModel || "Choose a model"}</span>
+                  </div>
                 </div>
 
                 {agents.length === 0 ? (
@@ -1951,13 +2010,14 @@ export function ChatPage({
               /* Message list */
               <div className="chat-message-list">
                 {lastError && (
-                  <div className="chat-error-banner" style={{ background: "#2d1111", color: "#ff6b6b", padding: "8px 16px", borderRadius: "8px", margin: "8px 0", fontSize: "13px", display: "flex", alignItems: "center", gap: "8px" }}>
-                    <span style={{ fontWeight: 600 }}>⚠ Error:</span> {lastError}
-                    <button onClick={() => setLastError(null)} style={{ marginLeft: "auto", background: "none", border: "none", color: "#ff6b6b", cursor: "pointer", fontSize: "16px" }}>×</button>
+                  <div className="chat-error-banner">
+                    <span className="chat-error-banner__label">Issue</span>
+                    <span className="chat-error-banner__message">{lastError}</span>
+                    <button className="chat-error-banner__dismiss" onClick={() => setLastError(null)}>×</button>
                   </div>
                 )}
                 {messages.map((m) => (
-                  <div key={m.id} className={`chat-msg-row ${m.isStreaming ? "streaming" : ""}`}>
+                  <div key={m.id} className={`chat-msg-row ${m.role === "user" ? "is-user" : "is-assistant"} ${m.isStreaming ? "streaming" : ""}`}>
                     <div className="chat-msg-header">
                       {m.role === "user" ? (
                         <div className="chat-avatar user-avatar">
@@ -1985,52 +2045,54 @@ export function ChatPage({
                       </div>
                     </div>
 
-                    {m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0 && (
-                      <div className="chat-msg-tools">
-                        {m.toolCalls.map((tc, i) => (
-                          <ToolBrick
-                            key={tc.id || `${tc.name}-${i}`}
-                            icon={tc.status === "running" ? "loader" : tc.status === "done" ? "check" : "alert-circle"}
-                            name={tc.name}
-                            status={tc.status}
-                            result={tc.result}
-                            onTraceClick={() => {
-                              setTraceFilter(tc.name);
-                              setSidePanelTab("trace");
-                              setTraceOpen(true);
-                            }}
-                          />
-                        ))}
-                      </div>
-                    )}
-
-                    {m.role === "assistant" && m.askHuman && (
-                      <AskHumanCard askHuman={m.askHuman} onRespond={handleAskHumanRespond} />
-                    )}
-
-                    <div className="chat-msg-content">
-                      {m.role === "assistant" && m.thinkingText && (
-                        <ThinkingBlock text={m.thinkingText} />
-                      )}
-                      {m.role === "assistant" && m.retryStatus && !m.text && (
-                        <div className="chat-retry-status">
-                          <Icon name="loader" className="spin" />
-                          <span>{m.retryStatus}</span>
+                    <div className={`chat-msg-card ${m.role === "user" ? "user-card" : "assistant-card"}`}>
+                      {m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0 && (
+                        <div className="chat-msg-tools">
+                          {m.toolCalls.map((tc, i) => (
+                            <ToolBrick
+                              key={tc.id || `${tc.name}-${i}`}
+                              icon={tc.status === "running" ? "loader" : tc.status === "done" ? "check" : "alert-circle"}
+                              name={tc.name}
+                              status={tc.status}
+                              result={tc.result}
+                              onTraceClick={() => {
+                                setTraceFilter(tc.name);
+                                setSidePanelTab("trace");
+                                setTraceOpen(true);
+                              }}
+                            />
+                          ))}
                         </div>
                       )}
-                      <MarkdownContent content={m.text} isStreaming={m.isStreaming} />
-                    </div>
 
-                    {m.role === "assistant" && (m.tokens || m.cost || m.duration || (m.skills && m.skills.length > 0)) && (
-                      <div className="chat-msg-meta">
-                        {m.tokens != null && <span className="meta-badge">{m.tokens.toLocaleString()} tokens</span>}
-                        {m.cost != null && <span className="meta-badge">${m.cost.toFixed(4)}</span>}
-                        {m.duration != null && <span className="meta-badge">{(m.duration / 1000).toFixed(1)}s</span>}
-                        {m.skills?.map((s) => (
-                          <span key={s} className="meta-badge skill-badge">{s}</span>
-                        ))}
+                      {m.role === "assistant" && m.askHuman && (
+                        <AskHumanCard askHuman={m.askHuman} onRespond={handleAskHumanRespond} />
+                      )}
+
+                      <div className="chat-msg-content">
+                        {m.role === "assistant" && m.thinkingText && (
+                          <ThinkingBlock text={m.thinkingText} />
+                        )}
+                        {m.role === "assistant" && m.retryStatus && !m.text && (
+                          <div className="chat-retry-status">
+                            <Icon name="loader" className="spin" />
+                            <span>{m.retryStatus}</span>
+                          </div>
+                        )}
+                        <MarkdownContent content={m.text} isStreaming={m.isStreaming} />
                       </div>
-                    )}
+
+                      {m.role === "assistant" && (m.tokens || m.cost || m.duration || (m.skills && m.skills.length > 0)) && (
+                        <div className="chat-msg-meta">
+                          {m.tokens != null && <span className="meta-badge">{m.tokens.toLocaleString()} tokens</span>}
+                          {m.cost != null && <span className="meta-badge">${m.cost.toFixed(4)}</span>}
+                          {m.duration != null && <span className="meta-badge">{(m.duration / 1000).toFixed(1)}s</span>}
+                          {m.skills?.map((s) => (
+                            <span key={s} className="meta-badge skill-badge">{s}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 ))}
                 {isSending && (() => {
@@ -2039,11 +2101,13 @@ export function ChatPage({
                   if (!showThinking) return null;
                   return (
                     <div className="chat-msg-row chat-thinking-indicator">
-                      <div className="chat-msg-content">
-                        <div className="typing-dots">
-                          <span />
-                          <span />
-                          <span />
+                      <div className="chat-msg-card assistant-card chat-msg-card--thinking">
+                        <div className="chat-msg-content">
+                          <div className="typing-dots">
+                            <span />
+                            <span />
+                            <span />
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -2094,24 +2158,6 @@ export function ChatPage({
                 />
                 <div className="chat-composer-actions">
                   <div className="chat-composer-left">
-                    <button
-                      className="btn ghost"
-                      onClick={() => setShowSidebar(!showSidebar)}
-                      title="Toggle History"
-                      style={{ padding: "4px 8px", color: "var(--text-soft)" }}
-                    >
-                      <Icon name="clock" />
-                    </button>
-                    {!showSidebar && (
-                      <button
-                        className="btn ghost"
-                        onClick={startNewThread}
-                        title="New thread"
-                        style={{ padding: "4px 8px", color: "var(--text-soft)" }}
-                      >
-                        <Icon name="plus" />
-                      </button>
-                    )}
                     <ModelSelector
                       currentModel={effectiveModel}
                       currentProviderId={effectiveProviderId}
@@ -2122,22 +2168,7 @@ export function ChatPage({
                     <div className="badge-safe" title="Safe Mode is on — your data stays on your device and is never sent to external servers without your permission.">
                       <Icon name="shield" /> Safe Mode
                     </div>
-                    <button
-                      className={`btn ghost ${traceOpen ? "active" : ""}`}
-                      onClick={() => setTraceOpen(!traceOpen)}
-                      title="Toggle Trace Panel"
-                      style={{ padding: "4px 8px", color: traceOpen ? "var(--accent)" : "var(--text-soft)" }}
-                    >
-                      <Icon name="activity" />
-                    </button>
-                    <button
-                      className={`btn ghost ${previewOpen ? "active" : ""}`}
-                      onClick={() => setPreviewOpen(!previewOpen)}
-                      title="Toggle Preview Panel"
-                      style={{ padding: "4px 8px", color: previewOpen ? "var(--accent)" : "var(--text-soft)" }}
-                    >
-                      <Icon name="eye" />
-                    </button>
+                    {isSending && <span className="chat-composer-status">Streaming response</span>}
                   </div>
                   <VoiceInput
                     onTranscription={(text) => {

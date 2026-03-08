@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useMemo, Fragment } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import * as api from "../api";
 import { PageLayout } from "../components/PageLayout";
 import { Icon } from "../components/Icon";
+import { Modal } from "../components/Modal";
 import type {
   IntegrationInfo,
   IntegrationCategoryInfo,
@@ -29,8 +30,8 @@ function groupFields(fields: ConfigFieldInfo[]): Map<string, ConfigFieldInfo[]> 
 
 // Shared input class names
 const INPUT_CLS =
-  "w-full px-3 py-1.5 text-sm rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-900 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400 placeholder:text-neutral-400";
-const BADGE_CLS = "text-[10px] px-1.5 py-0.5 rounded";
+  "extensions-input";
+const BADGE_CLS = "extensions-badge";
 
 // ── ConfigFieldInput ──────────────────────────────────────────
 
@@ -137,23 +138,29 @@ function ConfigFieldInput({
   }
 }
 
-// ── IntegrationConfigPanel ────────────────────────────────────
+// ── IntegrationConfigDialog ───────────────────────────────────
 
-function IntegrationConfigPanel({
+function IntegrationConfigDialog({
   integration,
   pushToast,
   onSaved,
+  onClose,
 }: {
   integration: IntegrationInfo;
   pushToast: (msg: string) => void;
   onSaved: () => void;
+  onClose: () => void;
 }) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [credInputs, setCredInputs] = useState<Record<string, string>>({});
   const [credStatuses, setCredStatuses] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [loadingPanel, setLoadingPanel] = useState(true);
+  const [testResult, setTestResult] = useState<HealthStatusInfo | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [hasPersistedSetup, setHasPersistedSetup] = useState(false);
 
   // Hydrate draft + credential statuses on mount
   useEffect(() => {
@@ -172,6 +179,9 @@ function IntegrationConfigPanel({
         }
         setDraft(merged);
         setCredStatuses(creds);
+        setHasPersistedSetup(
+          Object.values(merged).some((value) => value.trim() !== "") || Object.values(creds).some(Boolean)
+        );
       } finally {
         if (!cancelled) setLoadingPanel(false);
       }
@@ -181,9 +191,17 @@ function IntegrationConfigPanel({
 
   const grouped = useMemo(() => groupFields(integration.config_fields), [integration.config_fields]);
 
+  const healthTone = (state?: string) => {
+    if (state === "Healthy") return "success";
+    if (state === "Degraded") return "warning";
+    if (state === "Unhealthy") return "danger";
+    return "neutral";
+  };
+
   const handleSave = async () => {
     setSaving(true);
     setValidationErrors([]);
+    setSaveMessage(null);
     try {
       // Save config values (non-empty only)
       const toSave: Record<string, string> = {};
@@ -203,8 +221,10 @@ function IntegrationConfigPanel({
       const missing = await api.validateExtensionConfig(integration.name).catch(() => []);
       if (missing.length > 0) {
         setValidationErrors(missing);
+        setSaveMessage(`Saved, but ${missing.length} required field${missing.length > 1 ? "s are" : " is"} still missing.`);
         pushToast(`Saved, but ${missing.length} required field(s) still missing`);
       } else {
+        setSaveMessage(`${hasPersistedSetup ? "Configuration updated" : "Configuration saved"} for ${integration.name}.`);
         pushToast(`Configuration saved for ${integration.name}`);
       }
 
@@ -212,17 +232,36 @@ function IntegrationConfigPanel({
       const creds = await api.checkExtensionCredentials(integration.name).catch(() => ({} as Record<string, boolean>));
       setCredStatuses(creds);
       setCredInputs({});
+      setHasPersistedSetup(true);
       onSaved();
     } catch (e: any) {
+      setSaveMessage(null);
       pushToast(`Save failed: ${e}`);
     } finally {
       setSaving(false);
     }
   };
 
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await api.checkIntegrationHealth(integration.name);
+      setTestResult(result);
+      pushToast(`${integration.name}: ${result.state}${result.latency_ms != null ? ` (${result.latency_ms}ms)` : ""}`);
+      onSaved();
+    } catch (e: any) {
+      pushToast(`Test failed: ${e}`);
+    } finally {
+      setTesting(false);
+    }
+  };
+
   if (loadingPanel) {
     return (
-      <div className="px-4 py-6 text-sm text-neutral-500 text-center">Loading configuration…</div>
+      <Modal title={`${integration.name} configuration`} onClose={onClose}>
+        <div className="extensions-config-loading">Loading configuration…</div>
+      </Modal>
     );
   }
 
@@ -230,109 +269,119 @@ function IntegrationConfigPanel({
   const hasCredentials = integration.credentials_required.length > 0;
 
   return (
-    <div className="px-4 pb-4 space-y-5 border-t border-neutral-200 dark:border-neutral-700 bg-neutral-100/50 dark:bg-neutral-900/30">
-      {/* ── Transport badge ─────────────────────── */}
-      <div className="flex items-center gap-2 pt-3">
-        <span className="text-[10px] font-medium text-neutral-400 uppercase tracking-wide">Transport</span>
-        <span className={`${BADGE_CLS} bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300`}>
-          {integration.transport_type}
-        </span>
-      </div>
-
-      {/* ── Config field groups ─────────────────── */}
-      {hasConfigFields && (
-        <div className="space-y-4">
-          {[...grouped.entries()].map(([group, fields]) => (
-            <fieldset key={group} className="space-y-3">
-              <legend className="text-xs font-semibold text-neutral-500 dark:text-neutral-400 uppercase tracking-wide">
-                {group}
-              </legend>
-              {fields.map(f => (
-                <div key={f.key} className="space-y-1">
-                  <label className="flex items-center gap-1 text-xs font-medium text-neutral-700 dark:text-neutral-300">
-                    {f.label}
-                    {f.required && <span className="text-red-500">*</span>}
-                  </label>
-                  {f.description && (
-                    <div className="text-[11px] text-neutral-400 mb-1">{f.description}</div>
-                  )}
-                  <ConfigFieldInput
-                    field={f}
-                    value={draft[f.key] ?? ""}
-                    onChange={v => setDraft(prev => ({ ...prev, [f.key]: v }))}
-                  />
-                  {validationErrors.includes(f.key) && (
-                    <div className="text-[11px] text-red-500">This field is required</div>
-                  )}
-                </div>
-              ))}
-            </fieldset>
-          ))}
-        </div>
-      )}
-
-      {/* ── Credential requirements ────────────── */}
-      {hasCredentials && (
-        <fieldset className="space-y-3">
-          <legend className="text-xs font-semibold text-neutral-500 dark:text-neutral-400 uppercase tracking-wide">
-            Credentials
-          </legend>
-          {integration.credentials_required.map(cred => {
-            const ok = credStatuses[cred.name] === true;
-            return (
-              <div key={cred.name} className="space-y-1">
-                <label className="flex items-center gap-2 text-xs font-medium text-neutral-700 dark:text-neutral-300">
-                  <span className={`inline-block w-2 h-2 rounded-full ${ok ? "bg-green-500" : "bg-red-400"}`} />
-                  {cred.name}
-                  {cred.required && <span className="text-red-500">*</span>}
-                  {ok && <span className="text-[10px] text-green-600 dark:text-green-400">(configured)</span>}
-                </label>
-                {cred.description && (
-                  <div className="text-[11px] text-neutral-400">{cred.description}</div>
-                )}
-                {cred.env_var && (
-                  <div className="text-[10px] text-neutral-400 font-mono">env: {cred.env_var}</div>
-                )}
-                {!ok && (
-                  <input
-                    type="password"
-                    value={credInputs[cred.name] ?? ""}
-                    onChange={e => setCredInputs(prev => ({ ...prev, [cred.name]: e.target.value }))}
-                    placeholder={`Enter ${cred.name}`}
-                    className={INPUT_CLS}
-                  />
-                )}
+    <Modal title={`${integration.name} configuration`} onClose={onClose}>
+      <div className="extensions-config-dialog">
+        <section className="extensions-config-hero">
+          <div className="extensions-config-hero__main">
+            <div className="extensions-config-hero__title">
+              <span className="extensions-config-hero__icon">{integration.icon}</span>
+              <div>
+                <h3>{integration.name}</h3>
+                <p>{integration.description}</p>
               </div>
-            );
-          })}
-        </fieldset>
-      )}
+            </div>
+            <div className="extensions-config-hero__chips">
+              <span className={`${BADGE_CLS} extensions-badge--neutral`}>{integration.category}</span>
+              <span className={`${BADGE_CLS} extensions-badge--transport`}>{integration.transport_type}</span>
+              {integration.has_oauth ? <span className={`${BADGE_CLS} extensions-badge--success`}>OAuth</span> : null}
+            </div>
+          </div>
+          <div className="extensions-config-hero__side">
+            <div className={`extensions-health-pill extensions-health-pill--${healthTone(testResult?.state)}`}>
+              {testResult?.state ?? "Not tested"}
+            </div>
+            {testResult?.latency_ms != null ? <div className="extensions-health-meta">{testResult.latency_ms}ms latency</div> : <div className="extensions-health-meta">Testing checks the saved integration health endpoint.</div>}
+          </div>
+        </section>
 
-      {/* ── No config message ──────────────────── */}
-      {!hasConfigFields && !hasCredentials && (
-        <div className="text-xs text-neutral-500 pt-2">
-          This integration requires no additional configuration. Just enable it.
-        </div>
-      )}
+        {saveMessage ? <div className="extensions-config-banner extensions-config-banner--success">{saveMessage}</div> : null}
+        {validationErrors.length > 0 ? <div className="extensions-config-banner extensions-config-banner--warning">{validationErrors.length} required field{validationErrors.length > 1 ? "s are" : " is"} still missing.</div> : null}
 
-      {/* ── Actions ────────────────────────────── */}
-      {(hasConfigFields || hasCredentials) && (
-        <div className="flex items-center gap-3 pt-1">
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="px-4 py-1.5 text-sm rounded font-medium bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {saving ? "Saving…" : "Save Configuration"}
-          </button>
-          {validationErrors.length > 0 && (
-            <span className="text-xs text-amber-600 dark:text-amber-400">
-              {validationErrors.length} required field{validationErrors.length > 1 ? "s" : ""} missing
-            </span>
-          )}
+        {hasConfigFields && (
+          <div className="extensions-config-groups">
+            {[...grouped.entries()].map(([group, fields]) => (
+              <fieldset key={group} className="extensions-config-group">
+                <legend>{group}</legend>
+                <div className="extensions-config-group__grid">
+                  {fields.map(f => (
+                    <div key={f.key} className="extensions-config-field">
+                      <label className="extensions-config-field__label">
+                        {f.label}
+                        {f.required && <span>*</span>}
+                      </label>
+                      {f.description ? <div className="extensions-config-field__help">{f.description}</div> : null}
+                      <ConfigFieldInput
+                        field={f}
+                        value={draft[f.key] ?? ""}
+                        onChange={v => setDraft(prev => ({ ...prev, [f.key]: v }))}
+                      />
+                      {validationErrors.includes(f.key) ? <div className="extensions-config-field__error">This field is required.</div> : null}
+                    </div>
+                  ))}
+                </div>
+              </fieldset>
+            ))}
+          </div>
+        )}
+
+        {hasCredentials && (
+          <fieldset className="extensions-config-group">
+            <legend>Credentials</legend>
+            <div className="extensions-credentials-grid">
+              {integration.credentials_required.map(cred => {
+                const ok = credStatuses[cred.name] === true;
+                return (
+                  <div key={cred.name} className="extensions-credential-card">
+                    <div className="extensions-credential-card__head">
+                      <div>
+                        <div className="extensions-credential-card__title">
+                          <span className={`extensions-credential-dot ${ok ? "ok" : "missing"}`} />
+                          {cred.name}
+                          {cred.required ? <span className="extensions-required-mark">*</span> : null}
+                        </div>
+                        {cred.description ? <div className="extensions-config-field__help">{cred.description}</div> : null}
+                        {cred.env_var ? <div className="extensions-credential-card__env">env: {cred.env_var}</div> : null}
+                      </div>
+                      <span className={`${BADGE_CLS} ${ok ? "extensions-badge--success" : "extensions-badge--neutral"}`}>{ok ? "Configured" : "Missing"}</span>
+                    </div>
+                    <input
+                      type="password"
+                      value={credInputs[cred.name] ?? ""}
+                      onChange={e => setCredInputs(prev => ({ ...prev, [cred.name]: e.target.value }))}
+                      placeholder={ok ? `Replace ${cred.name}` : `Enter ${cred.name}`}
+                      className={INPUT_CLS}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </fieldset>
+        )}
+
+        {!hasConfigFields && !hasCredentials ? (
+          <div className="extensions-config-empty">This integration requires no additional configuration. You can enable it directly or run a health test.</div>
+        ) : null}
+
+        <div className="extensions-config-actions">
+          <div className="extensions-config-actions__left">
+            {integration.has_oauth ? (
+              <button onClick={() => void api.startExtensionOAuth(integration.name).then(flow => { window.open(flow.auth_url, "_blank"); pushToast(`Opening OAuth flow for ${integration.name}…`); }).catch((e: any) => pushToast(`OAuth error: ${e}`))} className="btn subtle">
+                <Icon name="link" /> OAuth
+              </button>
+            ) : null}
+            <button onClick={handleTest} disabled={testing} className="btn subtle">
+              <Icon name="activity" /> {testing ? "Testing…" : "Test Connection"}
+            </button>
+          </div>
+          <div className="extensions-config-actions__right">
+            <button onClick={onClose} className="btn ghost">Close</button>
+            <button onClick={handleSave} disabled={saving} className="btn primary">
+              <Icon name="check" /> {saving ? "Saving…" : hasPersistedSetup ? "Update Configuration" : "Save Configuration"}
+            </button>
+          </div>
         </div>
-      )}
-    </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -356,8 +405,7 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
   const [credentialName, setCredentialName] = useState("");
   const [credentialValue, setCredentialValue] = useState("");
   const [credentialNames, setCredentialNames] = useState<string[]>([]);
-  // Which integration card (by name) is expanded to show config.
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [selectedIntegration, setSelectedIntegration] = useState<IntegrationInfo | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -475,6 +523,14 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
     ? integrations
     : integrations.filter(i => i.category === filterCategory);
 
+  const enabledCount = integrations.filter((integration) => integration.enabled).length;
+  const oauthCount = integrations.filter((integration) => integration.has_oauth).length;
+  const healthMap = useMemo(() => {
+    const map = new Map<string, HealthStatusInfo>();
+    for (const status of healthStatuses) map.set(status.name, status);
+    return map;
+  }, [healthStatuses]);
+
   const TABS: { key: ExtTab; label: string }[] = [
     { key: "integrations", label: "Integrations" },
     { key: "vault", label: "Credential Vault" },
@@ -488,31 +544,38 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
       onRefresh={refresh}
       loading={loading}
     >
-      {/* ── Tab bar ────────────────────────────────────── */}
-      <div className="flex gap-1 mb-4 border-b border-neutral-200 dark:border-neutral-700">
+      <div className="extensions-page-shell">
+      <section className="extensions-hero">
+        <div className="extensions-hero__intro">
+          <span className="extensions-hero__eyebrow">Integration registry</span>
+          <h2>Connect external systems, configure credentials in context, and verify they are actually working.</h2>
+          <p>{enabledCount} enabled, {oauthCount} OAuth-capable, and {categories.length} categories available across the extension catalog.</p>
+        </div>
+        <div className="extensions-hero__stats">
+          <div className="extensions-hero-stat"><span>Enabled</span><strong>{enabledCount}</strong><small>Active integrations</small></div>
+          <div className="extensions-hero-stat"><span>OAuth</span><strong>{oauthCount}</strong><small>Browser-based auth flows</small></div>
+          <div className="extensions-hero-stat"><span>Categories</span><strong>{categories.length}</strong><small>Integration domains</small></div>
+        </div>
+      </section>
+
+      <div className="extensions-tabs">
         {TABS.map(t => (
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
-            className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
-              tab === t.key
-                ? "border-blue-500 text-blue-600 dark:text-blue-400"
-                : "border-transparent text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300"
-            }`}
+            className={`extensions-tab${tab === t.key ? " active" : ""}`}
           >
             {t.label}
           </button>
         ))}
       </div>
 
-      {/* ── Integrations Tab ───────────────────────────── */}
       {tab === "integrations" && (
-        <div className="space-y-4">
-          {/* Category filter */}
-          <div className="flex gap-2 flex-wrap">
+        <div className="extensions-pane">
+          <div className="extensions-filter-row">
             <button
               onClick={() => setFilterCategory("all")}
-              className={`px-2 py-1 text-xs rounded ${filterCategory === "all" ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300" : "bg-neutral-100 dark:bg-neutral-800"}`}
+              className={`extensions-filter-chip${filterCategory === "all" ? " active" : ""}`}
             >
               All ({integrations.length})
             </button>
@@ -520,138 +583,126 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
               <button
                 key={c.name}
                 onClick={() => setFilterCategory(c.name)}
-                className={`px-2 py-1 text-xs rounded ${filterCategory === c.name ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300" : "bg-neutral-100 dark:bg-neutral-800"}`}
+                className={`extensions-filter-chip${filterCategory === c.name ? " active" : ""}`}
               >
                 {c.name} ({c.count})
               </button>
             ))}
           </div>
 
-          {/* Integration list */}
-          <div className="grid gap-3">
+          <div className="extensions-list">
             {filtered.map(i => {
-              const isExpanded = expanded === i.name;
               const configurable = i.config_fields.length > 0 || i.credentials_required.length > 0;
+              const health = healthMap.get(i.name);
               return (
                 <div
                   key={i.name}
-                  className={`rounded-lg border transition-colors ${
-                    isExpanded
-                      ? "border-blue-300 dark:border-blue-700 bg-white dark:bg-neutral-800"
-                      : "border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800/50"
-                  }`}
+                  className="extensions-card"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setSelectedIntegration(i)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setSelectedIntegration(i);
+                    }
+                  }}
                 >
-                  {/* Card header — always visible */}
-                  <div
-                    className="flex items-center justify-between p-3 cursor-pointer select-none"
-                    onClick={() => setExpanded(isExpanded ? null : i.name)}
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="text-2xl shrink-0">{i.icon}</span>
-                      <div className="min-w-0">
-                        <div className="font-medium text-sm flex items-center gap-2">
-                          {i.name}
-                          {configurable && (
-                            <svg
-                              className={`w-3.5 h-3.5 text-neutral-400 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-                              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-                            >
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                            </svg>
-                          )}
+                  <div className="extensions-card__main">
+                    <div className="extensions-card__identity">
+                      <span className="extensions-card__icon">{i.icon}</span>
+                      <div className="extensions-card__text">
+                        <div className="extensions-card__title-row">
+                          <strong>{i.name}</strong>
+                          <span className={`extensions-card__health extensions-card__health--${formatHealthTone(health?.state)}`}>{health?.state ?? "Unknown"}</span>
                         </div>
-                        <div className="text-xs text-neutral-500 truncate">{i.description}</div>
-                        <div className="flex gap-1 mt-1 flex-wrap">
-                          <span className={`${BADGE_CLS} bg-neutral-200 dark:bg-neutral-700`}>{i.category}</span>
-                          <span className={`${BADGE_CLS} bg-neutral-200 dark:bg-neutral-700 font-mono`}>{i.transport_type}</span>
-                          {i.has_oauth && <span className={`${BADGE_CLS} bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300`}>OAuth</span>}
+                        <p>{i.description}</p>
+                        <div className="extensions-card__chips">
+                          <span className={`${BADGE_CLS} extensions-badge--neutral`}>{i.category}</span>
+                          <span className={`${BADGE_CLS} extensions-badge--transport`}>{i.transport_type}</span>
+                          {i.has_oauth && <span className={`${BADGE_CLS} extensions-badge--success`}>OAuth</span>}
                           {i.credentials_required.length > 0 && (
-                            <span className={`${BADGE_CLS} bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300`}>
+                            <span className={`${BADGE_CLS} extensions-badge--warning`}>
                               {i.credentials_required.length} cred{i.credentials_required.length > 1 ? "s" : ""}
                             </span>
                           )}
                           {i.config_fields.length > 0 && (
-                            <span className={`${BADGE_CLS} bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300`}>
+                            <span className={`${BADGE_CLS} extensions-badge--accent`}>
                               {i.config_fields.length} setting{i.config_fields.length > 1 ? "s" : ""}
                             </span>
                           )}
+                          {!configurable && <span className={`${BADGE_CLS} extensions-badge--neutral`}>No setup</span>}
                         </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0" onClick={e => e.stopPropagation()}>
+                    <div className="extensions-card__actions" onClick={e => e.stopPropagation()}>
+                      <button
+                        onClick={() => setSelectedIntegration(i)}
+                        className="btn subtle"
+                      >
+                        {configurable ? "Configure" : "Open"}
+                      </button>
                       {i.has_oauth && (
                         <button
                           onClick={() => handleOAuth(i.name)}
-                          className="text-xs px-2 py-1 rounded bg-blue-500 text-white hover:bg-blue-600"
+                          className="btn subtle"
                         >
                           OAuth
                         </button>
                       )}
                       <button
                         onClick={() => handleToggle(i.name, i.enabled)}
-                        className={`text-xs px-3 py-1 rounded font-medium ${
-                          i.enabled
-                            ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
-                            : "bg-neutral-200 text-neutral-600 dark:bg-neutral-700 dark:text-neutral-400"
-                        }`}
+                        className={`extensions-toggle${i.enabled ? " enabled" : ""}`}
                       >
                         {i.enabled ? "Enabled" : "Disabled"}
                       </button>
                     </div>
                   </div>
-
-                  {/* Expanded config panel */}
-                  {isExpanded && (
-                    <IntegrationConfigPanel
-                      integration={i}
-                      pushToast={pushToast}
-                      onSaved={refresh}
-                    />
-                  )}
                 </div>
               );
             })}
             {filtered.length === 0 && (
-              <div className="text-center text-neutral-500 py-8">No integrations found</div>
+              <div className="extensions-empty">No integrations found</div>
             )}
           </div>
         </div>
       )}
 
-      {/* ── Vault Tab ──────────────────────────────────── */}
       {tab === "vault" && (
-        <div className="space-y-4">
-          {/* Vault status */}
-          <div className="p-4 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700">
-            <div className="flex items-center justify-between mb-3">
-              <div className="font-medium">Credential Vault</div>
-              <span className={`text-xs px-2 py-1 rounded font-medium ${
+        <div className="extensions-pane">
+          <div className="extensions-surface">
+            <div className="extensions-surface__head">
+              <div>
+                <h3>Credential Vault</h3>
+                <p>Securely store integration secrets and manage reusable credentials.</p>
+              </div>
+              <span className={`extensions-status-chip ${
                 vaultStatus?.unlocked
-                  ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
-                  : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300"
+                  ? "success"
+                  : "warning"
               }`}>
                 {vaultStatus?.unlocked ? "Unlocked" : vaultStatus?.exists ? "Locked" : "Not Created"}
               </span>
             </div>
             {vaultStatus?.unlocked && (
-              <div className="text-xs text-neutral-500 mb-3">
+              <div className="extensions-surface__meta">
                 {vaultStatus.credential_count} credential{vaultStatus.credential_count !== 1 ? "s" : ""} stored
               </div>
             )}
 
             {!vaultStatus?.unlocked && (
-              <div className="flex gap-2">
+              <div className="extensions-inline-form">
                 <input
                   type="password"
                   value={vaultPassword}
                   onChange={e => setVaultPassword(e.target.value)}
                   placeholder={vaultStatus?.exists ? "Enter master password" : "Create master password"}
-                  className="flex-1 px-3 py-1.5 text-sm rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-900"
+                  className={INPUT_CLS}
                   onKeyDown={e => e.key === "Enter" && handleVaultUnlock()}
                 />
                 <button
                   onClick={handleVaultUnlock}
-                  className="px-3 py-1.5 text-sm rounded bg-blue-500 text-white hover:bg-blue-600"
+                  className="btn primary"
                 >
                   {vaultStatus?.exists ? "Unlock" : "Create"}
                 </button>
@@ -661,35 +712,39 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
             {vaultStatus?.unlocked && (
               <button
                 onClick={handleVaultLock}
-                className="text-xs px-3 py-1 rounded bg-neutral-200 dark:bg-neutral-700 hover:bg-neutral-300 dark:hover:bg-neutral-600"
+                className="btn subtle"
               >
                 Lock Vault
               </button>
             )}
           </div>
 
-          {/* Store credential */}
           {vaultStatus?.unlocked && (
-            <div className="p-4 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700">
-              <div className="font-medium text-sm mb-3">Add Credential</div>
-              <div className="flex gap-2 mb-2">
+            <div className="extensions-surface">
+              <div className="extensions-surface__head">
+                <div>
+                  <h3>Add Credential</h3>
+                  <p>Store a reusable secret in the vault.</p>
+                </div>
+              </div>
+              <div className="extensions-inline-form">
                 <input
                   type="text"
                   value={credentialName}
                   onChange={e => setCredentialName(e.target.value)}
                   placeholder="Name (e.g. github_token)"
-                  className="flex-1 px-3 py-1.5 text-sm rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-900"
+                  className={INPUT_CLS}
                 />
                 <input
                   type="password"
                   value={credentialValue}
                   onChange={e => setCredentialValue(e.target.value)}
                   placeholder="Secret value"
-                  className="flex-1 px-3 py-1.5 text-sm rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-900"
+                  className={INPUT_CLS}
                 />
                 <button
                   onClick={handleStoreCredential}
-                  className="px-3 py-1.5 text-sm rounded bg-green-500 text-white hover:bg-green-600"
+                  className="btn primary"
                 >
                   Store
                 </button>
@@ -697,17 +752,21 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
             </div>
           )}
 
-          {/* Credential list */}
           {vaultStatus?.unlocked && credentialNames.length > 0 && (
-            <div className="p-4 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700">
-              <div className="font-medium text-sm mb-3">Stored Credentials</div>
-              <div className="space-y-2">
+            <div className="extensions-surface">
+              <div className="extensions-surface__head">
+                <div>
+                  <h3>Stored Credentials</h3>
+                  <p>Vault entries currently available to extensions.</p>
+                </div>
+              </div>
+              <div className="extensions-credential-list">
                 {credentialNames.map(name => (
-                  <div key={name} className="flex items-center justify-between text-sm">
-                    <span className="font-mono text-xs">{name}</span>
+                  <div key={name} className="extensions-credential-row">
+                    <span className="extensions-credential-row__name">{name}</span>
                     <button
                       onClick={() => handleDeleteCredential(name)}
-                      className="text-xs text-red-500 hover:text-red-700"
+                      className="btn ghost"
                     >
                       Delete
                     </button>
@@ -719,40 +778,36 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
         </div>
       )}
 
-      {/* ── Health Tab ─────────────────────────────────── */}
       {tab === "health" && (
-        <div className="space-y-3">
+        <div className="extensions-pane">
           {healthStatuses.length === 0 && (
-            <div className="text-center text-neutral-500 py-8">No health checks registered yet</div>
+            <div className="extensions-empty">No health checks registered yet</div>
           )}
           {healthStatuses.map(h => (
             <div
               key={h.name}
-              className="flex items-center justify-between p-3 rounded-lg bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700"
+              className="extensions-health-row"
             >
               <div>
-                <div className="font-medium text-sm">{h.name}</div>
-                <div className="text-xs text-neutral-500">
+                <div className="extensions-health-row__title">{h.name}</div>
+                <div className="extensions-health-row__meta">
                   {h.state}
                   {h.latency_ms != null && ` • ${h.latency_ms}ms`}
                   {h.consecutive_failures > 0 && ` • ${h.consecutive_failures} failures`}
                 </div>
                 {h.last_check && (
-                  <div className="text-[10px] text-neutral-400">
+                  <div className="extensions-health-row__submeta">
                     Last check: {new Date(h.last_check).toLocaleString()}
                   </div>
                 )}
               </div>
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${
-                  h.state === "Healthy" ? "bg-green-500" :
-                  h.state === "Degraded" ? "bg-yellow-500" :
-                  h.state === "Unhealthy" ? "bg-red-500" :
-                  "bg-neutral-400"
-                }`} />
+              <div className="extensions-health-row__actions">
+                <span className={`extensions-status-chip ${formatHealthTone(h.state)}`}>
+                  {h.state}
+                </span>
                 <button
                   onClick={() => handleCheckHealth(h.name)}
-                  className="text-xs px-2 py-1 rounded bg-neutral-200 dark:bg-neutral-700 hover:bg-neutral-300 dark:hover:bg-neutral-600"
+                  className="btn subtle"
                 >
                   Check
                 </button>
@@ -761,6 +816,23 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
           ))}
         </div>
       )}
+      </div>
+
+      {selectedIntegration ? (
+        <IntegrationConfigDialog
+          integration={selectedIntegration}
+          pushToast={pushToast}
+          onSaved={refresh}
+          onClose={() => setSelectedIntegration(null)}
+        />
+      ) : null}
     </PageLayout>
   );
+}
+
+function formatHealthTone(state?: string) {
+  if (state === "Healthy") return "success";
+  if (state === "Degraded") return "warning";
+  if (state === "Unhealthy") return "danger";
+  return "neutral";
 }

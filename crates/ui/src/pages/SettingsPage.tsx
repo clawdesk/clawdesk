@@ -51,12 +51,12 @@ const PIE_COLORS = [CHART_ACCENT, CHART_BLUE, CHART_GREEN, CHART_YELLOW, "#7C3AE
 type SettingsTab = "preferences" | "providers" | "security" | "observe" | "infra" | "backup";
 
 const TABS: { id: SettingsTab; label: string; icon: string }[] = [
-  { id: "preferences", label: "Preferences", icon: "⚙️" },
-  { id: "providers", label: "Providers", icon: "🧠" },
-  { id: "security", label: "Security", icon: "🛡️" },
-  { id: "observe", label: "Observability", icon: "📈" },
-  { id: "infra", label: "Infrastructure", icon: "🔧" },
-  { id: "backup", label: "Backup", icon: "💾" },
+  { id: "preferences", label: "Preferences", icon: "settings" },
+  { id: "providers", label: "Providers", icon: "brand" },
+  { id: "security", label: "Security", icon: "shield" },
+  { id: "observe", label: "Observability", icon: "bar-chart" },
+  { id: "infra", label: "Infrastructure", icon: "cpu" },
+  { id: "backup", label: "Backup", icon: "archive" },
 ];
 
 interface BackupEntry {
@@ -173,6 +173,15 @@ export function SettingsPage({
   const [backups, setBackups] = useState<BackupEntry[]>([]);
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
+  const currentTabDef = TABS.find((item) => item.id === tab) ?? TABS[0];
+  const currentTabSummary: Record<SettingsTab, string> = {
+    preferences: "Personal preferences, setup recovery, and safety controls.",
+    providers: "Provider routing, connection testing, and cost posture.",
+    security: "Identity, audit trails, policy state, and access posture.",
+    observe: "Tracing, cost trends, and persistence diagnostics.",
+    infra: "Tunnel status, media pipeline, runtime, and infra components.",
+    backup: "Backups, restore points, and data portability.",
+  };
 
   // ── Debug mode state ──
   const [debugEnabled, setDebugEnabled] = useState(false);
@@ -328,6 +337,11 @@ export function SettingsPage({
       <div className="settings-layout">
         {/* Sidebar Navigation */}
         <aside className="settings-sidebar">
+          <div className="settings-sidebar-head">
+            <span className="settings-sidebar-kicker">Control center</span>
+            <h2>System settings</h2>
+            <p>Configure providers, security, observability, infrastructure, and recovery.</p>
+          </div>
           <nav className="settings-nav">
             {TABS.map((t) => (
               <button
@@ -335,7 +349,7 @@ export function SettingsPage({
                 className={`settings-nav-item ${tab === t.id ? "active" : ""}`}
                 onClick={() => setTab(t.id)}
               >
-                <span className="settings-nav-icon">{t.icon}</span>
+                <span className="settings-nav-icon"><Icon name={t.icon} className="w-4 h-4" /></span>
                 <span className="settings-nav-label">{t.label}</span>
               </button>
             ))}
@@ -344,6 +358,31 @@ export function SettingsPage({
 
         {/* Content Area */}
         <div className="settings-content-area">
+          <section className="settings-hero">
+            <div className="settings-hero__main">
+              <span className="settings-hero__eyebrow">{currentTabDef.label}</span>
+              <h2>Configure the operating rules behind your ClawDesk workspace.</h2>
+              <p>{currentTabSummary[tab]}</p>
+            </div>
+            <div className="settings-hero__stats">
+              <div className="settings-hero-stat">
+                <span>Agents</span>
+                <strong>{agents.length}</strong>
+                <small>Configured operators</small>
+              </div>
+              <div className="settings-hero-stat">
+                <span>Channels</span>
+                <strong>{channels.length}</strong>
+                <small>Connected communication surfaces</small>
+              </div>
+              <div className="settings-hero-stat">
+                <span>Providers</span>
+                <strong>{providerConfigs.length}</strong>
+                <small>LLM routes available</small>
+              </div>
+            </div>
+          </section>
+
           {/* ═══ PREFERENCES TAB ═══ */}
           {tab === "preferences" && (
             <div className="settings-panel">
