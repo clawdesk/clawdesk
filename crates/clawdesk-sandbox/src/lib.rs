@@ -2,8 +2,7 @@
 //!
 //! Multi-modal sandbox isolation for ClawDesk agent tool execution.
 //!
-//! Provides 4 sandbox runtimes unified behind a single `Sandbox` trait:
-//! - **WASM** (Wasmtime): Memory-safe, capability-based isolation for untrusted plugins
+//! Provides sandbox runtimes unified behind a single `Sandbox` trait:
 //! - **Docker**: OS-level namespace isolation for shell/binary execution
 //! - **Subprocess**: Environment-sanitized process spawning (no Docker required)
 //! - **Workspace**: Filesystem path confinement with symlink escape prevention
@@ -11,7 +10,7 @@
 //! ## Architecture
 //!
 //! ```text
-//! IsolationLevel::FullSandbox   → WasmSandbox (if feature "sandbox-wasm")
+//! IsolationLevel::FullSandbox   → DockerSandbox (if feature "sandbox-docker") or SubprocessSandbox fallback
 //! IsolationLevel::ProcessIso    → DockerSandbox (if feature "sandbox-docker") or SubprocessSandbox
 //! IsolationLevel::PathScope     → WorkspaceSandbox
 //! IsolationLevel::None          → pass-through (no isolation)
@@ -23,8 +22,6 @@ pub mod dispatch;
 #[cfg(feature = "sandbox-docker")]
 pub mod docker;
 pub mod subprocess;
-#[cfg(feature = "sandbox-wasm")]
-pub mod wasm;
 pub mod workspace;
 
 use async_trait::async_trait;
@@ -40,8 +37,6 @@ pub use workspace::WorkspaceSandbox;
 
 #[cfg(feature = "sandbox-docker")]
 pub use docker::DockerSandbox;
-#[cfg(feature = "sandbox-wasm")]
-pub use wasm::WasmSandbox;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -105,13 +100,6 @@ pub enum SandboxCommand {
     /// Execute a shell command
     Shell {
         command: String,
-        args: Vec<String>,
-    },
-    /// Execute a WASM module
-    #[cfg(feature = "sandbox-wasm")]
-    Wasm {
-        module_bytes: Vec<u8>,
-        function: String,
         args: Vec<String>,
     },
     /// Execute in a Docker container

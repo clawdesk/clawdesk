@@ -8,7 +8,6 @@ description = "Multi-modal sandbox isolation for ClawDesk agent tool execution"
 
 [features]
 default = ["subprocess", "workspace"]
-sandbox-wasm = ["wasmtime"]
 sandbox-docker = []
 subprocess = []
 workspace = []
@@ -31,9 +30,6 @@ serde_json = { workspace = true }
 
 # Observability
 tracing = { workspace = true }
-
-# WASM sandbox (optional, +15MB binary)
-wasmtime = { workspace = true, optional = true }
 
 # Utilities
 uuid = { workspace = true }

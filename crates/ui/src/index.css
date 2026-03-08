@@ -3296,8 +3296,16 @@ h3 {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.chat-stage-header__actions::-webkit-scrollbar {
+  display: none;
 }
 
 .chat-page-body.with-trace .chat-stage-header,
@@ -3307,9 +3315,9 @@ h3 {
 
 .chat-page-body.with-trace .chat-stage-header__actions,
 .chat-page-body.with-preview .chat-stage-header__actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(92px, max-content));
-  justify-content: end;
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
 }
 
 .chat-page-body.with-trace .chat-stage-action,
@@ -3322,6 +3330,7 @@ h3 {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  flex-shrink: 0;
   min-height: 34px;
   padding: 0 12px;
   border-radius: 999px;

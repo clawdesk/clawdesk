@@ -34,7 +34,7 @@ impl SandboxDispatcher {
     /// Create a dispatcher with default sandbox configuration.
     ///
     /// Always registers: WorkspaceSandbox (PathScope), SubprocessSandbox (ProcessIso).
-    /// Optionally registers: DockerSandbox, WasmSandbox (if features enabled).
+    /// Optionally registers: DockerSandbox (if feature enabled).
     pub fn with_defaults() -> Self {
         let mut dispatcher = Self::new();
 
@@ -46,14 +46,6 @@ impl SandboxDispatcher {
         #[cfg(feature = "sandbox-docker")]
         {
             dispatcher.register(Arc::new(crate::DockerSandbox::new()));
-        }
-
-        // WASM (if enabled)
-        #[cfg(feature = "sandbox-wasm")]
-        {
-            if let Ok(wasm) = crate::WasmSandbox::new() {
-                dispatcher.register(Arc::new(wasm));
-            }
         }
 
         info!(

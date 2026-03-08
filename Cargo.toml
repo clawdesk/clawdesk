@@ -181,10 +181,6 @@ hex = "0.4"
 aho-corasick = "1"
 regex = "1"
 
-# --- Sandbox / WASM ---
-wasmtime = "22"
-wasmtime-wasi = "22"
-
 # --- Credential encryption ---
 aes-gcm = "0.10"
 argon2 = "0.5"
