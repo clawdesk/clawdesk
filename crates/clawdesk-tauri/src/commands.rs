@@ -372,8 +372,17 @@ pub async fn update_agent(
 /// Delete an agent by ID.
 #[tauri::command]
 pub async fn delete_agent(agent_id: String, state: State<'_, AppState>, app: AppHandle) -> Result<bool, String> {
+    tracing::info!(agent_id = %agent_id, "delete_agent: request received");
+
     let removed = {
         let mut agents = state.agents.write().map_err(|e| e.to_string())?;
+        let agent_exists = agents.contains_key(&agent_id);
+        tracing::info!(
+            agent_id = %agent_id,
+            exists_in_hashmap = agent_exists,
+            total_agents_before = agents.len(),
+            "delete_agent: checking in-memory state"
+        );
         let removed = agents.remove(&agent_id).is_some();
         if removed {
             if let Ok(mut identities) = state.identities.write() {
@@ -381,12 +390,45 @@ pub async fn delete_agent(agent_id: String, state: State<'_, AppState>, app: App
             }
             state.sessions.remove(&agent_id);
         }
+        tracing::info!(
+            agent_id = %agent_id,
+            removed = removed,
+            total_agents_after = agents.len(),
+            "delete_agent: in-memory removal done"
+        );
         removed
     };
 
     if removed {
-        // Delete from SochDB
+        // Delete from SochDB (durable — commit + fsync)
+        let sochdb_key = format!("agents/{}", agent_id);
+        tracing::info!(agent_id = %agent_id, key = %sochdb_key, "delete_agent: deleting from SochDB");
         state.delete_agent_from_store(&agent_id);
+
+        // Verify the deletion actually stuck in SochDB
+        match state.soch_store.get(&sochdb_key) {
+            Ok(None) => {
+                tracing::info!(agent_id = %agent_id, key = %sochdb_key, "delete_agent: ✓ verified — key is gone from SochDB");
+            }
+            Ok(Some(bytes)) => {
+                tracing::error!(
+                    agent_id = %agent_id,
+                    key = %sochdb_key,
+                    bytes_len = bytes.len(),
+                    "delete_agent: ✗ CRITICAL — key STILL EXISTS in SochDB after delete_durable! Agent will reappear on restart."
+                );
+                // Nuclear option: try one more time with a direct delete + commit
+                if let Err(e) = state.soch_store.delete_durable(&sochdb_key) {
+                    tracing::error!(agent_id = %agent_id, error = %e, "delete_agent: retry delete_durable also failed");
+                } else {
+                    tracing::info!(agent_id = %agent_id, "delete_agent: retry delete_durable succeeded");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(agent_id = %agent_id, error = %e, "delete_agent: could not verify deletion (get failed)");
+            }
+        }
+
         // Remove from A2A directory
         if let Ok(mut dir) = state.agent_directory.write() {
             dir.deregister(&agent_id);
@@ -397,12 +439,15 @@ pub async fn delete_agent(agent_id: String, state: State<'_, AppState>, app: App
                 AuditCategory::SessionLifecycle,
                 "agent_deleted",
                 AuditActor::System,
-                Some(agent_id),
+                Some(agent_id.clone()),
                 serde_json::json!({}),
                 AuditOutcome::Success,
             )
             .await;
         emit_security_changed(&app, &state).await;
+        tracing::info!(agent_id = %agent_id, "delete_agent: completed successfully");
+    } else {
+        tracing::warn!(agent_id = %agent_id, "delete_agent: agent not found in in-memory state");
     }
     Ok(removed)
 }
@@ -1016,6 +1061,10 @@ pub async fn send_message(
             "Google" => Arc::new(GeminiProvider::new(key, Some(model_full_id.clone()))),
             "Cohere" => Arc::new(CohereProvider::new(key, base, Some(model_full_id.clone()))),
             "Ollama (Local)" | "ollama" => Arc::new(OllamaProvider::new(base, Some(model_full_id.clone()))),
+            "Local (Built-in)" | "local" => {
+                // Built-in llama.cpp inference managed by clawdesk
+                Arc::new(clawdesk_providers::local::LocalProvider::new(Some(model_full_id.clone())))
+            }
             "Local (OpenAI Compatible)" | "local_compatible" => {
                 // llama.cpp, vLLM, text-generation-webui, LM Studio, etc.
                 // These serve an OpenAI-compatible /v1/chat/completions endpoint.
@@ -1590,6 +1639,7 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
 
     // Configure the agent runner
     let model_id = AppState::resolve_model_id(&agent.model);
+    let parent_model_id_for_spawn = model_id.clone();
     let config = AgentConfig {
         model: model_id,
         system_prompt: system_prompt.clone(),
@@ -1646,29 +1696,57 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
         let base_tools = Arc::clone(&state.tool_registry);
         let sandbox_engine_ref = Arc::clone(&state.sandbox_engine);
         let memory_ref = Arc::clone(&state.memory);
+        // Capture the parent's provider so sub-agents can inherit it when
+        // the negotiator has no matching provider (e.g. channel_provider override
+        // from the UI that only the parent sees).
+        let parent_provider = Arc::clone(&provider);
+        // Capture the parent's resolved model so sub-agents with model="default"
+        // can inherit the real model ID instead of sending literal "default" to the API.
+        let parent_model_id = parent_model_id_for_spawn.clone();
 
-        let spawn_fn: Arc<
-            dyn Fn(String, String, u64)
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-                + Send + Sync,
-        > = Arc::new(move |agent_id, task, timeout_secs| {
+        let spawn_fn: clawdesk_agents::port::AsyncPort<clawdesk_agents::port::SpawnSubAgentRequest, Result<String, String>> = Arc::new(move |req: clawdesk_agents::port::SpawnSubAgentRequest| {
+            let agent_id = req.agent_id;
+            let task = req.task;
+            let timeout_secs = req.timeout_secs;
             let agents = agents_ref.clone();
             let negotiator = Arc::clone(&negotiator_ref);
             let cancel = cancel_ref.clone();
             let tools = Arc::clone(&base_tools);
             let sandbox_eng = Arc::clone(&sandbox_engine_ref);
             let memory = Arc::clone(&memory_ref);
+            let fallback_provider = Arc::clone(&parent_provider);
+            let parent_mdl = parent_model_id.clone();
             Box::pin(async move {
                 let agent = agents.get(&agent_id)
                     .ok_or_else(|| format!("Sub-agent '{}' not found", agent_id))?;
-                let model_id = crate::state::AppState::resolve_model_id(&agent.model);
+                // If the sub-agent model is "default"/"auto"/empty, inherit
+                // the parent's resolved model so it doesn't send literal
+                // "default" to the LLM API.
+                let model_id = {
+                    let raw = &agent.model;
+                    if raw.is_empty() || raw == "default" || raw == "auto" {
+                        parent_mdl.clone()
+                    } else {
+                        crate::state::AppState::resolve_model_id(raw)
+                    }
+                };
                 let required = clawdesk_providers::capability::ProviderCaps::TEXT_COMPLETION
                     .union(clawdesk_providers::capability::ProviderCaps::SYSTEM_PROMPT);
+                // Try the negotiator first; fall back to the parent's provider
+                // (which may be a channel_provider override from the UI).
                 let provider = {
                     let neg = negotiator.read().map_err(|e| format!("negotiator lock: {e}"))?;
-                    neg.resolve_model(&model_id, required)
-                        .map(|(p, _)| Arc::clone(p))
-                        .ok_or_else(|| format!("No provider for sub-agent model '{}'", agent.model))?
+                    match neg.resolve_model(&model_id, required) {
+                        Some((p, _)) => Arc::clone(p),
+                        None => {
+                            tracing::info!(
+                                agent_id = %agent_id,
+                                model = %agent.model,
+                                "Sub-agent: negotiator miss — inheriting parent provider"
+                            );
+                            fallback_provider
+                        }
+                    }
                 };
                 let config = clawdesk_agents::AgentConfig {
                     model: model_id,
@@ -1733,10 +1811,123 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
             agent.id.clone(),
             agent.model.clone(),
             0, // root depth
+            Arc::clone(&provider), // parent provider fallback
         );
         clawdesk_agents::builtin_tools::register_dynamic_spawn_tool(
             &mut request_tool_registry,
             dynamic_fn,
+        );
+    }
+
+    // Register the ask_human tool — allows the agent to pause and ask the
+    // user for a decision instead of refusing or restating capabilities.
+    // Also fans out the question to all connected external channels.
+    {
+        let pending = Arc::clone(&state.ask_human_pending);
+        let app_for_ask = app.clone();
+        let channels_for_ask = Arc::clone(&state.channel_registry);
+        let origins_for_ask = Arc::clone(&state.last_channel_origins);
+        let ask_fn: clawdesk_agents::port::AsyncPort<
+            clawdesk_agents::port::AskHumanRequest,
+            Result<String, String>,
+        > = Arc::new(move |req: clawdesk_agents::port::AskHumanRequest| {
+            let pending = Arc::clone(&pending);
+            let app = app_for_ask.clone();
+            let channels = Arc::clone(&channels_for_ask);
+            let origins = Arc::clone(&origins_for_ask);
+            Box::pin(async move {
+                let request_id = uuid::Uuid::new_v4();
+                let notify = Arc::new(tokio::sync::Notify::new());
+
+                // Format the question for channel delivery
+                let options_text = if req.options.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nOptions: {}", req.options.join(" | "))
+                };
+                let channel_body = format!(
+                    "🤔 **Decision needed{}**\n\n{}{}\n\n_Reply to this message with your answer._",
+                    if req.urgent { " (URGENT)" } else { "" },
+                    &req.question,
+                    options_text,
+                );
+
+                // Fan out to connected external channels
+                let mut sent_channels = Vec::new();
+                {
+                    use clawdesk_types::channel::ChannelId;
+                    let external_channels: Vec<(ChannelId, std::sync::Arc<dyn clawdesk_channel::Channel>)> =
+                        if let Ok(reg) = channels.read() {
+                            reg.iter()
+                                .filter(|(id, _)| !matches!(id, ChannelId::WebChat | ChannelId::Internal))
+                                .map(|(id, ch)| (*id, std::sync::Arc::clone(ch)))
+                                .collect()
+                        } else {
+                            vec![]
+                        };
+
+                    let origins_snapshot: std::collections::HashMap<ChannelId, clawdesk_types::message::MessageOrigin> =
+                        origins.read().map(|g| g.clone()).unwrap_or_default();
+
+                    for (ch_id, ch) in external_channels {
+                        let origin = match origins_snapshot.get(&ch_id).cloned() {
+                            Some(o) => o,
+                            None => match ch.default_origin() {
+                                Some(o) => o,
+                                None => continue, // no target — skip
+                            },
+                        };
+                        let outbound = clawdesk_types::message::OutboundMessage {
+                            origin,
+                            body: channel_body.clone(),
+                            media: vec![],
+                            reply_to: None,
+                            thread_id: None,
+                        };
+                        match ch.send(outbound).await {
+                            Ok(_receipt) => {
+                                tracing::info!(channel = %ch_id, "ask_human: question sent to channel");
+                                sent_channels.push(format!("{}", ch_id));
+                            }
+                            Err(e) => {
+                                tracing::warn!(channel = %ch_id, error = %e, "ask_human: failed to send to channel");
+                            }
+                        }
+                    }
+                }
+
+                let entry = crate::state::AskHumanEntry {
+                    notify: Arc::clone(&notify),
+                    response: std::sync::Mutex::new(None),
+                    sent_to_channels: std::sync::Mutex::new(sent_channels.clone()),
+                    question: req.question.clone(),
+                };
+                pending.insert(request_id, entry);
+
+                // Emit event to frontend so it can render the question
+                let _ = app.emit("ask-human:pending", serde_json::json!({
+                    "id": request_id.to_string(),
+                    "question": &req.question,
+                    "options": &req.options,
+                    "urgent": req.urgent,
+                    "sent_to_channels": &sent_channels,
+                }));
+
+                // Block until the frontend OR a channel inbound responds
+                notify.notified().await;
+
+                // Retrieve the response
+                let response = pending
+                    .remove(&request_id)
+                    .and_then(|(_, entry)| entry.response.lock().ok()?.take())
+                    .unwrap_or_else(|| "No response received".to_string());
+
+                Ok(response)
+            })
+        });
+        clawdesk_agents::builtin_tools::register_ask_human_tool(
+            &mut request_tool_registry,
+            ask_fn,
         );
     }
 
@@ -1790,12 +1981,22 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
         })
     };
 
+    // Build a ToolPolicy with adequate timeout for spawn-capable agents.
+    // spawn_subagent / dynamic_spawn run complete sub-agent loops that easily
+    // exceed the default per-tool timeout, so use 300s for the outer runner.
+    let tool_policy = {
+        let mut p = clawdesk_agents::tools::ToolPolicy::default();
+        p.tool_timeout_secs = 300;
+        Arc::new(p)
+    };
+
     let mut runner = AgentRunner::new(
         provider,
         request_tool_registry,
         config,
         run_cancel.clone(),
     )
+    .with_tool_policy(tool_policy)
     .with_events(event_tx.clone())
     .with_approval_gate(Arc::new(crate::state::TauriApprovalGate::new(
         Arc::clone(&state.approval_manager),
@@ -2398,6 +2599,33 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
     state.persist();
     emit_metrics_updated(&app, &state);
     emit_security_changed(&app, &state).await;
+
+    // ── Emit to reactive event bus ──
+    // Publishes "agent.message.sent" so bus subscribers (pipelines,
+    // cron, telemetry, orchestrator bridge) can react.
+    {
+        let bus = &state.event_bus;
+        let content = &assistant_msg.content;
+        let preview = if content.len() > 200 {
+            &content[..200]
+        } else {
+            content
+        };
+        bus.emit(
+            "agent.message.sent",
+            clawdesk_bus::event::EventKind::MessageSent,
+            clawdesk_bus::event::Priority::Standard,
+            serde_json::json!({
+                "agent_id": agent.id,
+                "chat_id": chat_id,
+                "preview": preview,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }),
+            format!("agent:{}", agent.id),
+        )
+        .await;
+    }
 
     if let Some(err_msg) = execution_err {
         return Err(err_msg);
@@ -4095,6 +4323,19 @@ pub async fn run_pipeline(
         }),
     );
 
+    // ── Emit pipeline completion to reactive event bus ──
+    {
+        let bus = &state.event_bus;
+        crate::bus_integration::emit_pipeline_completed(
+            bus,
+            &pipeline_id,
+            &pipeline_name,
+            all_success,
+            pipeline.steps.len(),
+        )
+        .await;
+    }
+
     let result = serde_json::json!({
         "pipeline_id": pipeline_id, "pipeline_name": pipeline.name,
         "success": all_success, "steps": step_results, "total_duration_ms": total_ms,
@@ -4205,11 +4446,25 @@ pub async fn trigger_cron_task(
     task_id: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    let start = std::time::Instant::now();
     let log = state
         .cron_manager
         .trigger(&task_id)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Emit cron execution event to the reactive bus
+    let success = log.error.is_none();
+    let duration_ms = start.elapsed().as_millis() as u64;
+    crate::bus_integration::emit_cron_executed(
+        &state.event_bus,
+        &log.task_id,
+        &log.task_id, // name fallback
+        success,
+        duration_ms,
+    )
+    .await;
+
     Ok(serde_json::json!({
         "task_id": log.task_id,
         "run_id": log.run_id,
@@ -4769,7 +5024,18 @@ fn emit_agent_event(app: &AppHandle, agent_id: &str, event: &AgentEvent) -> Resu
             to_model: to_model.clone(),
             reason: reason.clone(),
         },
-        AgentEvent::SkillDecision { .. } => return Ok(()),
+        AgentEvent::SkillDecision { skill_id, included, reason, token_cost, budget_remaining } => TauriAgentEvent::SkillDecision {
+            skill_id: skill_id.clone(),
+            included: *included,
+            reason: reason.clone(),
+            token_cost: *token_cost,
+            budget_remaining: *budget_remaining,
+        },
+        AgentEvent::RetryStatus { attempt, max_attempts, reason } => TauriAgentEvent::RetryStatus {
+            attempt: *attempt,
+            max_attempts: *max_attempts,
+            reason: reason.clone(),
+        },
         AgentEvent::ToolBlocked { name, reason } => TauriAgentEvent::ToolBlocked {
             name: name.clone(),
             reason: reason.clone(),
@@ -4780,6 +5046,11 @@ fn emit_agent_event(app: &AppHandle, agent_id: &str, event: &AgentEvent) -> Resu
             is_error: *is_error,
             preview: preview.clone(),
             duration_ms: *duration_ms,
+        },
+        AgentEvent::InputRequired { question, options, urgent } => TauriAgentEvent::InputRequired {
+            question: question.clone(),
+            options: options.clone(),
+            urgent: *urgent,
         },
     };
 
@@ -4962,6 +5233,7 @@ fn build_dynamic_spawn_fn(
     parent_agent_id: String,
     parent_model: String,
     parent_depth: u32,
+    parent_provider: Arc<dyn clawdesk_providers::Provider>,
 ) -> Arc<
     dyn Fn(
             clawdesk_agents::builtin_tools::DynamicSpawnRequest,
@@ -4977,6 +5249,7 @@ fn build_dynamic_spawn_fn(
         let mgr: Arc<clawdesk_gateway::subagent_manager::SubAgentManager> = Arc::clone(&sub_mgr);
         let parent_id = parent_agent_id.clone();
         let parent_mdl = parent_model.clone();
+        let fallback_provider = Arc::clone(&parent_provider);
 
         // Snapshot the closure-factory references for recursive child construction
         let neg_for_child = Arc::clone(&negotiator_ref);
@@ -4984,6 +5257,7 @@ fn build_dynamic_spawn_fn(
         let tools_for_child = Arc::clone(&base_tools);
         let sandbox_for_child = Arc::clone(&sandbox_engine_ref);
         let mgr_for_child = Arc::clone(&sub_mgr);
+        let provider_for_child = Arc::clone(&parent_provider);
 
         Box::pin(async move {
             let child_depth = parent_depth + 1;
@@ -5003,7 +5277,13 @@ fn build_dynamic_spawn_fn(
 
             // ── Phase 2: Model resolution ────────────────────────────
             let model_id = if let Some(ref m) = req.model {
-                crate::state::AppState::resolve_model_id(m)
+                let resolved = crate::state::AppState::resolve_model_id(m);
+                // Treat "default"/"auto" as inherit-from-parent
+                if resolved == "default" || resolved == "auto" {
+                    crate::state::AppState::resolve_model_id(&parent_mdl)
+                } else {
+                    resolved
+                }
             } else {
                 crate::state::AppState::resolve_model_id(&parent_mdl)
             };
@@ -5014,15 +5294,17 @@ fn build_dynamic_spawn_fn(
                 let neg = negotiator
                     .read()
                     .map_err(|e| format!("negotiator lock: {e}"))?;
-                neg.resolve_model(&model_id, required)
-                    .map(|(p, _)| Arc::clone(p))
-                    .ok_or_else(|| {
-                        format!(
-                            "No provider for dynamic agent model '{}' (resolved: '{}')",
-                            req.model.as_deref().unwrap_or(&parent_mdl),
-                            model_id,
-                        )
-                    })?
+                match neg.resolve_model(&model_id, required) {
+                    Some((p, _)) => Arc::clone(p),
+                    None => {
+                        tracing::info!(
+                            label = %label,
+                            model = %model_id,
+                            "Dynamic sub-agent: negotiator miss — inheriting parent provider"
+                        );
+                        fallback_provider
+                    }
+                }
             };
 
             // ── Phase 3: Tool registry construction ──────────────────
@@ -5048,6 +5330,7 @@ fn build_dynamic_spawn_fn(
                             ephemeral_id.clone(),
                             model_id.clone(),
                             child_depth,
+                            provider_for_child.clone(),
                         );
                         clawdesk_agents::builtin_tools::register_dynamic_spawn_tool(
                             &mut registry,
@@ -5072,6 +5355,7 @@ fn build_dynamic_spawn_fn(
                             ephemeral_id.clone(),
                             model_id.clone(),
                             child_depth,
+                            provider_for_child.clone(),
                         );
                         clawdesk_agents::builtin_tools::register_dynamic_spawn_tool(
                             &mut registry,

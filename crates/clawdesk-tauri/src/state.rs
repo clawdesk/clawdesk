@@ -36,12 +36,8 @@ use clawdesk_memory::manager::MemoryConfig;
 use clawdesk_memory::tiered::build_tiered_provider;
 use clawdesk_observability::ObservabilityConfig;
 use clawdesk_plugin::PluginHost;
-use clawdesk_providers::anthropic::AnthropicProvider;
 use clawdesk_providers::capability::{ProviderCaps, ProviderWeight, ANTHROPIC_CAPS, GEMINI_CAPS, OLLAMA_CAPS, OPENAI_CAPS};
-use clawdesk_providers::gemini::GeminiProvider;
 use clawdesk_providers::negotiator::ProviderNegotiator;
-use clawdesk_providers::ollama::OllamaProvider;
-use clawdesk_providers::openai::OpenAiProvider;
 use clawdesk_providers::registry::ProviderRegistry;
 use clawdesk_providers::Provider;
 use clawdesk_runtime::DurableAgentRunner;
@@ -206,6 +202,9 @@ pub enum TauriAgentEvent {
     IdentityVerified { hash_match: bool, version: u64 },
     ContextGuardAction { action: String, token_count: usize, threshold: f64 },
     FallbackTriggered { from_model: String, to_model: String, reason: String },
+    RetryStatus { attempt: usize, max_attempts: usize, reason: String },
+    SkillDecision { skill_id: String, included: bool, reason: String, token_cost: usize, budget_remaining: usize },
+    InputRequired { question: String, options: Vec<String>, urgent: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -686,6 +685,11 @@ pub struct AppState {
     // ── Execution Approval ──
     pub approval_manager: Arc<ExecApprovalManager>,
 
+    // ── Human Decision Requests (ask_human tool) ──
+    /// Pending human-decision requests from `ask_human` tool calls.
+    /// Key: request UUID, Value: (Notify for wakeup, response slot).
+    pub ask_human_pending: Arc<dashmap::DashMap<uuid::Uuid, AskHumanEntry>>,
+
     // ── Network Discovery ──
     pub mdns_advertiser: RwLock<MdnsAdvertiser>,
     pub pairing_session: RwLock<Option<PairingSession>>,
@@ -840,6 +844,24 @@ pub struct AppState {
     // Tracks health state, latency, consecutive failures, and exponential
     // backoff for all registered integration health check URLs.
     pub health_monitor: tokio::sync::RwLock<clawdesk_extensions::HealthMonitor>,
+
+    // ── Orchestration: Capability Index ──
+    // Inverted index from action → skills for O(1) dispatch routing.
+    // Built from the skill registry on startup and updated on skill changes.
+    pub capability_index: RwLock<clawdesk_skills::CapabilityIndex>,
+
+    // ── Orchestration: Event channel for orchestration events ──
+    // Sends OrchestrationEvents into the bus and to the Tauri frontend.
+    pub orchestration_event_tx: tokio::sync::mpsc::UnboundedSender<clawdesk_gateway::orchestrator::OrchestrationEvent>,
+    pub orchestration_event_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<clawdesk_gateway::orchestrator::OrchestrationEvent>>>,
+
+    // ── Local Models: built-in llama.cpp model management ──
+    // Hardware detection, model recommendations, GGUF downloads, and
+    // llama-server process lifecycle — replaces need for Ollama/LM Studio.
+    pub local_model_manager: RwLock<Option<clawdesk_local_models::LocalModelManager>>,
+
+    // ── RAG: document ingestion & retrieval ──
+    pub rag_manager: RwLock<Option<clawdesk_rag::RagManager>>,
 }
 
 // ── Cron executor glue ──
@@ -1110,31 +1132,13 @@ impl clawdesk_cron::CronPersistence for SochDbCronPersistence {
     }
 }
 
-/// No-op plugin factory — plugins loaded at runtime, not at boot.
-pub(crate) struct NoopPluginFactory;
-
-#[async_trait::async_trait]
-impl clawdesk_plugin::PluginFactory for NoopPluginFactory {
-    async fn create(
-        &self,
-        manifest: &clawdesk_types::plugin::PluginManifest,
-    ) -> Result<std::sync::Arc<dyn clawdesk_plugin::PluginInstance>, clawdesk_types::error::PluginError> {
-        Err(clawdesk_types::error::PluginError::LoadFailed {
-            name: manifest.name.clone(),
-            detail: "No plugin factory configured".into(),
-        })
-    }
-}
+// Noop stubs: NoopPluginFactory and NoopAgentExecutor now live in their
+// trait-defining crates (clawdesk_plugin, clawdesk_cron). NoOpDelivery stays
+// here because the desktop app intentionally returns Ok(()) — delivery
+// happens through Tauri events, not through the DeliveryHandler trait.
 
 /// No-op agent executor — cron tasks are handled differently in the desktop app.
-pub(crate) struct NoopAgentExecutor;
-
-#[async_trait::async_trait]
-impl clawdesk_cron::executor::AgentExecutor for NoopAgentExecutor {
-    async fn execute(&self, _prompt: &str, _agent_id: Option<&str>) -> Result<String, String> {
-        Err("no-op executor".to_string())
-    }
-}
+/// Uses shared implementation from clawdesk_cron::executor::NoopAgentExecutor.
 
 // ── Channel MessageSink — routes inbound channel messages through the agent ──
 
@@ -1440,6 +1444,55 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
                 let state = self.app_handle.state::<AppState>();
                 if let Err(e) = state.soch_store.put_durable("channel_origins", &bytes) {
                     warn!(error = %e, "Failed to persist channel origins to SochDB");
+                }
+            }
+        }
+
+        // ── Ask-human intercept: if any ask_human requests are pending,
+        // treat this inbound channel message as the human's response.
+        // The first pending entry wins (FIFO: most recent ask gets answered).
+        {
+            let state = self.app_handle.state::<AppState>();
+            let pending = &state.ask_human_pending;
+            if !pending.is_empty() {
+                // Find the first pending request that hasn't been answered yet
+                let matched = pending.iter().find(|entry| {
+                    entry.value().response.lock().map(|g| g.is_none()).unwrap_or(false)
+                });
+                if let Some(entry) = matched {
+                    let request_id = *entry.key();
+                    let response_text = msg.body.trim().to_string();
+                    let channel_label = format!("{}", channel_id);
+                    info!(
+                        request_id = %request_id,
+                        channel = %channel_label,
+                        sender = %sender_name,
+                        response = %response_text,
+                        "ask_human: inbound channel message resolved pending request"
+                    );
+                    if let Ok(mut slot) = entry.value().response.lock() {
+                        *slot = Some(format!("[via {}] {}", channel_label, response_text));
+                    }
+                    entry.value().notify.notify_one();
+
+                    // Acknowledge on the originating channel
+                    self.reply_error(
+                        channel_id,
+                        &msg.origin,
+                        &format!("✅ Got it — forwarded your answer to the agent."),
+                    ).await;
+
+                    // Also notify the frontend that this ask-human was answered
+                    {
+                        use tauri::Emitter;
+                        let _ = self.app_handle.emit("ask-human:responded", serde_json::json!({
+                            "id": request_id.to_string(),
+                            "response": &response_text,
+                            "via_channel": &channel_label,
+                        }));
+                    }
+
+                    return; // Don't route to agent — this was a human decision reply
                 }
             }
         }
@@ -1978,6 +2031,19 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
 
 // ── T6: ApprovalGate adapter — bridges ExecApprovalManager into AgentRunner ──
 
+/// Entry for a pending `ask_human` tool call.
+/// The agent's `AskHumanTool` blocks on `notify` until the frontend calls
+/// `respond_to_ask_human` (or an inbound channel message matches),
+/// which writes the response and wakes the tool.
+pub struct AskHumanEntry {
+    pub notify: Arc<tokio::sync::Notify>,
+    pub response: std::sync::Mutex<Option<String>>,
+    /// Which external channels also received the question (for UI display).
+    pub sent_to_channels: std::sync::Mutex<Vec<String>>,
+    /// The original question text (used to match inbound channel replies).
+    pub question: String,
+}
+
 /// Bridges `ExecApprovalManager` into the agent runner's `ApprovalGate` trait.
 /// When a tool requires approval, creates a pending request and waits for
 /// the user to approve/deny via the UI (Tauri `approval:pending` event).
@@ -2063,12 +2129,9 @@ impl AppState {
     /// - `OLLAMA_HOST` or always → OllamaProvider (local models, defaults to localhost)
     pub fn new() -> Self {
         // ── Open SochDB ──────────────────────────────────────────────
-        let sochdb_path = {
-            let home = std::env::var("HOME")
-                .or_else(|_| std::env::var("USERPROFILE"))
-                .unwrap_or_else(|_| ".".to_string());
-            std::path::PathBuf::from(home).join(".clawdesk").join("sochdb")
-        };
+        // Use the canonical path from clawdesk_types::dirs — all binaries
+        // (CLI, Tauri, gateway) resolve to the SAME directory.
+        let sochdb_path = clawdesk_types::dirs::sochdb();
 
         // Ensure the directory exists before opening the database
         if let Err(e) = std::fs::create_dir_all(&sochdb_path) {
@@ -2429,11 +2492,11 @@ impl AppState {
             let channels_for_tool = Arc::clone(&channel_registry);
             let origins_for_tool = Arc::clone(&last_channel_origins);
 
-            let send_fn: std::sync::Arc<
-                dyn Fn(String, Option<String>, String, Vec<String>)
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-                    + Send + Sync,
-            > = std::sync::Arc::new(move |target, channel_name, content, _media_urls| {
+            let send_fn: clawdesk_agents::port::AsyncPort<clawdesk_agents::port::MessageSendRequest, Result<String, String>> = std::sync::Arc::new(move |req: clawdesk_agents::port::MessageSendRequest| {
+                let target = req.target;
+                let channel_name = req.channel;
+                let content = req.content;
+                let _media_urls = req.media_urls;
                 let channels = Arc::clone(&channels_for_tool);
                 let origins = Arc::clone(&origins_for_tool);
                 Box::pin(async move {
@@ -2604,7 +2667,7 @@ impl AppState {
                             "id": card.id,
                             "name": card.name,
                             "description": card.description,
-                            "capabilities": card.capabilities.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>(),
+                            "capabilities": card.capabilities().iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>(),
                         })
                     }).collect();
                     serde_json::to_string_pretty(&cards).map_err(|e| e.to_string())
@@ -2638,11 +2701,10 @@ impl AppState {
             let tools_for_send = Arc::clone(&tools_late);
             let memory_for_send = Arc::clone(&memory);
 
-            let sessions_send_fn: std::sync::Arc<
-                dyn Fn(String, String, Option<String>)
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-                    + Send + Sync,
-            > = std::sync::Arc::new(move |target_agent: String, message: String, _skill_id: Option<String>| {
+            let sessions_send_fn: clawdesk_agents::port::AsyncPort<clawdesk_agents::port::SessionsSendRequest, Result<String, String>> = std::sync::Arc::new(move |req: clawdesk_agents::port::SessionsSendRequest| {
+                let target_agent = req.target_agent;
+                let message = req.message;
+                let _skill_id = req.skill_id;
                 let dir = Arc::clone(&dir_for_send);
                 let tasks = Arc::clone(&tasks_for_send);
                 let agents = Arc::clone(&agents_for_send);
@@ -2853,54 +2915,10 @@ impl AppState {
 
         let mut provider_registry = ProviderRegistry::new();
 
-        // Auto-register providers from environment variables
-        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-            info!("Registering Anthropic provider from ANTHROPIC_API_KEY");
-            let provider = AnthropicProvider::new(key, None);
-            provider_registry.register(Arc::new(provider));
-        }
-
-        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            info!("Registering OpenAI provider from OPENAI_API_KEY");
-            let provider = OpenAiProvider::new(key, None, None);
-            provider_registry.register(Arc::new(provider));
-        }
-
-        if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
-            info!("Registering Gemini provider from GOOGLE_API_KEY");
-            let provider = GeminiProvider::new(key, None);
-            provider_registry.register(Arc::new(provider));
-        }
-
-        if let Ok(key) = std::env::var("AZURE_OPENAI_API_KEY") {
-            if let Ok(base) = std::env::var("AZURE_OPENAI_ENDPOINT") {
-                info!("Registering Azure OpenAI provider from AZURE_OPENAI_API_KEY");
-                let provider = clawdesk_providers::azure::AzureOpenAiProvider::new(key, base, None, None);
-                provider_registry.register(Arc::new(provider));
-            }
-        }
-
-        if let Ok(key) = std::env::var("COHERE_API_KEY") {
-            info!("Registering Cohere provider from COHERE_API_KEY");
-            let provider = clawdesk_providers::cohere::CohereProvider::new(key, None, None);
-            provider_registry.register(Arc::new(provider));
-        }
-
-        if let Ok(project) = std::env::var("VERTEX_PROJECT_ID") {
-            if let Ok(location) = std::env::var("VERTEX_LOCATION") {
-                info!("Registering Vertex AI provider from VERTEX_PROJECT_ID");
-                let provider = clawdesk_providers::vertex::VertexProvider::new(project, location, None);
-                provider_registry.register(Arc::new(provider));
-            }
-        }
-
-        // Ollama is always available (local, no API key needed)
-        {
-            let base_url = std::env::var("OLLAMA_HOST").ok();
-            info!(base_url = ?base_url, "Registering Ollama provider (local)");
-            let provider = OllamaProvider::new(base_url, None);
-            provider_registry.register(Arc::new(provider));
-        }
+        // Auto-register all providers from environment variables.
+        // Uses the canonical single-source function — adding a new provider
+        // only requires editing clawdesk_providers::registry::auto_register_from_env().
+        clawdesk_providers::registry::auto_register_from_env(&mut provider_registry);
 
         let provider_count = provider_registry.list().len();
         info!(providers = provider_count, "Provider auto-registration complete");
@@ -2953,8 +2971,16 @@ impl AppState {
 
         // ── Hydrate hot caches from SochDB ──────────────────────────
         info!("Starting hydration from SochDB...");
-        let agents = hydrate_map(&soch_store, "agents/");
+        let agents: HashMap<String, DesktopAgent> = hydrate_map(&soch_store, "agents/");
         info!(agents = agents.len(), "Hydrated agents");
+        // Log every hydrated agent so we can trace reappearing-after-delete bugs
+        for (agent_id, agent) in &agents {
+            info!(
+                agent_id = %agent_id,
+                agent_name = %agent.name,
+                "Hydrated agent from SochDB"
+            );
+        }
         // ── Hydrate chat sessions (new multi-chat format: chats/{chat_id}) ──
         let mut sessions: HashMap<String, ChatSession> = hydrate_map(&soch_store, "chats/");
         info!(
@@ -3139,6 +3165,9 @@ impl AppState {
         }
         info!("Populated A2A shared state (agents + providers) for sessions_send callback");
 
+        // ── Orchestration event channel ──
+        let (orch_tx, orch_rx) = tokio::sync::mpsc::unbounded_channel();
+
         Self {
             soch_store: soch_store.clone(),
             thread_store,
@@ -3215,6 +3244,9 @@ impl AppState {
 
             // ── Execution Approval ──
             approval_manager: Arc::new(ExecApprovalManager::new(Duration::from_secs(300))),
+
+            // ── Human Decision Requests (ask_human tool) ──
+            ask_human_pending: Arc::new(dashmap::DashMap::new()),
 
             // ── Network Discovery ──
             mdns_advertiser: RwLock::new(MdnsAdvertiser::new(
@@ -3408,6 +3440,80 @@ impl AppState {
             health_monitor: tokio::sync::RwLock::new(clawdesk_extensions::HealthMonitor::new(
                 std::time::Duration::from_secs(300), // 5 min check interval
             )),
+
+            // ── Orchestration: Capability Index ──
+            capability_index: RwLock::new(clawdesk_skills::CapabilityIndex::new()),
+
+            // ── Orchestration: Event channel ──
+            orchestration_event_tx: orch_tx,
+            orchestration_event_rx: std::sync::Mutex::new(Some(orch_rx)),
+
+            // ── Local Models: built-in LLM management ──
+            local_model_manager: {
+                let models_dir = clawdesk_types::dirs::data().join("models");
+                if let Err(e) = std::fs::create_dir_all(&models_dir) {
+                    error!(error = %e, "failed to create local models directory");
+                }
+
+                // Resolve the bundled llama-server sidecar path.
+                // Tauri places sidecar binaries next to the main executable with a
+                // target-triple suffix (e.g., llama-server-aarch64-apple-darwin).
+                let bundled_server = {
+                    let sidecar_name = format!(
+                        "llama-server-{}",
+                        std::env::consts::ARCH
+                    );
+
+                    // Tauri sidecar convention: binary sits next to the app executable
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+                        .map(|dir| {
+                            // Try platform-specific names
+                            let candidates = if cfg!(target_os = "macos") {
+                                vec![
+                                    dir.join("llama-server-aarch64-apple-darwin"),
+                                    dir.join("llama-server-x86_64-apple-darwin"),
+                                    dir.join("llama-server"),
+                                ]
+                            } else if cfg!(target_os = "linux") {
+                                vec![
+                                    dir.join("llama-server-x86_64-unknown-linux-gnu"),
+                                    dir.join("llama-server-aarch64-unknown-linux-gnu"),
+                                    dir.join("llama-server"),
+                                ]
+                            } else {
+                                // Windows
+                                vec![
+                                    dir.join("llama-server-x86_64-pc-windows-msvc.exe"),
+                                    dir.join("llama-server-aarch64-pc-windows-msvc.exe"),
+                                    dir.join("llama-server.exe"),
+                                ]
+                            };
+                            candidates.into_iter().find(|p| p.exists())
+                        })
+                        .flatten()
+                };
+
+                if let Some(ref path) = bundled_server {
+                    info!(path = ?path, "found bundled llama-server sidecar");
+                } else {
+                    info!("no bundled llama-server found, will try system PATH");
+                }
+
+                info!(path = ?models_dir, "initializing local model manager");
+                let mgr = clawdesk_local_models::LocalModelManager::new_with_server(models_dir, bundled_server);
+                // NOTE: TTL reaper is started in the Tauri .setup() hook where
+                // the Tokio runtime is available (tokio::spawn panics here).
+                RwLock::new(Some(mgr))
+            },
+
+            // ── RAG: document ingestion & retrieval ──
+            rag_manager: {
+                let rag = clawdesk_rag::RagManager::new(Arc::clone(&soch_store));
+                info!("RAG manager initialized with SochDB backend");
+                RwLock::new(Some(rag))
+            },
         }
     }
 
@@ -3427,7 +3533,7 @@ impl AppState {
             "haiku" | "sonnet" | "opus" => "anthropic",
             m if m.starts_with("gpt-") || m.starts_with("o1") || m.starts_with("o3") => "openai",
             m if m.starts_with("gemini") => "gemini",
-            "local" => "ollama",
+            "local" => "local",
             m if m.starts_with("llama") || m.starts_with("deepseek") || m.starts_with("mistral")
                 || m.starts_with("codellama") || m.starts_with("phi") => "ollama",
             m if m.starts_with("claude") => "anthropic",
@@ -3517,14 +3623,81 @@ impl AppState {
     /// Writes agents, sessions, pipelines, notifications, clipboard, and
     /// canvases to SochDB's path API. Uses JSON serialization for each
     /// item. Best-effort — logs errors but does not fail the caller.
+    ///
+    /// # WAL tombstone workaround
+    ///
+    /// SochDB 0.5's WAL recovery does not preserve tombstones — deleted
+    /// entries re-appear as empty-value writes on restart. To prevent
+    /// deleted agents (and other items) from reappearing, this method:
+    ///
+    /// 1. Reads all non-ephemeral data currently in the memtable
+    ///    (where tombstones correctly shadow deleted keys).
+    /// 2. Truncates the WAL (physically empty).
+    /// 3. Re-writes all live data to the fresh WAL.
+    /// 4. Commits + fsyncs.
+    ///
+    /// After this, the WAL only contains live data — no stale
+    /// put entries for deleted keys.
     pub fn persist(&self) {
         let session_count = self.sessions.len();
         let agent_count = self.agents.read().map(|a| a.len()).unwrap_or(0);
         tracing::info!(sessions = session_count, agents = agent_count, "bulk persist() starting");
 
-        // Agents
+        // ── Step 1: Collect all non-agent data from SochDB memtable ──────
+        // These prefixes are NOT managed by in-memory state and must be
+        // read from the current (tombstone-correct) memtable before
+        // we truncate the WAL. Without this, pipeline/notification/etc.
+        // data would be lost after truncation.
+        let sochdb_only_prefixes = [
+            "pipelines/",
+            "pipeline_runs/",
+            "notifications/",
+            "clipboard/",
+            "journal/",
+            "config/",
+            "graph/",
+            "skills/",
+            "runtime:",
+            "cron/",
+            "chat_index/",
+            "tool_history/",
+            "extensions/",
+        ];
+        let mut sochdb_preserved: Vec<(String, Vec<u8>)> = Vec::new();
+        match self.soch_store.scan_batch(&sochdb_only_prefixes) {
+            Ok(entries) => sochdb_preserved = entries,
+            Err(e) => tracing::warn!(error = %e, "persist: failed to scan prefixes for WAL rewrite"),
+        }
+        // Also preserve known singleton keys
+        for singleton in &["channel_origins", "channel_configs"] {
+            if let Ok(Some(val)) = self.soch_store.get(singleton) {
+                sochdb_preserved.push((singleton.to_string(), val));
+            }
+        }
+        tracing::info!(
+            preserved_sochdb_keys = sochdb_preserved.len(),
+            "persist: collected SochDB-only data for WAL rewrite"
+        );
+
+        // ── Step 2: Truncate WAL ─────────────────────────────────────────
+        // The memtable still has correct state (tombstones shadow deletes).
+        // Truncating the WAL means on restart, only data written AFTER this
+        // point will be recovered — which is exactly the data we write below.
+        if let Err(e) = self.soch_store.truncate_wal() {
+            tracing::error!(error = %e, "persist: WAL truncation failed — deleted items may reappear on restart");
+            // Fall through — still try to persist data. The delete-reappear
+            // bug is annoying but data loss from skipping persist is worse.
+        } else {
+            tracing::info!("persist: WAL truncated — stale tombstones cleared");
+        }
+
+        // ── Step 3: Write all live data to fresh WAL ─────────────────────
+
+        // 3a. Agents (from in-memory HashMap — authoritative)
         if let Ok(agents) = self.agents.read() {
+            tracing::info!(count = agents.len(), "persist: writing agents to SochDB");
             for (id, agent) in agents.iter() {
+                tracing::debug!(agent_id = %id, agent_name = %agent.name, "persist: writing agent");
                 if let Ok(bytes) = serde_json::to_vec(agent) {
                     let key = format!("agents/{}", id);
                     if let Err(e) = self.soch_store.put(&key, &bytes) {
@@ -3534,7 +3707,7 @@ impl AppState {
             }
         }
 
-        // Sessions (new multi-chat format)
+        // 3b. Sessions (from in-memory LRU cache — authoritative)
         {
             let all_sessions = self.sessions.entries();
             let mut ok_count = 0usize;
@@ -3559,13 +3732,7 @@ impl AppState {
             tracing::info!(ok = ok_count, failed = fail_count, "bulk persist: sessions written");
         }
 
-        // Pipelines — SKIP: pipelines use write-through durability
-        // (put_durable) on every create/update/delete. Re-writing them
-        // here with non-durable put() can race with a concurrent
-        // update_pipeline's put_durable and overwrite newer data.
-        // The pipeline data in SochDB is always authoritative.
-
-        // Canvases
+        // 3c. Canvases (from in-memory HashMap — authoritative)
         if let Ok(canvases) = self.canvases.read() {
             for (id, canvas) in canvases.iter() {
                 if let Ok(bytes) = serde_json::to_vec(canvas) {
@@ -3577,9 +3744,14 @@ impl AppState {
             }
         }
 
-        // Commit the transaction so all writes above are durable in the WAL.
-        // Without this, writes are buffered in TxnWalBuffer (in-memory only)
-        // and would be lost on restart.
+        // 3d. Re-write SochDB-only data (pipelines, notifications, etc.)
+        for (key, value) in &sochdb_preserved {
+            if let Err(e) = self.soch_store.put(key, value) {
+                tracing::error!(key = %key, error = %e, "Failed to re-persist SochDB-only data");
+            }
+        }
+
+        // ── Step 4: Commit + checkpoint ──────────────────────────────────
         if let Err(e) = self.soch_store.commit() {
             tracing::error!(error = %e, "Failed to commit bulk persist transaction");
         } else {
@@ -3836,11 +4008,17 @@ impl AppState {
         }
     }
 
-    /// Delete an agent from SochDB.
+    /// Delete an agent from SochDB (durable: commit + fsync).
     pub fn delete_agent_from_store(&self, id: &str) {
         let key = format!("agents/{}", id);
-        if let Err(e) = self.soch_store.delete_durable(&key) {
-            tracing::error!(key = %key, error = %e, "Failed to delete agent from SochDB");
+        tracing::info!(key = %key, agent_id = %id, "delete_agent_from_store: calling delete_durable");
+        match self.soch_store.delete_durable(&key) {
+            Ok(()) => {
+                tracing::info!(key = %key, agent_id = %id, "delete_agent_from_store: delete_durable succeeded (committed + fsynced)");
+            }
+            Err(e) => {
+                tracing::error!(key = %key, agent_id = %id, error = %e, "delete_agent_from_store: delete_durable FAILED — agent will reappear on restart!");
+            }
         }
     }
 
@@ -4386,19 +4564,37 @@ fn hydrate_list<T: serde::de::DeserializeOwned>(
         Ok(entries) => {
             let total = entries.len();
             let mut failed = 0usize;
+            let mut empty_keys: Vec<String> = Vec::new();
             let result: Vec<T> = entries
                 .into_iter()
                 .filter_map(|(key_str, value)| {
+                    if value.is_empty() {
+                        failed += 1;
+                        warn!(key = %key_str, "Skipping empty value during hydration (corrupt/tombstone)");
+                        empty_keys.push(key_str);
+                        return None;
+                    }
                     match serde_json::from_slice::<T>(&value) {
                         Ok(item) => Some(item),
                         Err(e) => {
                             failed += 1;
                             warn!(key = %key_str, error = %e, "Failed to deserialize list entry during hydration");
+                            empty_keys.push(key_str);
                             None
                         }
                     }
                 })
                 .collect();
+            // Auto-clean corrupt entries so they don't warn on every boot
+            if !empty_keys.is_empty() {
+                for bad_key in &empty_keys {
+                    if let Err(e) = store.delete_durable(bad_key) {
+                        warn!(key = %bad_key, error = %e, "Failed to purge corrupt key from SochDB");
+                    } else {
+                        info!(key = %bad_key, "Purged corrupt/empty key from SochDB");
+                    }
+                }
+            }
             if failed > 0 {
                 error!(
                     prefix = %prefix,

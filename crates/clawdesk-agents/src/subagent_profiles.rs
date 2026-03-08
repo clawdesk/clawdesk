@@ -154,7 +154,7 @@ pub fn resolve_profile(profile: &SubagentProfile) -> ResolvedProfile {
                 },
                 granted_capabilities: HashSet::new(),
                 max_concurrent: 4,
-                tool_timeout_secs: 30,
+                tool_timeout_secs: 120,
             },
             model_tier: ModelTier::Capable,
             description: "Planner: read-only + can spawn sub-agents for delegation. \
@@ -170,7 +170,7 @@ pub fn resolve_profile(profile: &SubagentProfile) -> ResolvedProfile {
                 require_approval: executor_require_approval(),
                 granted_capabilities: HashSet::new(),
                 max_concurrent: 8,
-                tool_timeout_secs: 30,
+                tool_timeout_secs: 120,
             },
             model_tier: ModelTier::Balanced,
             description: "Executor: full tool access with approval gate for dangerous tools."

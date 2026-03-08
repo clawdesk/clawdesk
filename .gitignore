@@ -20,6 +20,7 @@ new.js
 
 # Tauri
 /crates/clawdesk-tauri/gen/
+/crates/clawdesk-tauri/binaries/
 crates/jj.js
 crates/ui/clawdesk_ui_rust.txt
 fix_providers.py

@@ -38,7 +38,20 @@
           "permissions": [
             "core:default",
             "core:window:allow-start-dragging",
-            "autostart:default"
+            "autostart:default",
+            "shell:default",
+            {
+              "identifier": "shell:allow-spawn",
+              "allow": [
+                {
+                  "name": "binaries/llama-server",
+                  "sidecar": true,
+                  "args": true
+                }
+              ]
+            },
+            "shell:allow-kill",
+            "shell:allow-stdin-write"
           ]
         }
       ]
@@ -53,6 +66,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "externalBin": [
+      "binaries/llama-server"
+    ],
+    "resources": {
+      "binaries/lib*": "./"
+    }
   }
 }

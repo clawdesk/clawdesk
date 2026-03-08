@@ -490,3 +490,25 @@ pub async fn validate_token(
         is_peer_bound: token.is_peer_bound(),
     })
 }
+
+// ── ask_human response handler ──────────────────────────────────────
+
+/// Called by the frontend when the user responds to an `ask_human` tool call.
+/// Wakes the blocked tool and delivers the human's answer.
+#[tauri::command]
+pub async fn respond_to_ask_human(
+    request_id: String,
+    response: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let id = uuid::Uuid::parse_str(&request_id).map_err(|e| e.to_string())?;
+    if let Some(entry) = state.ask_human_pending.get(&id) {
+        if let Ok(mut slot) = entry.response.lock() {
+            *slot = Some(response);
+        }
+        entry.notify.notify_one();
+        Ok(true)
+    } else {
+        Err(format!("ask_human request '{}' not found or already answered", request_id))
+    }
+}

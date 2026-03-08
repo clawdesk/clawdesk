@@ -129,7 +129,7 @@ pub fn mmr_rerank(candidates: &[MmrCandidate], config: &MmrConfig) -> Vec<MmrRes
             }
         }
 
-        let chosen = remaining.remove(best_idx_in_remaining);
+        let chosen = remaining.swap_remove(best_idx_in_remaining);
         selected.push(chosen);
 
         results.push(MmrResult {

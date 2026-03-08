@@ -43,6 +43,9 @@ const PROVIDER_MODELS: Record<string, { id: string; label: string }[]> = {
   "Local (OpenAI Compatible)": [
     { id: "default", label: "Default Model" },
   ],
+  "Local (Built-in)": [
+    { id: "auto", label: "Auto (Best Fit)" },
+  ],
 };
 
 export { PROVIDER_MODELS };

@@ -32,7 +32,7 @@ import { buildRouteHash, parseRouteHash } from "./lib/routes";
 import { classifyError } from "./lib/error-recovery";
 import { subscribeAppEvents } from "./stores/event-bus";
 import { translateRisk } from "./lib/risk-translator";
-import { AppShell, type ShellNavGroup } from "./shell/AppShell";
+import { AppShell, type ShellNavGroup, type TopBarStatus, type GatewayStatus } from "./shell/AppShell";
 import { getActiveProvider } from "./providerConfig";
 import { ChatPage } from "./pages/ChatPage";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -46,11 +46,14 @@ import { ExtensionsPage } from "./pages/ExtensionsPage";
 import { McpPage } from "./pages/McpPage";
 import { AgentsPage } from "./pages/AgentsPage";
 import { ChannelsPage } from "./pages/ChannelsPage";
+import { FilesPage } from "./pages/FilesPage";
+import { LocalModelsPage } from "./pages/LocalModelsPage";
+import { DocumentsPage } from "./pages/DocumentsPage";
 import { ExecutionProgress, type ExecutionEvent, type EventKind } from "./components/ExecutionProgress";
 import { AgentJourneyWizard } from "./components/AgentJourneyWizard";
 import { TeamBuilderCanvas } from "./components/TeamBuilderCanvas";
 
-type NavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "settings" | "logs" | "extensions" | "mcp";
+type NavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "files" | "settings" | "logs" | "extensions" | "mcp" | "local-models" | "documents";
 type RiskLevel = "low" | "medium" | "high";
 type StatusLevel = "ok" | "warn" | "error";
 type InspectorTab = "plan" | "approvals" | "proof" | "undo" | "trace" | "memory" | "graph";
@@ -275,17 +278,20 @@ const NAV_ITEMS: { key: NavKey; label: string; shortcut: string; icon: string }[
   { key: "channels", label: "Channels", shortcut: "8", icon: "globe" },
   { key: "extensions", label: "Extensions", shortcut: "9", icon: "puzzle" },
   { key: "mcp", label: "MCP", shortcut: "", icon: "plug" },
+  { key: "files", label: "Files", shortcut: "", icon: "folder" },
   { key: "settings", label: "Settings", shortcut: "", icon: "settings" },
   { key: "logs", label: "Logs", shortcut: "0", icon: "scroll-text" },
+  { key: "local-models", label: "Local Models", shortcut: "", icon: "cpu" },
+  { key: "documents", label: "Documents", shortcut: "", icon: "file-text" },
 ];
 
 const NAV_GROUPS: ShellNavGroup[] = [
   { label: "", items: [NAV_ITEMS[0], NAV_ITEMS[1]] },
   { label: "Cluster", items: [NAV_ITEMS[2], NAV_ITEMS[3]] },
   { label: "Build", items: [NAV_ITEMS[4], NAV_ITEMS[5]] },
-  { label: "Workspace", items: [NAV_ITEMS[6], NAV_ITEMS[7]] },
+  { label: "Workspace", items: [NAV_ITEMS[6], NAV_ITEMS[7], NAV_ITEMS[10]] },
   { label: "Connect", items: [NAV_ITEMS[8], NAV_ITEMS[9]] },
-  { label: "System", items: [NAV_ITEMS[10], NAV_ITEMS[11]] },
+  { label: "System", items: [NAV_ITEMS[11], NAV_ITEMS[12], NAV_ITEMS[13]] },
 ];
 
 const INITIAL_THREADS: ThreadItem[] = [];
@@ -564,6 +570,7 @@ export default function App() {
   const [internetInstallConfirm, setInternetInstallConfirm] = useState(false);
 
   const [safeMode, setSafeMode] = useState(true);
+  const [browserEnabled, setBrowserEnabled] = useState(false);
   const [status, setStatus] = useState<StatusSummary>({
     level: "ok",
     summary: "Connecting to backend...",
@@ -607,7 +614,17 @@ export default function App() {
   }, []);
 
   // ── Backend-connected state ──────────────────────────────
-  const [backendAgents, setBackendAgents] = useState<DesktopAgent[]>([]);
+  const [backendAgents, setBackendAgentsRaw] = useState<DesktopAgent[]>([]);
+  // Track recently-deleted agent IDs so that stale listAgents() responses
+  // (from fire-and-forget .then() calls) don't re-add deleted agents.
+  const deletedAgentIdsRef = useRef<Set<string>>(new Set());
+  const setBackendAgents = useCallback((update: DesktopAgent[] | ((prev: DesktopAgent[]) => DesktopAgent[])) => {
+    setBackendAgentsRaw((prev) => {
+      const next = typeof update === "function" ? update(prev) : update;
+      if (deletedAgentIdsRef.current.size === 0) return next;
+      return next.filter((a) => !deletedAgentIdsRef.current.has(a.id));
+    });
+  }, []);
   const [backendSkills, setBackendSkills] = useState<SkillDescriptor[]>([]);
   const [backendSecurity, setBackendSecurity] = useState<BackendSecurityStatus | null>(null);
   const [backendMetrics, setBackendMetrics] = useState<CostMetrics | null>(null);
@@ -2438,6 +2455,10 @@ export default function App() {
   async function deleteBackendAgent(agentId: string) {
     try {
       await api.deleteAgent(agentId);
+      // Mark this ID as recently-deleted so stale listAgents()
+      // responses from in-flight fire-and-forget calls don't re-add it.
+      deletedAgentIdsRef.current.add(agentId);
+      setTimeout(() => deletedAgentIdsRef.current.delete(agentId), 10_000);
       setBackendAgents((prev) => prev.filter((a) => a.id !== agentId));
       setThreads((prev) => prev.filter((thread) => thread.id !== agentId));
       if (selectedAgentId === agentId) setSelectedAgentId(null);
@@ -4238,6 +4259,18 @@ export default function App() {
         selectedAgentId={selectedAgentId}
         onSelectAgent={setSelectedAgentId}
         onOpenJourney={openJourneyWizard}
+        status={{
+          gateway: (backendHealth?.status === "ok" ? "connected" : backendHealth ? "degraded" : "offline") as GatewayStatus,
+          agentCount: backendAgents.length,
+          lastChecked: backendHealth ? `${Math.floor(backendHealth.uptime_secs)}s uptime` : undefined,
+          pendingApprovals: backendApprovals.filter((a) => a.status === "pending").length || undefined,
+        }}
+        browserEnabled={browserEnabled}
+        onToggleBrowser={() => setBrowserEnabled((prev) => !prev)}
+        safeMode={safeMode}
+        onToggleSafeMode={() => setSafeMode((prev) => !prev)}
+        notificationCount={backendNotifications.length}
+        onOpenNotifications={() => navigate("logs")}
       >
         {activeNav === "chat" && (
           <ChatPage
@@ -4351,6 +4384,15 @@ export default function App() {
         )}
         {activeNav === "mcp" && (
           <McpPage pushToast={pushToast} />
+        )}
+        {activeNav === "files" && (
+          <FilesPage pushToast={pushToast} />
+        )}
+        {activeNav === "local-models" && (
+          <LocalModelsPage pushToast={pushToast} />
+        )}
+        {activeNav === "documents" && (
+          <DocumentsPage pushToast={pushToast} />
         )}
       </AppShell>
 

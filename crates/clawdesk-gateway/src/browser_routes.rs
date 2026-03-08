@@ -1,4 +1,4 @@
-//! Browser REST API routes — session list, state, screenshot.
+//! Browser REST API routes — session list, state, screenshot, tabs, profiles.
 //!
 //! Provides HTTP endpoints for monitoring and debugging browser sessions.
 
@@ -20,6 +20,23 @@ pub struct SessionState {
     pub title: String,
     pub pages_visited: u32,
     pub idle_secs: u64,
+    pub profile: String,
+}
+
+#[derive(Serialize)]
+pub struct TabSummary {
+    pub target_id: String,
+    pub title: String,
+    pub url: String,
+    pub attached: bool,
+}
+
+#[derive(Serialize)]
+pub struct ProfileSummary {
+    pub name: String,
+    pub description: String,
+    pub is_default: bool,
+    pub last_used: Option<String>,
 }
 
 /// Build the browser API router.
@@ -35,6 +52,15 @@ pub fn browser_routes(
             "/sessions/{agent_id}/screenshot",
             get(session_screenshot),
         )
+        .route(
+            "/sessions/{agent_id}/tabs",
+            get(session_tabs),
+        )
+        .route(
+            "/sessions/{agent_id}/console",
+            get(session_console),
+        )
+        .route("/profiles", get(list_profiles))
         .with_state(manager)
 }
 
@@ -81,6 +107,7 @@ async fn session_state(
         title,
         pages_visited: s.pages_visited,
         idle_secs: s.last_active.elapsed().as_secs(),
+        profile: s.profile_name.clone(),
     }))
 }
 
@@ -91,4 +118,55 @@ async fn session_screenshot(
     let session = mgr.get_or_create(&agent_id).await?;
     let s = session.lock().await;
     s.cdp.take_screenshot().await
+}
+
+async fn session_tabs(
+    State(mgr): State<Arc<clawdesk_browser::manager::BrowserManager>>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Vec<TabSummary>>, String> {
+    let session = mgr.get_or_create(&agent_id).await?;
+    let s = session.lock().await;
+    let tabs = clawdesk_browser::tabs::list_tabs(&s.cdp, false).await?;
+
+    Ok(Json(
+        tabs.into_iter()
+            .map(|t| TabSummary {
+                target_id: t.target_id,
+                title: t.title,
+                url: t.url,
+                attached: t.attached,
+            })
+            .collect(),
+    ))
+}
+
+async fn session_console(
+    State(mgr): State<Arc<clawdesk_browser::manager::BrowserManager>>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Vec<clawdesk_browser::manager::ConsoleEntry>>, String> {
+    let session = mgr.get_or_create(&agent_id).await?;
+    let s = session.lock().await;
+    // Return accumulated console log
+    Ok(Json(s.console_log.clone()))
+}
+
+async fn list_profiles(
+    State(mgr): State<Arc<clawdesk_browser::manager::BrowserManager>>,
+) -> Result<Json<Vec<ProfileSummary>>, String> {
+    let pm = mgr
+        .profile_manager()
+        .ok_or("profile manager not available")?;
+    let profiles = pm.list()?;
+
+    Ok(Json(
+        profiles
+            .into_iter()
+            .map(|p| ProfileSummary {
+                name: p.name,
+                description: p.description,
+                is_default: p.is_default,
+                last_used: p.last_used,
+            })
+            .collect(),
+    ))
 }

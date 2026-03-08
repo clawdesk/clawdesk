@@ -59,11 +59,8 @@ pub fn sync_skills_to_card(card: &mut AgentCard, skills: &[SkillSnapshot]) {
     card.skills = agent_skills;
     // Merge derived capabilities with any existing ones
     for cap in capabilities {
-        if !card.capabilities.contains(&cap) {
-            card.capabilities.push(cap);
-        }
+        card.add_capability(cap);
     }
-    card.rebuild_capset();
 
     info!(
         skills = skill_count,
@@ -229,19 +226,19 @@ mod tests {
         sync_skills_to_card(&mut card, &sample_skills());
 
         // Should have WebSearch, CodeExecution, Mathematics
-        assert!(card.capabilities.contains(&CapabilityId::WebSearch));
-        assert!(card.capabilities.contains(&CapabilityId::CodeExecution));
-        assert!(card.capabilities.contains(&CapabilityId::Mathematics));
+        assert!(card.capabilities().contains(&CapabilityId::WebSearch));
+        assert!(card.capabilities().contains(&CapabilityId::CodeExecution));
+        assert!(card.capabilities().contains(&CapabilityId::Mathematics));
     }
 
     #[test]
     fn sync_preserves_existing_capabilities() {
         let mut card = test_card();
-        card.capabilities.push(CapabilityId::Messaging);
+        card.add_capability(CapabilityId::Messaging);
         sync_skills_to_card(&mut card, &sample_skills());
 
-        assert!(card.capabilities.contains(&CapabilityId::Messaging));
-        assert!(card.capabilities.contains(&CapabilityId::WebSearch));
+        assert!(card.capabilities().contains(&CapabilityId::Messaging));
+        assert!(card.capabilities().contains(&CapabilityId::WebSearch));
     }
 
     #[test]
@@ -308,7 +305,7 @@ mod tests {
         sync_skills_to_card(&mut card, &skills);
 
         let web_count = card
-            .capabilities
+            .capabilities()
             .iter()
             .filter(|c| **c == CapabilityId::WebSearch)
             .count();

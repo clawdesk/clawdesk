@@ -19,3 +19,4 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
+rand = { workspace = true }

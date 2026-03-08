@@ -37,7 +37,7 @@
 
 use crate::registry::{Peer, PeerRegistry, PeerStatus};
 use clawdesk_acp::agent_card::AgentCard;
-use clawdesk_acp::capability::{CapabilityId, CapSet};
+use clawdesk_acp::capability::CapabilityId;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -431,7 +431,7 @@ fn validate_card(card: &AgentCard) -> Result<(), FederationError> {
             detail: "endpoint URL is empty".into(),
         });
     }
-    if card.capabilities.is_empty() && card.skills.is_empty() {
+    if card.capabilities().is_empty() && card.skills.is_empty() {
         return Err(FederationError::InvalidCard {
             agent_id: card.id.clone(),
             detail: "no capabilities or skills declared".into(),
@@ -452,7 +452,6 @@ pub fn well_known_url(host: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clawdesk_acp::agent_card::{AgentAuth, AgentEndpoint};
 
     /// Mock card fetcher that returns pre-configured cards.
     struct MockFetcher {
@@ -486,25 +485,10 @@ mod tests {
     }
 
     fn make_card(id: &str) -> AgentCard {
-        AgentCard {
-            id: id.to_string(),
-            name: format!("Agent {id}"),
-            description: format!("Test agent {id}"),
-            version: "1.0.0".to_string(),
-            endpoint: AgentEndpoint {
-                url: format!("http://{id}.local"),
-                supports_streaming: false,
-                supports_push: false,
-                push_url: None,
-            },
-            auth: AgentAuth::None,
-            capabilities: vec![CapabilityId::TextGeneration],
-            cap_set: CapSet::empty(),
-            skills: vec![],
-            protocol_versions: vec!["1.0".into()],
-            max_concurrent_tasks: Some(10),
-            metadata: serde_json::Value::Null,
-        }
+        let mut card = AgentCard::new(id, format!("Agent {id}"), format!("http://{id}.local"));
+        card.description = format!("Test agent {id}");
+        card.set_capabilities(vec![CapabilityId::TextGeneration]);
+        card
     }
 
     fn make_peer(id: &str, host: &str, port: u16, paired: bool) -> Peer {
@@ -656,7 +640,7 @@ mod tests {
     #[test]
     fn validate_card_rejects_no_capabilities() {
         let mut card = make_card("test");
-        card.capabilities.clear();
+        card.set_capabilities(vec![]);
         card.skills.clear();
         assert!(validate_card(&card).is_err());
     }

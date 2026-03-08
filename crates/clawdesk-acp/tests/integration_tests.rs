@@ -14,8 +14,7 @@ mod tests {
 
     fn make_agent_card(id: &str, caps: Vec<CapabilityId>) -> AgentCard {
         let mut card = AgentCard::new(id, id, format!("http://localhost:8080/agents/{id}"));
-        card.capabilities = caps;
-        card.rebuild_capset();
+        card.set_capabilities(caps);
         card
     }
 

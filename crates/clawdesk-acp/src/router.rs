@@ -149,9 +149,7 @@ impl AgentDirectory {
     /// Register or update an agent card.
     pub fn register(&mut self, mut card: AgentCard) {
         let id = card.id.clone();
-        // Ensure capset with closure is built.
-        card.rebuild_capset();
-        info!(agent = %id, name = %card.name, caps = card.capabilities.len(), "registered agent");
+        info!(agent = %id, name = %card.name, caps = card.capabilities().len(), "registered agent");
 
         // Remove old index entries if re-registering.
         self.remove_from_index(&id);
@@ -396,8 +394,7 @@ mod tests {
 
     fn make_agent(id: &str, caps: Vec<CapabilityId>) -> AgentCard {
         let mut card = AgentCard::new(id, id, format!("http://{}.local", id));
-        card.capabilities = caps;
-        card.rebuild_capset();
+        card.set_capabilities(caps);
         card
     }
 

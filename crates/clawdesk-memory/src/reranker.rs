@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 /// Reranker configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,22 +112,29 @@ pub fn lexical_rerank(
 
 /// Compute overlap-based relevance score.
 /// Combines exact match ratio with weighted position proximity.
+///
+/// Uses a HashSet for O(Q + D) lookup instead of nested O(Q × D) linear scan.
 fn compute_overlap_score(query_terms: &[String], doc_terms: &[String]) -> f64 {
     if doc_terms.is_empty() {
         return 0.0;
     }
 
+    // Build a set of doc terms with their earliest position for O(1) lookup.
+    let doc_set: HashMap<&str, usize> = doc_terms
+        .iter()
+        .enumerate()
+        .map(|(pos, t)| (t.as_str(), pos))
+        .rev() // reversed so earlier positions overwrite later ones
+        .collect();
+
     let mut matched = 0usize;
     let mut position_score = 0.0;
 
     for qt in query_terms {
-        for (pos, dt) in doc_terms.iter().enumerate() {
-            if dt == qt {
-                matched += 1;
-                // Earlier positions get higher weight
-                position_score += 1.0 / (1.0 + pos as f64 * 0.1);
-                break;
-            }
+        if let Some(&pos) = doc_set.get(qt.as_str()) {
+            matched += 1;
+            // Earlier positions get higher weight
+            position_score += 1.0 / (1.0 + pos as f64 * 0.1);
         }
     }
 

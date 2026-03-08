@@ -182,6 +182,26 @@ pub trait PluginFactory: Send + Sync + 'static {
     ) -> Result<Arc<dyn PluginInstance>, PluginError>;
 }
 
+/// No-op plugin factory — always returns an error.
+///
+/// Use this when the binary doesn't load plugins (CLI, gateway, bench).
+/// Defined here so every crate shares one implementation instead of
+/// each binary defining its own identical stub.
+pub struct NoopPluginFactory;
+
+#[async_trait]
+impl PluginFactory for NoopPluginFactory {
+    async fn create(
+        &self,
+        manifest: &PluginManifest,
+    ) -> Result<Arc<dyn PluginInstance>, PluginError> {
+        Err(PluginError::LoadFailed {
+            name: manifest.name.clone(),
+            detail: "No plugin factory configured".into(),
+        })
+    }
+}
+
 /// The plugin host manages the full lifecycle of all plugins.
 pub struct PluginHost {
     plugins: RwLock<HashMap<String, PluginHandle>>,

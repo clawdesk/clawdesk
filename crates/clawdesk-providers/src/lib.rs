@@ -14,14 +14,17 @@ pub mod capability;
 pub mod cohere;
 pub mod compatible;
 pub mod copilot;
+pub mod cost_router;
 pub mod gemini;
 pub mod glm;
+pub mod local;
 pub mod negotiator;
 pub mod ollama;
 pub mod openai;
 pub mod openai_compat;
 pub mod openrouter;
 pub mod profile_rotation;
+pub mod provider_spec;
 pub mod registry;
 pub mod reliable;
 pub mod router;
@@ -32,6 +35,8 @@ pub mod vertex;
 
 pub use negotiator::ProviderNegotiator;
 pub use registry::ProviderRegistry;
+pub use cost_router::{CostAwareRouter, CostRouterConfig, CostRoutingDecision, ModelCostProfile, ModelTaskStats, EwmaEstimate, ModelCostSummary};
+pub use provider_spec::{ProviderSpec, ProviderSpecError};
 
 use async_trait::async_trait;
 use clawdesk_types::error::ProviderError;

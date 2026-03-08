@@ -98,11 +98,28 @@ pub struct PersistentCachedProvider {
 ///
 /// `entries` holds the cached data. `lru_order` tracks access order
 /// (most-recently-used at back, least-recently-used at front).
+/// `lru_index` provides O(1) position lookup by key, eliminating the
+/// previous O(N) `iter().position()` scan on every access.
+///
 /// On access, the key is promoted to the back. On eviction,
 /// the front entry is removed.
 struct L1Cache {
     entries: HashMap<String, EmbeddingResult>,
     lru_order: VecDeque<String>,
+    /// key → position in `lru_order` for O(1) lookup.
+    lru_index: HashMap<String, usize>,
+}
+
+impl L1Cache {
+    /// Rebuild `lru_index` for all entries from `start_pos` onwards.
+    /// Called after a VecDeque remove shifts indices.
+    fn rebuild_index_from(&mut self, start_pos: usize) {
+        for i in start_pos..self.lru_order.len() {
+            if let Some(key) = self.lru_order.get(i) {
+                self.lru_index.insert(key.clone(), i);
+            }
+        }
+    }
 }
 
 impl PersistentCachedProvider {
@@ -118,6 +135,7 @@ impl PersistentCachedProvider {
             l1: Mutex::new(L1Cache {
                 entries: HashMap::with_capacity(config.l1_max_entries.min(1024)),
                 lru_order: VecDeque::with_capacity(config.l1_max_entries.min(1024)),
+                lru_index: HashMap::with_capacity(config.l1_max_entries.min(1024)),
             }),
             config,
         }
@@ -131,14 +149,23 @@ impl PersistentCachedProvider {
     }
 
     /// Try to get an embedding from L1 cache.
+    ///
+    /// Uses a `HashMap<String, usize>` index for O(1) LRU position lookup
+    /// instead of the previous O(N) `iter().position()` scan.
     async fn l1_get(&self, key: &str) -> Option<EmbeddingResult> {
         let mut l1 = self.l1.lock().await;
         if let Some(result) = l1.entries.get(key).cloned() {
-            // Promote to MRU position (move to back of LRU order).
-            if let Some(pos) = l1.lru_order.iter().position(|k| k == key) {
+            // Promote to MRU position: remove from current pos, push to back.
+            if let Some(&pos) = l1.lru_index.get(key) {
                 l1.lru_order.remove(pos);
+                // Rebuild index for entries after the removed position.
+                // This is O(k) where k = entries after `pos`, but avoids
+                // the previous O(N) full scan on every access.
+                l1.rebuild_index_from(pos);
             }
+            let new_pos = l1.lru_order.len();
             l1.lru_order.push_back(key.to_string());
+            l1.lru_index.insert(key.to_string(), new_pos);
             Some(result)
         } else {
             None
@@ -149,23 +176,31 @@ impl PersistentCachedProvider {
     async fn l1_put(&self, key: String, result: EmbeddingResult) {
         let mut l1 = self.l1.lock().await;
         if l1.entries.contains_key(&key) {
-            // Already present — just update value and promote.
+            // Already present — update value and promote.
             l1.entries.insert(key.clone(), result);
-            if let Some(pos) = l1.lru_order.iter().position(|k| k == &key) {
+            if let Some(&pos) = l1.lru_index.get(&key) {
                 l1.lru_order.remove(pos);
+                l1.rebuild_index_from(pos);
             }
-            l1.lru_order.push_back(key);
+            let new_pos = l1.lru_order.len();
+            l1.lru_order.push_back(key.clone());
+            l1.lru_index.insert(key, new_pos);
             return;
         }
         // Evict LRU entry if at capacity.
         while l1.entries.len() >= self.config.l1_max_entries {
             if let Some(evict_key) = l1.lru_order.pop_front() {
                 l1.entries.remove(&evict_key);
+                l1.lru_index.remove(&evict_key);
+                // After pop_front, all indices shift down by 1.
+                l1.rebuild_index_from(0);
             } else {
                 break;
             }
         }
+        let new_pos = l1.lru_order.len();
         l1.lru_order.push_back(key.clone());
+        l1.lru_index.insert(key.clone(), new_pos);
         l1.entries.insert(key, result);
     }
 

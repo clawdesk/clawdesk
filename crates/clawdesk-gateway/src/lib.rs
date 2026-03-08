@@ -38,16 +38,21 @@
 
 pub mod a2a_routes;
 pub mod admin;
+pub mod agent_loader;
 pub mod bootstrap;
 #[cfg(feature = "browser")]
 pub mod browser_routes;
+pub mod connection_mode;
+pub mod durable_response_store;
 pub mod error;
 pub mod fanout;
 pub mod fanout_executor;
 pub mod grace_window;
 pub mod idempotency;
 pub mod middleware;
+pub mod observability;
 pub mod openai_compat;
+pub mod orchestrator;
 pub mod rate_limiter;
 pub mod responses_api;
 pub mod routes;
@@ -55,14 +60,16 @@ pub mod rpc;
 pub mod skills_admin;
 pub mod state;
 pub mod subagent_manager;
+pub mod task_dispatcher;
 pub mod thread_ownership;
 pub mod wake;
 pub mod watcher;
 pub mod webhook;
+pub mod webhook_queue;
 pub mod ws;
 
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use state::GatewayState;
@@ -141,6 +148,10 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
             get(admin::list_cron_tasks).post(admin::create_cron_task),
         )
         .route(
+            "/api/v1/admin/cron/tasks/:id",
+            delete(admin::delete_cron_task),
+        )
+        .route(
             "/api/v1/admin/cron/tasks/:id/trigger",
             post(admin::trigger_cron_task),
         )
@@ -168,6 +179,19 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
         .route(
             "/api/v1/skills/rpc",
             post(skills_admin::skill_rpc),
+        )
+        // Observability dashboard & metrics
+        .route(
+            "/api/v1/admin/observability/metrics",
+            get(observability::metrics_full),
+        )
+        .route(
+            "/api/v1/admin/observability/events",
+            get(observability::metrics_sse),
+        )
+        .route(
+            "/api/v1/admin/observability/dashboard",
+            get(observability::dashboard),
         );
 
     // WebSocket

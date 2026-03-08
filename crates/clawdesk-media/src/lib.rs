@@ -14,6 +14,7 @@
 //! - **MediaCache**: Content-addressed cache with SHA256 keys
 
 pub mod artifact_pipeline;
+pub mod durable_artifact_index;
 pub mod audio;
 pub mod cache;
 pub mod cache_pro;
@@ -26,6 +27,7 @@ pub mod pipeline;
 pub mod processor;
 pub mod recorder;
 pub mod selector;
+pub mod talk_mode;
 pub mod tts;
 pub mod understanding;
 pub mod video;
@@ -40,5 +42,6 @@ pub use cache::MediaCache;
 pub use artifact_pipeline::{ArtifactPipeline, AcpArtifactInput, AcpDataInput};
 pub use video::{VideoProcessor, VideoMetadata, VideoFormat, FfmpegVideoProcessor, StubVideoProcessor, create_video_processor};
 pub use voice::{VoicePipeline, VoiceActivityDetector, VoicePipelineConfig, VoiceEvent};
+pub use talk_mode::{TalkModeController, TalkModeConfig, TalkPhase, TalkEvent, ActivationSource};
 pub use link_understanding::{LinkUnderstanding, LinkPreview, LinkConfig};
 pub use understanding::{UnderstandingDispatcher, UnderstandingProvider, MediaCapability, UnderstandingResult};

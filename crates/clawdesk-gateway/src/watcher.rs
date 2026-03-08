@@ -39,6 +39,8 @@ pub enum WatchEvent {
     SkillChange { path: PathBuf },
     /// The config file was modified.
     ConfigChange { path: PathBuf },
+    /// An agent definition (agent.toml) was modified/created/deleted.
+    AgentChange { path: PathBuf },
 }
 
 /// Configuration for the filesystem watcher.
@@ -48,12 +50,16 @@ pub struct WatcherConfig {
     pub skills_dir: PathBuf,
     /// Config file to watch for changes (non-recursive).
     pub config_path: PathBuf,
+    /// Directory to watch for agent definition changes (recursive).
+    pub agents_dir: PathBuf,
     /// Debounce window — minimum time between reloads.
     pub debounce: Duration,
     /// Whether to watch skills directory.
     pub watch_skills: bool,
     /// Whether to watch config file.
     pub watch_config: bool,
+    /// Whether to watch agents directory.
+    pub watch_agents: bool,
 }
 
 impl Default for WatcherConfig {
@@ -62,9 +68,11 @@ impl Default for WatcherConfig {
         Self {
             skills_dir: home.join("skills"),
             config_path: home.join("config.toml"),
+            agents_dir: home.join("agents"),
             debounce: Duration::from_millis(500),
             watch_skills: true,
             watch_config: true,
+            watch_agents: true,
         }
     }
 }
@@ -90,6 +98,9 @@ pub trait ReloadHandler: Send + Sync + 'static {
     async fn reload_skills(&self) -> (usize, Vec<String>);
     /// Reload configuration (if supported).
     async fn reload_config(&self) -> Result<(), String>;
+    /// Reload agent definitions from the filesystem.
+    /// Returns `(loaded, changed, errors)`.
+    async fn reload_agents(&self) -> (usize, usize, Vec<String>);
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +162,7 @@ impl ConfigWatcher {
         // that works on all platforms without the `notify` crate dependency.
         let skills_dir = config.skills_dir.clone();
         let config_path = config.config_path.clone();
+        let agents_dir = config.agents_dir.clone();
         let poll_interval = config.debounce;
 
         // Polling-based watcher (cross-platform, no native dep).
@@ -161,6 +173,7 @@ impl ConfigWatcher {
         tokio::spawn(async move {
             let mut last_skills_mtime = get_dir_mtime(&skills_dir);
             let mut last_config_mtime = get_file_mtime(&config_path);
+            let mut last_agents_mtime = get_dir_mtime(&agents_dir);
 
             loop {
                 tokio::select! {
@@ -193,6 +206,19 @@ impl ConfigWatcher {
                             .await;
                     }
                 }
+
+                // Check agents directory.
+                if config.watch_agents {
+                    let current = get_dir_mtime(&agents_dir);
+                    if current != last_agents_mtime {
+                        last_agents_mtime = current;
+                        let _ = tx_clone
+                            .send(WatchEvent::AgentChange {
+                                path: agents_dir.clone(),
+                            })
+                            .await;
+                    }
+                }
             }
         });
 
@@ -200,6 +226,7 @@ impl ConfigWatcher {
         let mut debounce_timer = tokio::time::interval(config.debounce);
         let mut pending_skills = false;
         let mut pending_config = false;
+        let mut pending_agents = false;
 
         loop {
             tokio::select! {
@@ -221,6 +248,10 @@ impl ConfigWatcher {
                             debug!(?path, "config filesystem change detected");
                             pending_config = true;
                         }
+                        WatchEvent::AgentChange { path } => {
+                            debug!(?path, "agent filesystem change detected");
+                            pending_agents = true;
+                        }
                     }
                 }
                 _ = debounce_timer.tick() => {
@@ -238,6 +269,17 @@ impl ConfigWatcher {
                         match handler.reload_config().await {
                             Ok(()) => info!("auto-reloaded config after filesystem change"),
                             Err(e) => warn!(%e, "config reload failed"),
+                        }
+                    }
+                    if pending_agents {
+                        pending_agents = false;
+                        let (loaded, changed, errors) = handler.reload_agents().await;
+                        if errors.is_empty() {
+                            if changed > 0 {
+                                info!(loaded, changed, "auto-reloaded agents after filesystem change");
+                            }
+                        } else {
+                            warn!(loaded, changed, errors = ?errors, "auto-reloaded agents with errors");
                         }
                     }
                 }
@@ -307,6 +349,7 @@ mod tests {
     struct MockHandler {
         skills_reload_count: AtomicUsize,
         config_reload_count: AtomicUsize,
+        agents_reload_count: AtomicUsize,
     }
 
     impl MockHandler {
@@ -314,6 +357,7 @@ mod tests {
             Self {
                 skills_reload_count: AtomicUsize::new(0),
                 config_reload_count: AtomicUsize::new(0),
+                agents_reload_count: AtomicUsize::new(0),
             }
         }
     }
@@ -328,6 +372,11 @@ mod tests {
         async fn reload_config(&self) -> Result<(), String> {
             self.config_reload_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+
+        async fn reload_agents(&self) -> (usize, usize, Vec<String>) {
+            self.agents_reload_count.fetch_add(1, Ordering::SeqCst);
+            (2, 1, vec![])
         }
     }
 

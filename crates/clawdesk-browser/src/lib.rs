@@ -11,18 +11,32 @@
 //! - **Safety**: Content wrapping, purchase detection
 //! - **BrowserAction**: High-level browser actions (navigate, click, type, screenshot)
 //! - **PageContext**: DOM query, text extraction, element interaction
+//! - **Profile**: Persistent browser profiles for session continuity
+//! - **Tabs**: Multi-tab management via CDP Target domain
+//! - **Snapshot**: Enhanced ARIA/AI snapshots with ref-based targeting
+//! - **FileOps**: File upload/download, console capture
 
 pub mod action;
 pub mod cdp;
 pub mod dom_intel;
+pub mod file_ops;
 pub mod manager;
 pub mod page;
+pub mod profile;
 pub mod safety;
+pub mod snapshot;
 pub mod ssrf;
+pub mod tabs;
+pub mod tool_registry;
 
 pub use action::{BrowserAction, ActionResult, execute_action, execute_tool_call};
 pub use action::{action_tool_definitions, parse_tool_call, ActionData, ElementTarget, ToolDef};
 pub use cdp::CdpSession;
 pub use dom_intel::DomSnapshot;
-pub use manager::BrowserManager;
+pub use file_ops::{upload_file, enable_downloads, drain_console_buffer, inject_console_shim};
+pub use manager::{BrowserManager, ConsoleEntry};
 pub use page::PageContext;
+pub use profile::{BrowserProfile, ProfileManager};
+pub use snapshot::{EnhancedSnapshot, SnapshotConfig, SnapshotMode, aria_snapshot, ai_snapshot};
+pub use tabs::{TabInfo, list_tabs, open_tab, focus_tab, close_tab, format_tabs_for_llm};
+pub use tool_registry::{BrowserToolId, resolve_alias, is_deprecated_alias};

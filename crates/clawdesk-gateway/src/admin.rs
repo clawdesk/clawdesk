@@ -1,12 +1,13 @@
 //! Admin API routes for plugin, cron, and system management.
 //!
 //! Routes:
-//! - `GET  /api/v1/admin/plugins` — list installed plugins
-//! - `POST /api/v1/admin/plugins/:name/reload` — reload a plugin
-//! - `GET  /api/v1/admin/cron/tasks` — list cron tasks
-//! - `POST /api/v1/admin/cron/tasks` — create a cron task
-//! - `POST /api/v1/admin/cron/tasks/:id/trigger` — manually trigger a task
-//! - `GET  /api/v1/admin/metrics` — gateway metrics snapshot
+//! - `GET    /api/v1/admin/plugins` — list installed plugins
+//! - `POST   /api/v1/admin/plugins/:name/reload` — reload a plugin
+//! - `GET    /api/v1/admin/cron/tasks` — list cron tasks
+//! - `POST   /api/v1/admin/cron/tasks` — create a cron task
+//! - `DELETE /api/v1/admin/cron/tasks/:id` — delete a cron task
+//! - `POST   /api/v1/admin/cron/tasks/:id/trigger` — manually trigger a task
+//! - `GET    /api/v1/admin/metrics` — gateway metrics snapshot
 
 use crate::state::GatewayState;
 use axum::{
@@ -15,6 +16,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use clawdesk_storage::SessionStore;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
@@ -189,6 +191,21 @@ pub async fn trigger_cron_task(
     })))
 }
 
+/// DELETE /api/v1/admin/cron/tasks/:id — delete a cron task.
+pub async fn delete_cron_task(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let removed = state
+        .cron_manager
+        .remove_task(&id)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("Task not found: {e}")))?;
+
+    info!(task_id = %id, name = %removed.name, "cron task deleted via admin API");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── Metrics ──────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -211,9 +228,16 @@ pub async fn metrics_snapshot(
         state.cron_manager.list_tasks()
     );
 
+    let session_count = state
+        .store
+        .list_sessions(clawdesk_types::session::SessionFilter::default())
+        .await
+        .map(|s| s.len() as u64)
+        .unwrap_or(0);
+
     let snapshot = MetricsSnapshot {
         uptime_secs: state.uptime_secs(),
-        total_sessions: 0, // TODO: wire session count from store
+        total_sessions: session_count,
         active_channels: channels.len(),
         loaded_plugins: plugins.len(),
         cron_tasks: tasks.len(),

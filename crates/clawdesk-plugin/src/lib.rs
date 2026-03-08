@@ -19,7 +19,7 @@ pub mod sandbox;
 pub mod registry;
 pub mod sdk;
 
-pub use host::{PluginFactory, PluginHandle, PluginHost, PluginInstance};
+pub use host::{NoopPluginFactory, PluginFactory, PluginHandle, PluginHost, PluginInstance};
 pub use resolver::DependencyResolver;
 pub use sandbox::PluginSandbox;
 pub use hooks::{Hook, HookContext, HookManager, HookOverrides, HookResult, Phase, ProactiveMemoryHook};

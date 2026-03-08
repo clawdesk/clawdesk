@@ -147,41 +147,23 @@ pub fn thread_agent_card(
         .and_then(|c| c.max_concurrent_tasks)
         .unwrap_or(5);
 
-    let cap_set = {
-        let mut cs = crate::capability::CapSet::empty();
-        for cap in &capabilities {
-            cs.insert(*cap);
-        }
-        cs.close()
-    };
-
-    AgentCard {
-        id: agent_id,
+    let mut card = AgentCard::new(
+        agent_id,
         name,
-        description,
-        version: "0.1.0".to_string(),
-        endpoint: AgentEndpoint {
-            url: format!("{}/a2a", gateway_base_url.trim_end_matches('/')),
-            supports_streaming: true,
-            supports_push: false,
-            push_url: None,
-        },
-        auth: AgentAuth::None,
-        capabilities,
-        cap_set: {
-            let lock = std::sync::OnceLock::new();
-            let _ = lock.set(cap_set);
-            lock
-        },
-        skills: vec![], // Skills are wired separately via SkillWiring
-        protocol_versions: vec!["1.0".to_string()],
-        max_concurrent_tasks: Some(max_tasks),
-        metadata: serde_json::json!({
-            "thread_id": format!("{:032x}", info.thread_id),
-            "spawn_mode": info.spawn_mode,
-            "parent_thread_id": info.parent_thread_id.map(|id| format!("{:032x}", id)),
-        }),
-    }
+        format!("{}/a2a", gateway_base_url.trim_end_matches('/')),
+    );
+    card.description = description;
+    card.endpoint.supports_streaming = true;
+    card.set_capabilities(capabilities);
+    card.skills = vec![];  // Skills are wired separately via SkillWiring
+    card.protocol_versions = vec!["1.0".to_string()];
+    card.max_concurrent_tasks = Some(max_tasks);
+    card.metadata = serde_json::json!({
+        "thread_id": format!("{:032x}", info.thread_id),
+        "spawn_mode": info.spawn_mode,
+        "parent_thread_id": info.parent_thread_id.map(|id| format!("{:032x}", id)),
+    });
+    card
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -390,8 +372,8 @@ mod tests {
 
         assert_eq!(card.id, "thread:code-review");
         assert_eq!(card.name, "Review PR #123");
-        assert!(card.capabilities.contains(&CapabilityId::TextGeneration));
-        assert!(card.capabilities.contains(&CapabilityId::CodeExecution));
+        assert!(card.capabilities().contains(&CapabilityId::TextGeneration));
+        assert!(card.capabilities().contains(&CapabilityId::CodeExecution));
         assert!(card.endpoint.url.contains("/a2a"));
     }
 
@@ -410,8 +392,8 @@ mod tests {
         assert_eq!(card.name, "Custom Agent Name");
         assert_eq!(card.description, "Overridden desc");
         // Config capabilities override thread capabilities
-        assert!(card.capabilities.contains(&CapabilityId::WebSearch));
-        assert!(!card.capabilities.contains(&CapabilityId::CodeExecution));
+        assert!(card.capabilities().contains(&CapabilityId::WebSearch));
+        assert!(!card.capabilities().contains(&CapabilityId::CodeExecution));
         assert_eq!(card.max_concurrent_tasks, Some(20));
     }
 
@@ -421,7 +403,7 @@ mod tests {
         info.capabilities = vec![];
         let card = thread_agent_card(&info, None, "http://localhost:18789");
 
-        assert_eq!(card.capabilities, vec![CapabilityId::TextGeneration]);
+        assert_eq!(card.capabilities(), &[CapabilityId::TextGeneration]);
     }
 
     #[test]

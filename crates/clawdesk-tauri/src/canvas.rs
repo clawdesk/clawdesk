@@ -108,7 +108,7 @@ impl Canvas {
     /// Create a new empty canvas.
     pub fn new(title: &str) -> Self {
         Self {
-            id: format!("canvas-{}", uuid_stub()),
+            id: format!("canvas-{}", uuid::Uuid::new_v4()),
             title: title.to_string(),
             blocks: Vec::new(),
             connections: Vec::new(),
@@ -189,7 +189,7 @@ impl Block {
     /// Create a new block.
     pub fn new(block_type: BlockType, content: &str, x: f64, y: f64) -> Self {
         Self {
-            id: format!("block-{}", uuid_stub()),
+            id: format!("block-{}", uuid::Uuid::new_v4()),
             block_type,
             content: content.to_string(),
             position: Position { x, y },
@@ -221,13 +221,9 @@ fn timestamp_now() -> String {
     format!("{}", secs)
 }
 
-/// Simple pseudo-unique ID stub (for non-crypto use).
+/// Generate a proper UUID v4 identifier.
 fn uuid_stub() -> String {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{:x}", t)
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]

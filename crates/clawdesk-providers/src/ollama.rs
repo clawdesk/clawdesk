@@ -404,7 +404,10 @@ impl Provider for OllamaProvider {
         request: &ProviderRequest,
     ) -> Result<ProviderResponse, ProviderError> {
         let start = Instant::now();
-        let model = if request.model.is_empty() {
+        let model = if request.model.is_empty()
+            || request.model == "default"
+            || request.model == "auto"
+        {
             self.default_model.clone()
         } else {
             request.model.clone()
@@ -511,7 +514,10 @@ impl Provider for OllamaProvider {
         request: &ProviderRequest,
         chunk_tx: tokio::sync::mpsc::Sender<StreamChunk>,
     ) -> Result<(), ProviderError> {
-        let model = if request.model.is_empty() {
+        let model = if request.model.is_empty()
+            || request.model == "default"
+            || request.model == "auto"
+        {
             self.default_model.clone()
         } else {
             request.model.clone()

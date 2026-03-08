@@ -2132,3 +2132,236 @@ export async function previewMigration(source: string, sourcePath: string): Prom
   }
   return invoke<MigrationReportInfo>("preview_migration", { source, sourcePath });
 }
+
+// ── ask_human response ────────────────────────────────────────
+export async function respondToAskHuman(requestId: string, response: string): Promise<boolean> {
+  return invoke<boolean>("respond_to_ask_human", { requestId, response });
+}
+
+// ── Workspace file browser ────────────────────────────────────
+import type { WorkspaceFileEntry } from "./types";
+
+export async function listWorkspaceFiles(relativePath?: string): Promise<WorkspaceFileEntry[]> {
+  if (isBrowserDev) {
+    return [
+      { name: "src/", path: "src", is_dir: true, size: 0, modified: new Date().toISOString() },
+      { name: "package.json", path: "package.json", is_dir: false, size: 1024, modified: new Date().toISOString() },
+    ];
+  }
+  return invoke<WorkspaceFileEntry[]>("list_workspace_files", { relativePath: relativePath ?? null });
+}
+
+export async function readWorkspaceFile(relativePath: string): Promise<string> {
+  if (isBrowserDev) return "// browser-dev mock file content";
+  return invoke<string>("read_workspace_file", { relativePath });
+}
+
+export async function getWorkspaceRoot(): Promise<string> {
+  if (isBrowserDev) return "/mock/workspace";
+  return invoke<string>("get_workspace_root");
+}
+
+// ── Local Models: built-in LLM management ─────────────────────
+
+export interface SystemSpecs {
+  total_ram_gb: number;
+  available_ram_gb: number;
+  total_cpu_cores: number;
+  cpu_name: string;
+  has_gpu: boolean;
+  gpu_vram_gb: number | null;
+  total_gpu_vram_gb: number | null;
+  gpu_name: string | null;
+  gpu_count: number;
+  unified_memory: boolean;
+  backend: string;
+  gpus: { name: string; vram_gb: number; index: number }[];
+}
+
+export interface ModelFit {
+  model: {
+    name: string;
+    provider: string;
+    parameter_count: string;
+    parameters_raw: number;
+    context_length: number;
+    use_case: string;
+    gguf_repo: string;
+    gguf_filename_pattern: string;
+  };
+  fit_level: "perfect" | "good" | "marginal" | "too_tight";
+  run_mode: "gpu" | "cpu_offload" | "cpu_only";
+  memory_required_gb: number;
+  memory_available_gb: number;
+  utilization_pct: number;
+  best_quant: string;
+  estimated_tps: number;
+  score: number;
+  use_case: string;
+  gguf_download_url: string;
+  installed: boolean;
+}
+
+export interface RunningModel {
+  name: string;
+  state: "stopped" | "starting" | "ready" | "stopping" | "failed";
+  port: number;
+  model_path: string;
+  pid: number | null;
+}
+
+export interface DownloadedModel {
+  name: string;
+  path: string;
+  size_gb: number;
+}
+
+export interface LocalModelsStatus {
+  system: SystemSpecs;
+  llama_server_available: boolean;
+  models_dir: string;
+  downloaded_models: DownloadedModel[];
+  running_models: RunningModel[];
+  recommended_models: ModelFit[];
+}
+
+export async function localModelsStatus(): Promise<LocalModelsStatus> {
+  if (isBrowserDev) {
+    return {
+      system: { total_ram_gb: 32, available_ram_gb: 24, total_cpu_cores: 10, cpu_name: "Apple M2 Max", has_gpu: true, gpu_vram_gb: 32, total_gpu_vram_gb: 32, gpu_name: "Apple M2 Max", gpu_count: 1, unified_memory: true, backend: "metal", gpus: [{ name: "Apple M2 Max", vram_gb: 32, index: 0 }] },
+      llama_server_available: false,
+      models_dir: "~/.clawdesk/models",
+      downloaded_models: [],
+      running_models: [],
+      recommended_models: [],
+    };
+  }
+  return invoke<LocalModelsStatus>("local_models_status");
+}
+
+export async function localModelsSystemInfo(): Promise<SystemSpecs> {
+  if (isBrowserDev) return { total_ram_gb: 32, available_ram_gb: 24, total_cpu_cores: 10, cpu_name: "Apple M2 Max", has_gpu: true, gpu_vram_gb: 32, total_gpu_vram_gb: 32, gpu_name: "Apple M2 Max", gpu_count: 1, unified_memory: true, backend: "metal", gpus: [] };
+  return invoke<SystemSpecs>("local_models_system_info");
+}
+
+export async function localModelsRecommend(): Promise<ModelFit[]> {
+  if (isBrowserDev) return [];
+  return invoke<ModelFit[]>("local_models_recommend");
+}
+
+export async function localModelsStart(modelName: string): Promise<number> {
+  return invoke<number>("local_models_start", { request: { model_name: modelName } });
+}
+
+export async function localModelsStop(modelName: string): Promise<void> {
+  return invoke<void>("local_models_stop", { request: { model_name: modelName } });
+}
+
+export async function localModelsRunning(): Promise<RunningModel[]> {
+  if (isBrowserDev) return [];
+  return invoke<RunningModel[]>("local_models_running");
+}
+
+export async function localModelsDownload(modelName: string, downloadUrl: string): Promise<void> {
+  return invoke<void>("local_models_download", { request: { model_name: modelName, download_url: downloadUrl } });
+}
+
+export async function localModelsDelete(modelName: string): Promise<void> {
+  return invoke<void>("local_models_delete", { request: { model_name: modelName } });
+}
+
+export async function localModelsSetServerPath(path: string): Promise<void> {
+  return invoke<void>("local_models_set_server_path", { request: { path } });
+}
+
+export async function localModelsScanDirectory(directory: string): Promise<ScannedModel[]> {
+  return invoke<ScannedModel[]>("local_models_scan_directory", { request: { directory } });
+}
+
+export async function localModelsImport(sourcePath: string): Promise<string> {
+  return invoke<string>("local_models_import", { request: { source_path: sourcePath } });
+}
+
+export async function localModelsSetTtl(ttlSecs: number): Promise<void> {
+  return invoke<void>("local_models_set_ttl", { request: { ttl_secs: ttlSecs } });
+}
+
+export interface ScannedModel {
+  name: string;
+  path: string;
+  size_gb: number;
+  already_imported: boolean;
+}
+
+// ── RAG: Document ingestion & retrieval ─────────────────────────
+
+export interface RagDocument {
+  id: string;
+  filename: string;
+  file_path: string;
+  doc_type: "pdf" | "text" | "markdown" | "csv";
+  size_bytes: number;
+  word_count: number;
+  chunk_count: number;
+  created_at: string;
+}
+
+export interface RagSearchResult {
+  doc_id: string;
+  filename: string;
+  chunk_index: number;
+  chunk_text: string;
+  similarity: number;
+}
+
+export async function ragIngestDocument(filePath: string): Promise<RagDocument> {
+  return invoke<RagDocument>("rag_ingest_document", { request: { file_path: filePath } });
+}
+
+export async function ragListDocuments(): Promise<RagDocument[]> {
+  if (isBrowserDev) return [];
+  return invoke<RagDocument[]>("rag_list_documents");
+}
+
+export async function ragDeleteDocument(docId: string): Promise<void> {
+  return invoke<void>("rag_delete_document", { request: { doc_id: docId } });
+}
+
+export async function ragSearch(query: string, topK?: number): Promise<RagSearchResult[]> {
+  return invoke<RagSearchResult[]>("rag_search", { request: { query, top_k: topK } });
+}
+
+export async function ragGetChunks(docId: string): Promise<string[]> {
+  return invoke<string[]>("rag_get_chunks", { request: { doc_id: docId } });
+}
+
+export async function ragBuildContext(query: string, topK?: number, maxChars?: number): Promise<string> {
+  return invoke<string>("rag_build_context", { request: { query, top_k: topK, max_chars: maxChars } });
+}
+
+// ── Preview: live web app preview ───────────────────────────
+
+export interface PreviewService {
+  id: string;
+  label: string;
+  url: string;
+  port: number;
+  created_at: string;
+}
+
+export async function previewRegister(id: string, label: string, port: number): Promise<PreviewService> {
+  return invoke<PreviewService>("preview_register", { request: { id, label, port } });
+}
+
+export async function previewList(): Promise<PreviewService[]> {
+  if (isBrowserDev) return [];
+  return invoke<PreviewService[]>("preview_list");
+}
+
+export async function previewRemove(id: string): Promise<void> {
+  return invoke<void>("preview_remove", { request: { id } });
+}
+
+export async function previewCheckPort(port: number): Promise<boolean> {
+  return invoke<boolean>("preview_check_port", { request: { port } });
+}

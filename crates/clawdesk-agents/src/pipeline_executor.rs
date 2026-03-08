@@ -870,10 +870,18 @@ fn merge_results(
             synthesis_agent_id: _,
             max_recommendations,
         } => {
-            // Dempster-Shafer evidence synthesis.
-            // For now, produce a weighted aggregate — the full D-S combination
-            // with |Ω|^k complexity is deferred to when a synthesis agent is
-            // available. Current implementation: weighted score average.
+            // Dempster-Shafer evidence combination.
+            //
+            // Each expert's output is parsed to extract hypotheses with mass
+            // assignments. Dempster's rule of combination fuses mass functions
+            // pairwise with O(f² × k) complexity for k experts with f focal
+            // elements each — essentially free for practical agent counts.
+            //
+            // The conflict measure K ∈ [0,1) directly quantifies inter-expert
+            // disagreement. K close to 1 triggers human escalation.
+            //
+            // Belief/Plausibility intervals: Bel(A) ≤ P(A) ≤ Pl(A).
+
             let mut weighted_outputs: Vec<Value> = Vec::new();
             for (i, (_, result)) in results.iter().enumerate() {
                 let weight = expert_weights.get(i).copied().unwrap_or(1.0);
@@ -885,32 +893,191 @@ fn merge_results(
                 }));
             }
 
-            // Compute conflict: proportion of disagreeing experts
-            let successful_outputs: Vec<String> = results
+            // Extract mass functions from expert outputs.
+            // Each expert maps hypothesis labels → mass values ∈ [0,1].
+            // "uncertainty" captures mass assigned to the full frame Ω.
+            let mass_functions: Vec<std::collections::HashMap<String, f64>> = results
                 .iter()
-                .filter(|(_, r)| r.success)
-                .map(|(_, r)| value_to_string(&r.output))
+                .enumerate()
+                .filter(|(_, (_, r))| r.success)
+                .map(|(i, (_, r))| {
+                    let weight = expert_weights.get(i).copied().unwrap_or(1.0);
+                    extract_mass_function(&r.output, weight)
+                })
                 .collect();
-            // Simple conflict metric: 1 - (1 / unique_count)
-            let conflict = if successful_outputs.is_empty() {
-                1.0
+
+            // Pairwise Dempster combination
+            let (fused, conflict) = if mass_functions.len() >= 2 {
+                let mut combined = mass_functions[0].clone();
+                let mut total_conflict = 0.0f64;
+                for mf in &mass_functions[1..] {
+                    let (new_combined, k) = dempster_combine(&combined, mf);
+                    total_conflict = 1.0 - (1.0 - total_conflict) * (1.0 - k);
+                    combined = new_combined;
+                }
+                (combined, total_conflict)
+            } else if mass_functions.len() == 1 {
+                (mass_functions[0].clone(), 0.0)
             } else {
-                let mut sorted = successful_outputs.clone();
-                sorted.sort();
-                sorted.dedup();
-                let unique = sorted.len();
-                1.0 - (1.0 / unique as f64)
+                (std::collections::HashMap::new(), 1.0)
             };
+
+            // Compute belief and plausibility intervals
+            let mut hypotheses: Vec<Value> = Vec::new();
+            let mut entries: Vec<(&String, &f64)> = fused.iter()
+                .filter(|(k, _)| *k != "uncertainty")
+                .collect();
+            entries.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            for (hyp, &mass) in entries.iter().take(*max_recommendations) {
+                // Belief = mass of exactly this hypothesis
+                let belief = mass;
+                // Plausibility = 1 - mass of all non-overlapping hypotheses
+                let plausibility = 1.0 - fused.iter()
+                    .filter(|(k, _)| k != hyp && *k != "uncertainty")
+                    .map(|(_, v)| v)
+                    .sum::<f64>();
+                hypotheses.push(json!({
+                    "hypothesis": hyp,
+                    "mass": mass,
+                    "belief": belief,
+                    "plausibility": plausibility.max(belief),
+                }));
+            }
 
             Ok(json!({
                 "experts": weighted_outputs,
+                "fused_masses": fused,
+                "ranked_hypotheses": hypotheses,
                 "conflict": conflict,
                 "conflict_threshold": conflict_threshold,
                 "conflict_alert": conflict > *conflict_threshold,
                 "max_recommendations": max_recommendations,
+                "combination_method": "dempster_shafer",
+                "expert_count": mass_functions.len(),
             }))
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Dempster-Shafer evidence combination
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Extract a mass function from an expert's output.
+///
+/// If the output is a JSON object with numeric values, those are treated as
+/// mass assignments. String outputs get a single hypothesis from hash-based
+/// categorization. The expert weight scales the assigned mass.
+fn extract_mass_function(
+    output: &Value,
+    weight: f64,
+) -> std::collections::HashMap<String, f64> {
+    let mut masses = std::collections::HashMap::new();
+    let weight = weight.clamp(0.0, 1.0);
+
+    match output {
+        Value::Object(map) => {
+            // Try to extract numeric "scores" or "recommendations"
+            let mut total_mass = 0.0f64;
+            for (key, val) in map {
+                if let Some(score) = val.as_f64() {
+                    let scaled = score.abs() * weight;
+                    masses.insert(key.clone(), scaled);
+                    total_mass += scaled;
+                } else if let Some(s) = val.as_str() {
+                    // String values → hash to hypothesis
+                    masses.insert(s.to_string(), weight);
+                    total_mass += weight;
+                }
+            }
+            // Normalize so masses sum to 1.0
+            if total_mass > 0.0 {
+                for v in masses.values_mut() {
+                    *v /= total_mass;
+                }
+            }
+            // Remaining mass goes to uncertainty (frame Ω)
+            let assigned: f64 = masses.values().sum();
+            if assigned < 1.0 {
+                masses.insert("uncertainty".to_string(), 1.0 - assigned);
+            }
+        }
+        Value::String(s) => {
+            // Single hypothesis with weighted mass
+            masses.insert(s.clone(), weight);
+            masses.insert("uncertainty".to_string(), 1.0 - weight);
+        }
+        _ => {
+            let key = value_to_string(output);
+            if !key.is_empty() {
+                masses.insert(key, weight);
+                masses.insert("uncertainty".to_string(), 1.0 - weight);
+            } else {
+                masses.insert("uncertainty".to_string(), 1.0);
+            }
+        }
+    }
+
+    masses
+}
+
+/// Dempster's rule of combination for two mass functions.
+///
+/// m_12(A) = (1/K) × Σ_{B∩C=A} m_1(B) × m_2(C)
+/// where K = 1 - Σ_{B∩C=∅} m_1(B) × m_2(C)
+///
+/// Returns (combined_mass_function, conflict_K).
+/// Complexity: O(f₁ × f₂) where f_i = |focal elements of m_i|.
+fn dempster_combine(
+    m1: &std::collections::HashMap<String, f64>,
+    m2: &std::collections::HashMap<String, f64>,
+) -> (std::collections::HashMap<String, f64>, f64) {
+    let mut combined = std::collections::HashMap::new();
+    let mut conflict_mass = 0.0f64;
+
+    for (a, &ma) in m1 {
+        for (b, &mb) in m2 {
+            let product = ma * mb;
+            if product < 1e-12 {
+                continue;
+            }
+
+            // Compute intersection
+            let intersection = if a == "uncertainty" {
+                // Ω ∩ B = B
+                Some(b.clone())
+            } else if b == "uncertainty" {
+                // A ∩ Ω = A
+                Some(a.clone())
+            } else if a == b {
+                // A ∩ A = A
+                Some(a.clone())
+            } else {
+                // A ∩ B = ∅ (distinct singletons)
+                None
+            };
+
+            match intersection {
+                Some(hyp) => {
+                    *combined.entry(hyp).or_insert(0.0) += product;
+                }
+                None => {
+                    conflict_mass += product;
+                }
+            }
+        }
+    }
+
+    // Normalize by (1 - K)
+    let normalization = 1.0 - conflict_mass;
+    if normalization > 1e-12 {
+        for v in combined.values_mut() {
+            *v /= normalization;
+        }
+    }
+
+    (combined, conflict_mass)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

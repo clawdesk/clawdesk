@@ -21,6 +21,7 @@
 
 use rustc_hash::FxHasher;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 
 /// Verdict issued by the loop guard for a tool call.
@@ -80,9 +81,9 @@ pub struct LoopGuard {
     /// P ≈ k²/2⁶⁴ ≈ 3.4×10⁻¹⁷ — astronomically safe.
     call_counts: HashMap<u64, usize>,
     /// Ring buffer of recent tool names (for ping-pong detection).
-    ring: Vec<String>,
-    /// Current write position in the ring buffer.
-    ring_pos: usize,
+    /// Uses VecDeque for correct chronological iteration across the wrap
+    /// boundary — iter() always yields elements in insertion order.
+    ring: VecDeque<String>,
     /// Total calls tracked.
     total_calls: usize,
     /// Whether circuit breaker has been tripped.
@@ -95,8 +96,7 @@ impl LoopGuard {
         Self {
             config,
             call_counts: HashMap::new(),
-            ring: Vec::with_capacity(ring_size),
-            ring_pos: 0,
+            ring: VecDeque::with_capacity(ring_size),
             total_calls: 0,
             circuit_broken: false,
         }
@@ -151,7 +151,6 @@ impl LoopGuard {
     pub fn reset(&mut self) {
         self.call_counts.clear();
         self.ring.clear();
-        self.ring_pos = 0;
         self.total_calls = 0;
         self.circuit_broken = false;
     }
@@ -178,9 +177,9 @@ impl LoopGuard {
             serde_json::Value::Bool(b) => { 1u8.hash(hasher); b.hash(hasher); }
             serde_json::Value::Number(n) => {
                 2u8.hash(hasher);
-                // Hash the Debug representation for determinism.
-                let s = format!("{n}");
-                s.hash(hasher);
+                // Hash via f64 bit pattern — zero allocation, O(1).
+                // IEEE 754 to_bits() is a lossless bijection for hashing.
+                hasher.write_u64(n.as_f64().unwrap_or(0.0).to_bits());
             }
             serde_json::Value::String(s) => { 3u8.hash(hasher); s.hash(hasher); }
             serde_json::Value::Array(arr) => {
@@ -201,48 +200,42 @@ impl LoopGuard {
     }
 
     /// Push a tool name into the ring buffer.
+    /// VecDeque::push_back + pop_front are both O(1).
     fn push_ring(&mut self, name: String) {
-        if self.ring.len() < self.config.ring_size {
-            self.ring.push(name);
-        } else {
-            self.ring[self.ring_pos % self.config.ring_size] = name;
+        if self.ring.len() >= self.config.ring_size {
+            self.ring.pop_front();
         }
-        self.ring_pos += 1;
+        self.ring.push_back(name);
     }
 
     /// Detect a ping-pong pattern: two tools alternating repeatedly.
     ///
-    /// Scans the ring buffer for `[A, B, A, B, ...]` patterns where the
-    /// same 2-tool cycle repeats `ping_pong_threshold` times.
+    /// Scans the ring buffer backward for `[A, B, A, B, ...]` patterns where
+    /// the same 2-tool cycle repeats `ping_pong_threshold` times.
+    /// VecDeque::iter() always yields elements in insertion (chronological) order,
+    /// so this is correct regardless of internal wrap state.
     fn detect_ping_pong(&self) -> bool {
         let len = self.ring.len();
         if len < 4 {
             return false;
         }
 
-        // Check the last N entries for alternating pattern
-        let check_len = (self.config.ping_pong_threshold * 2).min(len);
-        let start = len.saturating_sub(check_len);
-        let slice = &self.ring[start..];
-
-        if slice.len() < 4 {
-            return false;
-        }
-
-        let a = &slice[slice.len() - 2];
-        let b = &slice[slice.len() - 1];
+        // Read the last two entries as the candidate pattern.
+        let a = &self.ring[len - 2];
+        let b = &self.ring[len - 1];
 
         // Must be two different tools
         if a == b {
             return false;
         }
 
-        // Count how many consecutive alternating pairs from the end
+        // Count how many consecutive alternating pairs from the end.
+        // Iterate backward through the VecDeque in pairs.
         let mut pairs = 0usize;
-        let mut i = slice.len();
+        let mut i = len;
         while i >= 2 {
             i -= 2;
-            if &slice[i] == a && &slice[i + 1] == b {
+            if &self.ring[i] == a && &self.ring[i + 1] == b {
                 pairs += 1;
             } else {
                 break;

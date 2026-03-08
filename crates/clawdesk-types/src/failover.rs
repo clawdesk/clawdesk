@@ -31,6 +31,8 @@ pub enum FailoverReason {
     ModelUnavailable,
     /// Request timeout.
     Timeout,
+    /// Content was filtered by the provider (empty response).
+    ContentFilter,
     /// Unknown/unclassified error.
     Unknown,
 }
@@ -113,6 +115,14 @@ impl FailoverReason {
             || lower.contains("not available")
         {
             return Self::ModelUnavailable;
+        }
+
+        // Content filter (empty response from provider)
+        if lower.contains("content filter")
+            || lower.contains("content_filter")
+            || lower.contains("empty response")
+        {
+            return Self::ContentFilter;
         }
 
         Self::Unknown

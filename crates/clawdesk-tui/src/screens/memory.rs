@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use clawdesk_types::truncate_to_char_boundary;
 
 #[derive(Debug, Clone)]
 pub struct MemoryEntry {
@@ -196,7 +197,8 @@ impl Screen for MemoryScreen {
                         format!(
                             "    {}",
                             if e.value_preview.len() > 60 {
-                                format!("{}…", &e.value_preview[..60])
+                                let end = truncate_to_char_boundary(&e.value_preview, 60);
+                                format!("{}…", &e.value_preview[..end])
                             } else {
                                 e.value_preview.clone()
                             }

@@ -312,6 +312,178 @@ impl ReplyPipeline {
             response_parts,
         }
     }
+
+    /// Run the streaming pipeline — applies all 7 stages as stream transforms.
+    ///
+    /// Each stage processes chunks as they flow through. This ensures streaming
+    /// responses go through the same Classify → Route → Enrich → Execute →
+    /// Format → Deliver pipeline as non-streaming, so skills and adapters
+    /// can intercept or transform streaming responses.
+    ///
+    /// Per-chunk formatting overhead is sub-microsecond — negligible vs LLM
+    /// inference latency.
+    pub async fn process_streaming(
+        &self,
+        msg: &NormalizedMessage,
+    ) -> StreamingPipelineResult {
+        let mut timings: Vec<(&'static str, std::time::Duration)> = Vec::with_capacity(7);
+
+        // Stage 1: Inbound
+        let t = Instant::now();
+        debug!(msg_id = %msg.id, "streaming pipeline: inbound");
+        timings.push(("inbound", t.elapsed()));
+
+        // Stage 2: Classify
+        let t = Instant::now();
+        let classification = self.classifier.classify(msg);
+        timings.push(("classify", t.elapsed()));
+
+        let classification = match classification {
+            Some(c) => c,
+            None => {
+                debug!(msg_id = %msg.id, "streaming pipeline: no trigger matched");
+                return StreamingPipelineResult {
+                    stage_timings: timings,
+                    delivery: DeliveryStatus {
+                        message_id: msg.id.to_string(),
+                        channel: msg.sender.channel.to_string(),
+                        status: DeliveryState::Failed,
+                        timestamp: chrono::Utc::now(),
+                        retry_count: 0,
+                        error: Some("no trigger matched".to_string()),
+                    },
+                    stream: None,
+                };
+            }
+        };
+
+        // Stage 3: Route
+        let t = Instant::now();
+        let decision = self.router.route(msg, classification.clone());
+        timings.push(("route", t.elapsed()));
+
+        let (agent_id, _classification) = match decision {
+            RoutingDecision::Process {
+                agent_id,
+                classification,
+            } => (agent_id, classification),
+            RoutingDecision::Drop { reason } => {
+                debug!(msg_id = %msg.id, reason = %reason, "streaming pipeline: dropped");
+                return StreamingPipelineResult {
+                    stage_timings: timings,
+                    delivery: DeliveryStatus {
+                        message_id: msg.id.to_string(),
+                        channel: msg.sender.channel.to_string(),
+                        status: DeliveryState::Failed,
+                        timestamp: chrono::Utc::now(),
+                        retry_count: 0,
+                        error: Some(reason),
+                    },
+                    stream: None,
+                };
+            }
+            RoutingDecision::Queue { reason } => {
+                return StreamingPipelineResult {
+                    stage_timings: timings,
+                    delivery: DeliveryStatus {
+                        message_id: msg.id.to_string(),
+                        channel: msg.sender.channel.to_string(),
+                        status: DeliveryState::Queued,
+                        timestamp: chrono::Utc::now(),
+                        retry_count: 0,
+                        error: Some(reason),
+                    },
+                    stream: None,
+                };
+            }
+        };
+
+        // Stage 4: Enrich (same as non-streaming)
+        let t = Instant::now();
+        timings.push(("enrich", t.elapsed()));
+
+        // Stage 5: Execute (streaming) — get chunk receiver from streaming executor
+        let t = Instant::now();
+        let executor = match &self.streaming_executor {
+            Some(exec) => exec,
+            None => {
+                warn!(msg_id = %msg.id, "streaming executor not set, falling back to sync");
+                timings.push(("execute", t.elapsed()));
+                return StreamingPipelineResult {
+                    stage_timings: timings,
+                    delivery: DeliveryStatus {
+                        message_id: msg.id.to_string(),
+                        channel: msg.sender.channel.to_string(),
+                        status: DeliveryState::Failed,
+                        timestamp: chrono::Utc::now(),
+                        retry_count: 0,
+                        error: Some("no streaming executor configured".to_string()),
+                    },
+                    stream: None,
+                };
+            }
+        };
+
+        let rx = match executor(msg.clone(), agent_id).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                timings.push(("execute", t.elapsed()));
+                return StreamingPipelineResult {
+                    stage_timings: timings,
+                    delivery: DeliveryStatus {
+                        message_id: msg.id.to_string(),
+                        channel: msg.sender.channel.to_string(),
+                        status: DeliveryState::Failed,
+                        timestamp: chrono::Utc::now(),
+                        retry_count: 0,
+                        error: Some(e),
+                    },
+                    stream: None,
+                };
+            }
+        };
+        timings.push(("execute", t.elapsed()));
+
+        // Stage 6 & 7: Format + Deliver as stream transforms.
+        // Each chunk passes through the formatter before being forwarded.
+        let channel = msg.sender.channel.clone();
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel::<String>(64);
+
+        tokio::spawn(async move {
+            let mut rx = rx;
+            while let Some(chunk) = rx.recv().await {
+                // Apply per-chunk formatting (sub-microsecond overhead)
+                let formatted = ResponseFormatter::format_chunk(&chunk, &channel);
+                if out_tx.send(formatted).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        StreamingPipelineResult {
+            stage_timings: timings,
+            delivery: DeliveryStatus {
+                message_id: msg.id.to_string(),
+                channel: msg.sender.channel.to_string(),
+                status: DeliveryState::Delivered,
+                timestamp: chrono::Utc::now(),
+                retry_count: 0,
+                error: None,
+            },
+            stream: Some(out_rx),
+        }
+    }
+}
+
+/// Result of the streaming pipeline.
+#[derive(Debug)]
+pub struct StreamingPipelineResult {
+    /// Per-stage timings (stage name, duration).
+    pub stage_timings: Vec<(&'static str, std::time::Duration)>,
+    /// Final delivery status.
+    pub delivery: DeliveryStatus,
+    /// Stream of formatted response chunks, if execution succeeded.
+    pub stream: Option<tokio::sync::mpsc::Receiver<String>>,
 }
 
 #[cfg(test)]
@@ -350,7 +522,9 @@ mod tests {
 
     #[test]
     fn test_pipeline_with_command() {
-        let pipeline = make_pipeline();
+        let pipeline = make_pipeline().with_executor(Box::new(|msg, _agent| {
+            Ok(format!("handled command: {}", msg.body))
+        }));
         let msg = test_msg("/help", ChannelId::Discord);
         let result = pipeline.process(&msg);
         assert_eq!(result.delivery.status, DeliveryState::Delivered);

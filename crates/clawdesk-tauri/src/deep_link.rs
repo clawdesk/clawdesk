@@ -21,6 +21,7 @@
 //! - Query length is bounded (max 2048 chars)
 
 use serde::{Deserialize, Serialize};
+use clawdesk_types::truncate_to_char_boundary;
 use tracing::{debug, info, warn};
 
 /// Maximum URI length to prevent abuse.
@@ -71,7 +72,10 @@ pub fn parse_deep_link(uri: &str) -> DeepLinkAction {
     if uri.len() > MAX_URI_LENGTH {
         warn!(len = uri.len(), "Deep link URI too long, rejecting");
         return DeepLinkAction::Unknown {
-            uri: uri[..64].to_string() + "...",
+            uri: {
+                let end = truncate_to_char_boundary(uri, 64);
+                uri[..end].to_string() + "..."
+            },
         };
     }
 

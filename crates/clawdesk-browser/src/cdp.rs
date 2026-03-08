@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 /// CDP connection configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +19,12 @@ pub struct CdpConfig {
     pub headless: bool,
     /// Browser executable path (auto-detected if None).
     pub browser_path: Option<String>,
+    /// Remote CDP URL (e.g., ws://remote-host:9222) — skips local launch.
+    pub remote_cdp_url: Option<String>,
+    /// Maximum connection retry attempts.
+    pub max_retries: u32,
+    /// Base delay for exponential backoff (ms).
+    pub retry_base_delay_ms: u64,
 }
 
 impl Default for CdpConfig {
@@ -28,6 +34,9 @@ impl Default for CdpConfig {
             timeout_ms: 30_000,
             headless: true,
             browser_path: None,
+            remote_cdp_url: None,
+            max_retries: 3,
+            retry_base_delay_ms: 200,
         }
     }
 }
@@ -310,6 +319,56 @@ impl CdpSession {
         Ok(())
     }
 
+    /// Connect with exponential backoff retry.
+    ///
+    /// Retries up to `config.max_retries` times with exponential backoff
+    /// starting from `config.retry_base_delay_ms`.
+    pub async fn connect_with_retry(&mut self) -> Result<(), String> {
+        let max = self.config.max_retries;
+        let base_delay = self.config.retry_base_delay_ms;
+
+        for attempt in 0..=max {
+            match self.connect().await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt == max {
+                        return Err(format!(
+                            "CDP connect failed after {} retries: {}",
+                            max, e
+                        ));
+                    }
+                    let delay = base_delay * (1 << attempt);
+                    warn!(
+                        attempt = attempt + 1,
+                        max_retries = max,
+                        delay_ms = delay,
+                        "CDP connect failed, retrying: {}",
+                        e
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                    // Reset connection state for retry
+                    self.connected = false;
+                    self.ws_write = None;
+                    self.pending = None;
+                    self.event_rx = None;
+                }
+            }
+        }
+        Err("unreachable".into())
+    }
+
+    /// Disconnect the WebSocket transport.
+    ///
+    /// Drops the writer and pending map, marking the session as disconnected.
+    /// The reader task will exit on its own when the stream closes.
+    pub fn disconnect(&mut self) {
+        self.ws_write = None;
+        self.pending = None;
+        self.event_rx = None;
+        self.connected = false;
+        debug!("CDP disconnected");
+    }
+
     /// Send a CDP command and await its response.
     pub async fn send(&self, command: CdpCommand) -> Result<CdpResponse, String> {
         let ws_write = self
@@ -404,6 +463,11 @@ impl CdpSession {
         config: &CdpConfig,
         port: u16,
     ) -> Result<(std::process::Child, Self), String> {
+        // If remote CDP URL is configured, connect to it instead of launching
+        if let Some(ref remote_url) = config.remote_cdp_url {
+            return Self::connect_remote(config, remote_url).await;
+        }
+
         let browser_path = config
             .browser_path
             .clone()
@@ -429,12 +493,55 @@ impl CdpSession {
             ws_url,
             ..config.clone()
         });
-        session.connect().await?;
+        session.connect_with_retry().await?;
 
         // Enable required domains
         let _ = session.send(session.enable_page()).await;
         let _ = session.send(session.enable_dom()).await;
 
+        Ok((child, session))
+    }
+
+    /// Connect to a remote CDP endpoint (no local browser launch).
+    ///
+    /// The remote URL should be the WebSocket debugger URL or the
+    /// host:port of a Chrome instance with `--remote-debugging-port`.
+    async fn connect_remote(
+        config: &CdpConfig,
+        remote_url: &str,
+    ) -> Result<(std::process::Child, Self), String> {
+        // Parse the remote URL to determine if it's a ws:// URL or host:port
+        let ws_url = if remote_url.starts_with("ws://") || remote_url.starts_with("wss://") {
+            remote_url.to_string()
+        } else {
+            // Assume host:port — discover ws URL
+            let parts: Vec<&str> = remote_url.split(':').collect();
+            let host = parts.first().unwrap_or(&"127.0.0.1");
+            let port: u16 = parts
+                .get(1)
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(9222);
+            Self::discover_ws_url(host, port).await?
+        };
+
+        let mut session = Self::new(CdpConfig {
+            ws_url,
+            ..config.clone()
+        });
+        session.connect_with_retry().await?;
+
+        let _ = session.send(session.enable_page()).await;
+        let _ = session.send(session.enable_dom()).await;
+
+        // Create a dummy child process (no local Chrome to manage)
+        // Use a no-op command that exits immediately
+        let child = std::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("failed to create dummy process: {}", e))?;
+
+        info!(remote_url, "connected to remote CDP endpoint");
         Ok((child, session))
     }
 }

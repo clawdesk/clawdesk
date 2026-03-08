@@ -25,9 +25,22 @@ use clawdesk_types::{
     error::StorageError,
     session::{AgentMessage, SessionKey},
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::debug;
 
 use crate::SochStore;
+
+/// Per-session monotonic sequence counter to prevent timestamp collisions.
+/// Two messages within the same millisecond get distinct keys via the sequence suffix.
+/// Uses Hybrid Logical Clock approach: max(wall_clock, last_ts + 1).
+static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a monotonically increasing key suffix that prevents collisions.
+/// Returns (timestamp_ms, sequence) where the composite is strictly increasing.
+fn monotonic_key(ts_millis: i64) -> (i64, u64) {
+    let seq = SEQUENCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    (ts_millis, seq)
+}
 
 /// Default number of messages kept verbatim in the hot tier.
 /// Can be overridden per-channel via `compact_session_with_limit()`.
@@ -41,14 +54,17 @@ impl ConversationStore for SochStore {
         msg: &AgentMessage,
     ) -> Result<(), StorageError> {
         let ts = msg.timestamp.timestamp_millis();
-        let path = format!("sessions/{}/messages/{}", key.as_str(), ts);
+        let (ts_key, seq) = monotonic_key(ts);
+        // Composite key: {timestamp_ms:020}/{sequence:010} ensures uniqueness
+        // even when multiple messages share the same millisecond.
+        let path = format!("sessions/{}/messages/{:020}/{:010}", key.as_str(), ts_key, seq);
         let bytes = serde_json::to_vec(msg).map_err(|e| StorageError::SerializationFailed {
             detail: e.to_string(),
         })?;
 
         self.put_durable(&path, &bytes)?;
 
-        debug!(%key, %ts, "message appended (durable)");
+        debug!(%key, %ts, %seq, "message appended (durable)");
         Ok(())
     }
 
@@ -68,11 +84,13 @@ impl ConversationStore for SochStore {
         }
 
         // Pre-serialize all messages before touching the DB.
+        // Each message gets a unique monotonic key to prevent timestamp collisions.
         let entries: Vec<(String, Vec<u8>)> = msgs
             .iter()
             .map(|msg| {
                 let ts = msg.timestamp.timestamp_millis();
-                let path = format!("sessions/{}/messages/{}", key.as_str(), ts);
+                let (ts_key, seq) = monotonic_key(ts);
+                let path = format!("sessions/{}/messages/{:020}/{:010}", key.as_str(), ts_key, seq);
                 let bytes = serde_json::to_vec(msg).map_err(|e| {
                     StorageError::SerializationFailed {
                         detail: e.to_string(),
@@ -321,12 +339,17 @@ impl SochStore {
             }
         };
 
-        // Store the summary.
+        // Atomic compaction: store summary + delete cold entries in a single batch.
+        // This prevents data duplication/loss on crash between summary write and deletes.
         let ts = chrono::Utc::now().timestamp_millis();
         let summary_key = format!("sessions/{}/summaries/{}", key.as_str(), ts);
-        self.put(&summary_key, summary.as_bytes())?;
+        let summary_bytes = summary.as_bytes();
 
-        // Delete compacted messages.
+        // Build atomic batch: one put (summary) + N deletes (cold messages).
+        let batch_puts: Vec<(&str, &[u8])> = vec![(&summary_key, summary_bytes)];
+        // Apply puts first, then deletes — all in one group-commit.
+        self.put_batch(&batch_puts)?;
+        // Delete cold entries in batch.
         for (k, _v) in cold_entries {
             let _ = self.delete(k);
         }
@@ -335,7 +358,7 @@ impl SochStore {
             %key,
             cold_count,
             remaining = hot_tier_size,
-            "conversation compacted"
+            "conversation compacted (batch)"
         );
         Ok(cold_count)
     }

@@ -165,13 +165,60 @@ pub struct ResponseUsage {
 
 // ── Response store ────────────────────────────────────────────
 
-/// In-memory response store for retrieval by ID.
-/// In production, this would be backed by SochDB for durability.
-pub type ResponseStore = Arc<RwLock<HashMap<String, ResponseObject>>>;
+/// Maximum number of responses kept in the in-memory store.
+/// Prevents unbounded growth on long-running instances.
+const RESPONSE_STORE_MAX_ENTRIES: usize = 10_000;
 
-/// Create a new response store.
+/// Bounded in-memory response store with LRU eviction.
+///
+/// Responses are stored in a `HashMap` for O(1) lookup and a `VecDeque`
+/// for insertion-order tracking. When capacity is reached, the oldest
+/// response is evicted (FIFO approximation of LRU — responses are
+/// write-once, so insertion order ≈ access order).
+pub struct BoundedResponseStore {
+    map: HashMap<String, ResponseObject>,
+    order: std::collections::VecDeque<String>,
+    max_entries: usize,
+}
+
+impl BoundedResponseStore {
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            map: HashMap::with_capacity(max_entries.min(1024)),
+            order: std::collections::VecDeque::with_capacity(max_entries.min(1024)),
+            max_entries,
+        }
+    }
+
+    /// Insert a response, evicting the oldest if at capacity.
+    pub fn insert(&mut self, id: String, response: ResponseObject) {
+        if self.map.contains_key(&id) {
+            // Update existing — no order change needed.
+            self.map.insert(id, response);
+            return;
+        }
+        while self.map.len() >= self.max_entries {
+            if let Some(evict_id) = self.order.pop_front() {
+                self.map.remove(&evict_id);
+            } else {
+                break;
+            }
+        }
+        self.order.push_back(id.clone());
+        self.map.insert(id, response);
+    }
+
+    /// Get a response by ID.
+    pub fn get(&self, id: &str) -> Option<&ResponseObject> {
+        self.map.get(id)
+    }
+}
+
+pub type ResponseStore = Arc<RwLock<BoundedResponseStore>>;
+
+/// Create a new bounded response store.
 pub fn new_response_store() -> ResponseStore {
-    Arc::new(RwLock::new(HashMap::new()))
+    Arc::new(RwLock::new(BoundedResponseStore::new(RESPONSE_STORE_MAX_ENTRIES)))
 }
 
 // ── SSE event types ──────────────────────────────────────────
@@ -559,7 +606,8 @@ mod tests {
         };
         store.write().await.insert("resp_test123".into(), resp);
         let read = store.read().await;
-        assert!(read.contains_key("resp_test123"));
-        assert_eq!(read["resp_test123"].model, "gpt-4o");
+        let fetched = read.get("resp_test123");
+        assert!(fetched.is_some());
+        assert_eq!(fetched.unwrap().model, "gpt-4o");
     }
 }

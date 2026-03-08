@@ -25,6 +25,7 @@ pub mod context_guard;
 pub mod digest;
 pub mod fallback;
 pub mod identity;
+pub mod lineage;
 pub mod migration;
 pub mod model_catalog;
 pub mod prompt_builder;

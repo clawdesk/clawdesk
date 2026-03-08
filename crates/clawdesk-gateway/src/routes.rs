@@ -296,7 +296,7 @@ pub async fn list_thread_agents(
                 "agent_id": card.id,
                 "name": card.name,
                 "url": card.endpoint.url,
-                "capabilities": card.capabilities.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>(),
+                "capabilities": card.capabilities().iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>(),
                 "skills": card.skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
             })
         })

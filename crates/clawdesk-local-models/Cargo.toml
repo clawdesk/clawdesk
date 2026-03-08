@@ -1,0 +1,35 @@
+[package]
+name = "clawdesk-local-models"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Local LLM model management, hardware detection, and inference server for ClawDesk"
+
+[dependencies]
+# Internal
+clawdesk-types = { workspace = true }
+
+# Async
+tokio = { workspace = true, features = ["process", "fs", "io-util", "rt"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP (for llama-server health checks and API)
+reqwest = { workspace = true }
+
+# System info
+sysinfo = "0.38"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }

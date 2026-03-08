@@ -507,7 +507,7 @@ impl SessionRouter {
                     source,
                     is_healthy: entry.is_healthy,
                     active_tasks: entry.active_tasks,
-                    capabilities: entry.card.capabilities.clone(),
+                    capabilities: entry.card.capabilities().to_vec(),
                     health_ratio: breaker.map_or(1.0, |cb| cb.health_ratio()),
                     circuit_open: breaker.map_or(false, |cb| cb.is_open()),
                 }
@@ -819,8 +819,7 @@ mod tests {
 
     fn make_card(id: &str, caps: Vec<CapabilityId>) -> AgentCard {
         let mut card = AgentCard::new(id, id, format!("http://{}.local", id));
-        card.capabilities = caps;
-        card.rebuild_capset();
+        card.set_capabilities(caps);
         card
     }
 

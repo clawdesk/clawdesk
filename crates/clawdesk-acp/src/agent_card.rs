@@ -30,12 +30,15 @@ pub struct AgentCard {
     /// Authentication requirements.
     pub auth: AgentAuth,
     /// Capabilities this agent offers (typed capability IDs).
-    pub capabilities: Vec<CapabilityId>,
+    ///
+    /// **Do not mutate directly.** Use `add_capability()` / `set_capabilities()`
+    /// which automatically rebuild the cached `cap_set`.
+    capabilities: Vec<CapabilityId>,
     /// Precomputed capability bitset with hierarchical closure.
     /// Lazily initialised on first access (e.g. after deserialization).
-    /// Call `rebuild_capset()` after directly mutating `capabilities`.
+    /// Automatically rebuilt by all mutation methods.
     #[serde(skip)]
-    pub cap_set: OnceLock<CapSet>,
+    cap_set: OnceLock<CapSet>,
     /// Skills this agent can perform (more granular than capabilities).
     pub skills: Vec<AgentSkill>,
     /// Supported protocol versions.
@@ -132,8 +135,11 @@ impl AgentCard {
         }
     }
 
-    /// Add a capability, invalidating the cached capset.
+    /// Add a capability (builder pattern), automatically rebuilding the capset.
+    /// O(1) amortized via set-check before push.
     pub fn with_capability(mut self, cap: CapabilityId) -> Self {
+        // Use bit_index as a fast membership check via the closed capset.
+        // For the raw list, linear scan is acceptable at current scale (~22 caps).
         if !self.capabilities.contains(&cap) {
             self.capabilities.push(cap);
         }
@@ -141,11 +147,28 @@ impl AgentCard {
         self
     }
 
+    /// Add a capability in-place, automatically rebuilding the capset.
+    pub fn add_capability(&mut self, cap: CapabilityId) {
+        if !self.capabilities.contains(&cap) {
+            self.capabilities.push(cap);
+        }
+        self.rebuild_capset();
+    }
+
+    /// Replace all capabilities, automatically rebuilding the capset.
+    pub fn set_capabilities(&mut self, caps: Vec<CapabilityId>) {
+        self.capabilities = caps;
+        self.rebuild_capset();
+    }
+
+    /// Read-only access to the capability list.
+    pub fn capabilities(&self) -> &[CapabilityId] {
+        &self.capabilities
+    }
+
     /// Rebuild the cached capset with hierarchical closure.
-    /// Call after directly mutating `capabilities`.
-    pub fn rebuild_capset(&mut self) {
+    fn rebuild_capset(&mut self) {
         let raw: CapSet = self.capabilities.iter().copied().collect();
-        // Replace the OnceCell — take the old one and create a new pre-filled one.
         self.cap_set = OnceLock::new();
         let _ = self.cap_set.set(raw.close());
     }
@@ -174,102 +197,66 @@ impl AgentCard {
         self.closed_capset().contains(cap)
     }
 
-    /// Content-addressed structural fingerprint — true zero-heap-allocation.
+    /// Content-addressed structural fingerprint — exact, no truncation.
     ///
-    /// Hashes: capabilities (via closed CapSet bits) + skills (sorted indices) +
-    /// endpoint URL + max_concurrent_tasks + protocol_versions. Excludes
-    /// description, metadata, and version string — those are "cosmetic" changes
-    /// that don't affect routing.
+    /// Hashes: capabilities (via closed CapSet bits) + skills (canonical sort)
+    /// + all skill tags (canonical sort) + endpoint URL + max_concurrent_tasks
+    /// + protocol_versions (canonical sort).
     ///
-    /// **Zero heap allocations**: Uses fixed-size stack arrays `[usize; 64]`
-    /// for index sorting. Capabilities use the CapSet's native `[u64; N]`
-    /// representation (consistent with the CapSet width, currently 64 bits).
+    /// Uses SHA-256 truncated to 64 bits for the fingerprint value.
+    /// No data is truncated — all skills, tags, and protocol versions
+    /// contribute to the hash regardless of count.
     ///
-    /// Total: O(k log k) comparisons, 0 heap allocations, O(Σ|bytes|) hash ops.
-    ///
-    /// Returns a 64-bit FNV-1a hash.
+    /// Returns a 64-bit hash (first 8 bytes of SHA-256).
     pub fn structural_fingerprint(&self) -> u64 {
-        /// Maximum skills/tags/protocol versions before this function would
-        /// need a heap fallback. 64 is generous — most agents have < 10 skills.
-        const MAX_INDICES: usize = 64;
+        use sha2::{Digest, Sha256};
 
-        let mut h = 0xcbf29ce484222325u64; // FNV-1a offset basis
-
-        #[inline(always)]
-        fn fnv_bytes(h: &mut u64, bytes: &[u8]) {
-            for &b in bytes {
-                *h ^= b as u64;
-                *h = h.wrapping_mul(0x100000001b3);
-            }
-        }
+        let mut hasher = Sha256::new();
 
         // Capabilities — use the closed CapSet's native bits representation.
-        // This is consistent with the CapSet width (currently N=1 → u64, but
-        // automatically scales if CapSet is expanded to N=2 → u128, etc.).
         let cap_set = self.closed_capset();
-        // Hash each word of the CapSet backing store
         for word in cap_set.bits() {
-            fnv_bytes(&mut h, &word.to_le_bytes());
+            hasher.update(word.to_le_bytes());
         }
 
-        // Skill IDs + tags — index-sort on stack, no heap allocation.
-        let skill_count = self.skills.len();
-        if skill_count > 0 {
-            assert!(skill_count <= MAX_INDICES, "skill count {} exceeds stack limit {}", skill_count, MAX_INDICES);
-            let mut indices = [0usize; MAX_INDICES];
-            for i in 0..skill_count {
-                indices[i] = i;
-            }
-            indices[..skill_count].sort_unstable_by(|&a, &b| self.skills[a].id.cmp(&self.skills[b].id));
+        // Skills — sort by ID for canonical order.
+        let mut skill_ids: Vec<&str> = self.skills.iter().map(|s| s.id.as_str()).collect();
+        skill_ids.sort_unstable();
 
-            for &idx in &indices[..skill_count] {
-                let skill = &self.skills[idx];
-                fnv_bytes(&mut h, skill.id.as_bytes());
-                fnv_bytes(&mut h, b":");
+        for skill_id in &skill_ids {
+            hasher.update(skill_id.as_bytes());
+            hasher.update(b":");
 
-                // Sort tag indices on stack.
-                let tag_count = skill.tags.len();
-                if tag_count > 0 {
-                    assert!(tag_count <= MAX_INDICES, "tag count {} exceeds stack limit {}", tag_count, MAX_INDICES);
-                    let mut tag_indices = [0usize; MAX_INDICES];
-                    for i in 0..tag_count {
-                        tag_indices[i] = i;
+            // Find the skill and sort its tags.
+            if let Some(skill) = self.skills.iter().find(|s| s.id.as_str() == *skill_id) {
+                let mut sorted_tags: Vec<&str> = skill.tags.iter().map(|t| t.as_str()).collect();
+                sorted_tags.sort_unstable();
+                for (i, tag) in sorted_tags.iter().enumerate() {
+                    if i > 0 {
+                        hasher.update(b",");
                     }
-                    tag_indices[..tag_count].sort_unstable_by(|&a, &b| skill.tags[a].cmp(&skill.tags[b]));
-                    for (i, &ti) in tag_indices[..tag_count].iter().enumerate() {
-                        if i > 0 {
-                            fnv_bytes(&mut h, b",");
-                        }
-                        fnv_bytes(&mut h, skill.tags[ti].as_bytes());
-                    }
+                    hasher.update(tag.as_bytes());
                 }
             }
         }
 
-        // Endpoint URL — direct hash, no allocation.
-        fnv_bytes(&mut h, self.endpoint.url.as_bytes());
+        // Endpoint URL.
+        hasher.update(self.endpoint.url.as_bytes());
 
         // Max concurrent tasks.
         let max_tasks = self.max_concurrent_tasks.unwrap_or(0);
-        fnv_bytes(&mut h, &max_tasks.to_le_bytes());
+        hasher.update(max_tasks.to_le_bytes());
 
-        // Protocol versions — index-sort on stack.
-        let pv_count = self.protocol_versions.len();
-        if pv_count > 0 {
-            assert!(pv_count <= MAX_INDICES, "protocol version count {} exceeds stack limit {}", pv_count, MAX_INDICES);
-            let mut pv_indices = [0usize; MAX_INDICES];
-            for i in 0..pv_count {
-                pv_indices[i] = i;
-            }
-            pv_indices[..pv_count].sort_unstable_by(|&a, &b| {
-                self.protocol_versions[a].cmp(&self.protocol_versions[b])
-            });
-            for &pi in &pv_indices[..pv_count] {
-                fnv_bytes(&mut h, self.protocol_versions[pi].as_bytes());
-            }
+        // Protocol versions — sorted for canonical order.
+        let mut sorted_pvs: Vec<&str> = self.protocol_versions.iter().map(|p| p.as_str()).collect();
+        sorted_pvs.sort_unstable();
+        for pv in &sorted_pvs {
+            hasher.update(pv.as_bytes());
         }
 
-        h
+        // Truncate SHA-256 to u64.
+        let result = hasher.finalize();
+        u64::from_le_bytes(result[..8].try_into().unwrap())
     }
 
     /// Generate a weak ETag from the structural fingerprint.

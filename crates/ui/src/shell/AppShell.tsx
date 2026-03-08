@@ -2,7 +2,16 @@ import { useCallback, useState, type CSSProperties } from "react";
 import { Icon } from "../components/Icon";
 import type { DesktopAgent } from "../types";
 
-export type ShellNavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "settings" | "logs" | "extensions" | "mcp";
+export type ShellNavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "files" | "settings" | "logs" | "extensions" | "mcp" | "local-models" | "documents";
+
+export type GatewayStatus = "connected" | "degraded" | "offline";
+
+export interface TopBarStatus {
+  gateway: GatewayStatus;
+  agentCount: number;
+  lastChecked?: string;
+  pendingApprovals?: number;
+}
 
 interface ShellNavItem {
   key: ShellNavKey;
@@ -41,6 +50,13 @@ export function AppShell({
   selectedAgentId,
   onSelectAgent,
   onOpenJourney,
+  status,
+  browserEnabled,
+  onToggleBrowser,
+  safeMode,
+  onToggleSafeMode,
+  notificationCount,
+  onOpenNotifications,
 }: {
   sidebarCollapsed: boolean;
   compactSidebar: boolean;
@@ -63,6 +79,14 @@ export function AppShell({
   selectedAgentId?: string | null;
   onSelectAgent?: (id: string | null) => void;
   onOpenJourney?: (agentId?: string) => void;
+  /** Top bar status & quick toggles */
+  status?: TopBarStatus;
+  browserEnabled?: boolean;
+  onToggleBrowser?: () => void;
+  safeMode?: boolean;
+  onToggleSafeMode?: () => void;
+  notificationCount?: number;
+  onOpenNotifications?: () => void;
 }) {
   const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
   const dragStyle: ExtendedCSSProperties | undefined = isMac
@@ -89,7 +113,16 @@ export function AppShell({
   );
 
   const [showAgentDropdown, setShowAgentDropdown] = useState(false);
+  const [showStatusPopover, setShowStatusPopover] = useState(false);
   const selectedAgent = agents?.find((a) => a.id === selectedAgentId);
+
+  // Status pulse animation class
+  const statusClass = status?.gateway === "connected" ? "status-ok"
+    : status?.gateway === "degraded" ? "status-warn"
+    : "status-error";
+  const statusLabel = status?.gateway === "connected" ? "Connected"
+    : status?.gateway === "degraded" ? "Degraded"
+    : "Offline";
 
   return (
     <div className={`app-shell ${isMac ? "mac-shell" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
@@ -166,32 +199,69 @@ export function AppShell({
           style={dragStyle}
           onMouseDown={handleTopBarMouseDown}
         >
-          <button className="command-bar" onClick={onOpenPalette} style={noDragStyle}>
-            <div className="command-primary">
-              <span className="command-icon-wrap">
-                <Icon name="search" />
-              </span>
-              <div className="command-copy">
-                <span>Search ClawDesk: requests, routines, proof, accounts</span>
-              </div>
+          {/* ── LEFT: Status + Brand ── */}
+          <div className="tb-left" style={noDragStyle}>
+            <div className="tb-status-wrap">
+              <button
+                className="tb-icon-btn"
+                onClick={() => setShowStatusPopover(!showStatusPopover)}
+                title={`Status: ${statusLabel}`}
+                aria-label="Status"
+              >
+                <span className={`tb-dot ${statusClass}`} />
+              </button>
+              {showStatusPopover && (
+                <>
+                  <div className="tb-popover-backdrop" onClick={() => setShowStatusPopover(false)} />
+                  <div className="tb-status-popover">
+                    <div className="tb-pop-row">
+                      <span className={`tb-dot ${statusClass}`} />
+                      <span className="tb-pop-label">Gateway</span>
+                      <span className="tb-pop-value">{statusLabel}</span>
+                    </div>
+                    {status && (
+                      <div className="tb-pop-row">
+                        <Icon name="users" />
+                        <span className="tb-pop-label">Agents</span>
+                        <span className="tb-pop-value">{status.agentCount}</span>
+                      </div>
+                    )}
+                    {status?.lastChecked && (
+                      <div className="tb-pop-row">
+                        <Icon name="clock" />
+                        <span className="tb-pop-label">Uptime</span>
+                        <span className="tb-pop-value">{status.lastChecked}</span>
+                      </div>
+                    )}
+                    {(status?.pendingApprovals ?? 0) > 0 && (
+                      <div className="tb-pop-row tb-pop-warn">
+                        <Icon name="alert" />
+                        <span className="tb-pop-label">Approvals</span>
+                        <span className="tb-pop-value">{status!.pendingApprovals} pending</span>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
-            <kbd>⌘K</kbd>
-          </button>
 
-          <div className="top-actions" style={noDragStyle}>
-            {/* Agent selector pill */}
-            {agents && agents.length > 0 && onSelectAgent && (
+            <button className="tb-icon-btn" title="ClawDesk" aria-label="ClawDesk">
+              <img src="/logo.svg" alt="" className="tb-logo" />
+            </button>
+          </div>
+
+          {/* ── CENTER: Agent Selector (prominent) ── */}
+          <div className="tb-center" style={noDragStyle}>
+            {agents && agents.length > 0 && onSelectAgent ? (
               <div className="top-agent-selector" data-no-drag>
                 <button
-                  className="top-agent-pill"
+                  className="tb-agent-picker"
                   onClick={() => setShowAgentDropdown(!showAgentDropdown)}
                   title={selectedAgent ? selectedAgent.name : "Select agent"}
                 >
-                  <span className="top-agent-icon">{selectedAgent?.icon || "⚡"}</span>
-                  <span className="top-agent-name">
-                    {selectedAgent?.name || "Select agent"}
-                  </span>
-                  <Icon name="chevron-down" />
+                  <span className="tb-agent-avatar">{selectedAgent?.icon || "⚡"}</span>
+                  <span className="tb-agent-name">{selectedAgent?.name || "Select Agent"}</span>
+                  <Icon name="chevron-down" className="tb-agent-chevron" />
                 </button>
                 {showAgentDropdown && (
                   <>
@@ -204,7 +274,6 @@ export function AppShell({
                       onClick={(e) => e.stopPropagation()}
                     >
                       {(() => {
-                        // Group agents: teams vs solo
                         const soloAgents = agents.filter((a) => !a.team_id);
                         const teamMap = new Map<string, typeof agents>();
                         for (const a of agents) {
@@ -217,7 +286,6 @@ export function AppShell({
 
                         return (
                           <>
-                            {/* Solo agents */}
                             {soloAgents.map((a) => (
                               <button
                                 key={a.id}
@@ -237,7 +305,6 @@ export function AppShell({
                               </button>
                             ))}
 
-                            {/* Teams */}
                             {[...teamMap.entries()].map(([teamId, teamAgents]) => {
                               const router = teamAgents.find((a) => a.team_role === "router") || teamAgents[0];
                               const isTeamSelected = teamAgents.some((a) => a.id === selectedAgentId);
@@ -282,7 +349,6 @@ export function AppShell({
                               );
                             })}
 
-                            {/* Create new */}
                             {onOpenJourney && (
                               <button
                                 className="top-agent-option top-agent-new"
@@ -302,13 +368,71 @@ export function AppShell({
                   </>
                 )}
               </div>
+            ) : (
+              <span className="tb-agent-placeholder">No agents</span>
             )}
-            <button className="icon-button" onClick={onToggleTerminal} aria-label="Terminal" title="Toggle Terminal (⌘J)">
-              <Icon name="terminal" />
+          </div>
+
+          {/* ── RIGHT: Toggles + Search + Actions ── */}
+          <div className="tb-right" style={noDragStyle}>
+            {/* Toggle group: Browser & Safe mode */}
+            <div className="tb-toggle-group">
+              <button
+                className={`tb-pill ${browserEnabled ? "tb-pill-on" : ""}`}
+                onClick={onToggleBrowser}
+                title={`Browser: ${browserEnabled ? "On" : "Off"}`}
+                aria-pressed={browserEnabled}
+              >
+                <Icon name="globe" />
+                <span className="tb-pill-text">Browser</span>
+                <span className={`tb-pill-dot ${browserEnabled ? "on" : ""}`} />
+              </button>
+
+              <button
+                className={`tb-pill ${safeMode ? "tb-pill-on" : ""}`}
+                onClick={onToggleSafeMode}
+                title={`Safe mode: ${safeMode ? "On" : "Off"}`}
+                aria-pressed={safeMode}
+              >
+                <Icon name={safeMode ? "safe-on" : "safe-off"} />
+                <span className="tb-pill-text">Safe</span>
+                <span className={`tb-pill-dot ${safeMode ? "on" : ""}`} />
+              </button>
+            </div>
+
+            <span className="tb-sep" />
+
+            <button className="tb-search-btn" onClick={onOpenPalette} title="Search (⌘K)" aria-label="Search">
+              <Icon name="search" />
+              <span className="tb-search-text">Search</span>
+              <kbd className="tb-kbd">{isMac ? "⌘" : "^"}K</kbd>
             </button>
-            <button className="icon-button" onClick={onOpenSettings} aria-label="Settings">
-              <Icon name="settings" />
-            </button>
+
+            <span className="tb-sep" />
+
+            <div className="tb-action-group">
+              <button
+                className="tb-action-btn"
+                onClick={onOpenNotifications}
+                aria-label="Notifications"
+                title="Notifications"
+              >
+                <span className="tb-action-icon-wrap">
+                  <Icon name="bell" />
+                  {(notificationCount ?? 0) > 0 && (
+                    <span className="tb-notif-badge">{notificationCount}</span>
+                  )}
+                </span>
+              </button>
+
+              <button className="tb-action-btn" onClick={onToggleTerminal} title="Terminal (⌘J)" aria-label="Terminal">
+                <Icon name="terminal" />
+              </button>
+
+              <button className="tb-action-btn" onClick={onOpenSettings} title="Settings" aria-label="Settings">
+                <Icon name="settings" />
+              </button>
+            </div>
           </div>
         </header>
 

@@ -109,6 +109,16 @@ impl ResponseFormatter {
         Self::split_to_segments(&processed, &constraints)
     }
 
+    /// Format a single streaming chunk for a specific channel.
+    ///
+    /// Per-chunk formatting for the unified streaming pipeline. Applies
+    /// channel-specific formatting without splitting (chunks are already
+    /// appropriately sized from the LLM). Sub-microsecond overhead.
+    pub fn format_chunk(chunk: &str, channel: &ChannelId) -> String {
+        let constraints = ChannelConstraints::for_channel(channel);
+        Self::process_formatting(chunk, &constraints)
+    }
+
     /// Process formatting based on channel capabilities.
     fn process_formatting(body: &str, constraints: &ChannelConstraints) -> String {
         let mut result = body.to_string();

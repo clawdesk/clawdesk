@@ -92,6 +92,27 @@ pub struct GatewayState {
     /// Central event bus for reactive triggers and pipeline dispatch.
     pub event_bus: Arc<clawdesk_bus::dispatch::EventBus>,
 
+    // --- Agent hot-reload registry ---
+    /// Hot-swappable agent definition registry.
+    /// Loaded from `~/.clawdesk/agents/<id>/agent.toml` files.
+    /// Updated atomically via `ArcSwap` on filesystem changes or SIGHUP.
+    pub agent_registry: ArcSwap<crate::agent_loader::AgentConfigMap>,
+
+    /// Agent definition loader (filesystem scanner).
+    pub agent_loader: Arc<crate::agent_loader::AgentLoader>,
+
+    // --- Per-agent token budget enforcement ---
+    /// Sliding-window token budget counters, keyed by agent ID.
+    pub token_budgets: Arc<clawdesk_agents::TokenBudgetManager>,
+
+    // --- Outbound webhook delivery queue (GAP-A+) ---
+    /// Persistent at-least-once webhook delivery queue backed by SochDB.
+    pub webhook_queue: Arc<crate::webhook_queue::WebhookDeliveryQueue>,
+
+    // --- Observability ---
+    /// Central metrics collector with counters, gauges, histograms, and SSE broadcast.
+    pub metrics: Arc<crate::observability::MetricsCollector>,
+
     // --- Cross-channel artifact pipeline (GAP-E) ---
     /// Content-addressed artifact store backed by MediaCache.
     pub artifact_pipeline: Arc<clawdesk_media::ArtifactPipeline>,
@@ -116,6 +137,10 @@ impl GatewayState {
         cancel: CancellationToken,
         inbound_registry: InboundAdapterRegistry,
     ) -> Self {
+        let store = Arc::new(store);
+        let webhook_queue = Arc::new(
+            crate::webhook_queue::WebhookDeliveryQueue::new(Arc::clone(&store))
+        );
         Self {
             channels: ArcSwap::from_pointee(channels),
             providers: ArcSwap::from_pointee(providers),
@@ -123,7 +148,7 @@ impl GatewayState {
             skill_loader: Arc::new(skill_loader),
             channel_factory: ArcSwap::from_pointee(channel_factory),
             tools: Arc::new(tools),
-            store: Arc::new(store),
+            store,
             plugin_host: Arc::new(plugin_host),
             cron_manager: Arc::new(cron_manager),
             cancel,
@@ -141,6 +166,19 @@ impl GatewayState {
             thread_agents: Arc::new(ThreadAgentRegistry::new("http://localhost:18789")),
             webhook_store: crate::webhook::WebhookStore::new(),
             event_bus: clawdesk_bus::dispatch::EventBus::new(128),
+            agent_registry: ArcSwap::from_pointee(std::collections::HashMap::new()),
+            agent_loader: {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".to_string());
+                let agents_dir = std::path::PathBuf::from(home)
+                    .join(".clawdesk")
+                    .join("agents");
+                Arc::new(crate::agent_loader::AgentLoader::new(agents_dir))
+            },
+            token_budgets: clawdesk_agents::TokenBudgetManager::unlimited(),
+            webhook_queue,
+            metrics: crate::observability::MetricsCollector::new(),
             artifact_pipeline: {
                 let home = std::env::var("HOME")
                     .or_else(|_| std::env::var("USERPROFILE"))
@@ -181,5 +219,46 @@ impl GatewayState {
         info!(loaded, errors = errors.len(), "skills hot-reloaded");
         self.skills.store(Arc::new(result.registry));
         (loaded, errors)
+    }
+
+    /// Hot-reload agent definitions from `~/.clawdesk/agents/`.
+    ///
+    /// 1. `AgentLoader` re-scans the agents directory.
+    /// 2. Builds a fresh `AgentConfigMap`.
+    /// 3. Compares config hashes to detect actual changes.
+    /// 4. Atomically swaps via `ArcSwap`.
+    ///
+    /// Returns `(loaded_count, changed_count, errors)`.
+    pub fn reload_agents(&self) -> (usize, usize, Vec<String>) {
+        let result = self.agent_loader.load_fresh();
+        let loaded = result.agents.len();
+        let errors: Vec<String> = result.errors.iter()
+            .map(|(id, e)| format!("{id}: {e}"))
+            .collect();
+
+        // Detect how many actually changed by comparing config hashes.
+        let current = self.agent_registry.load();
+        let mut changed = 0usize;
+        for (id, snap) in &result.agents {
+            match current.get(id) {
+                Some(old) if old.config_hash == snap.config_hash => {}
+                _ => changed += 1,
+            }
+        }
+        // Also count removed agents as changes.
+        for id in current.keys() {
+            if !result.agents.contains_key(id) {
+                changed += 1;
+            }
+        }
+
+        if changed > 0 {
+            info!(loaded, changed, errors = errors.len(), "agents hot-reloaded");
+        } else {
+            info!(loaded, "agents checked — no changes detected");
+        }
+
+        self.agent_registry.store(Arc::new(result.agents));
+        (loaded, changed, errors)
     }
 }

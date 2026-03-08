@@ -23,14 +23,24 @@
 //! for retry with exponential backoff (base 2s, max 60s, 5 attempts).
 //! After all retries are exhausted, the failure is logged and the
 //! `DeliveryCallback` is notified.
+//!
+//! ## Scheduler design (v2)
+//!
+//! All announcements — new and retried — flow through a single timed
+//! min-heap keyed by `(ready_at, sequence_no)`. This eliminates the
+//! previous split between mpsc channel and mutex-guarded VecDeque:
+//!
+//! - Retries are **never** delivered before their scheduled time.
+//! - `pending()` and `summary()` are **always authoritative**.
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::BinaryHeap;
+use std::cmp::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 /// Default subscription TTL — 1 hour.
@@ -164,51 +174,22 @@ impl RetryPolicy {
 
 /// Routes announcements to their delivery targets.
 ///
-/// The router holds a delivery queue and processes announcements in order.
-/// Actual delivery is callback-based (via `DeliveryHandler`) so the router
-/// is transport-agnostic.
+/// All announcements flow through a single timed min-heap. New items
+/// are scheduled with `ready_at = now`. Retried items get `ready_at =
+/// now + backoff`. `next_delivery()` only returns elapsed items.
 ///
-/// # Thread Safety
-///
-/// `AnnounceRouter` is internally concurrent — all methods take `&self`.
-/// Subscriptions use `DashMap` for lock-free concurrent access.
-/// The delivery queue uses `tokio::sync::mpsc` channels, eliminating the
-/// need for external `Mutex` wrapping.
-///
-/// **Usage:**
-/// ```rust,ignore
-/// let router = Arc::new(AnnounceRouter::with_defaults());
-/// // No Mutex needed — methods are &self
-/// router.subscribe("task-1", target);
-/// router.announce("task-1", "agent-a", payload);
-/// ```
-///
-/// **Lock ordering** (if held alongside other locks):
-/// 1. `TaskStore` lock
-/// 2. `AnnounceRouter` receiver lock  (always acquire *after* TaskStore)
-///
-/// The `subscribe/announce/retry` methods never block.
+/// **Lock ordering**: TaskStore lock → AnnounceRouter queue lock.
 pub struct AnnounceRouter {
-    /// Send side for enqueuing announcements. Cloneable for fan-in.
-    tx: mpsc::Sender<Announcement>,
-    /// Retry send side — dedicated channel for retries to guarantee delivery
-    /// order (retries are prioritized over new announcements).
-    retry_tx: mpsc::Sender<Announcement>,
-    /// Receive side for pulling announcements for delivery.
-    /// Uses a single-owner `tokio::sync::Mutex` since the expected usage
-    /// pattern is a dedicated consumer task that calls `next_delivery()`.
-    rx: tokio::sync::Mutex<ConsumerState>,
-    /// Retry policy.
+    /// Unified timed priority queue.
+    queue: Mutex<BinaryHeap<TimedEntry>>,
+    /// Monotonic sequence counter for FIFO tie-breaking.
+    next_sequence: AtomicU64,
     retry_policy: RetryPolicy,
-    /// Successfully delivered count (atomic — no lock needed).
     delivered_count: AtomicU64,
-    /// Failed delivery count (atomic — no lock needed).
     failed_count: AtomicU64,
-    /// Active subscriptions: task_id → list of targets with TTL.
-    /// `DashMap` gives concurrent read/write without a global lock.
     subscriptions: DashMap<String, Vec<TimedSubscription>>,
-    /// TTL for subscriptions — stale entries are lazily purged.
     subscription_ttl: Duration,
+    max_capacity: usize,
 }
 
 /// A subscription with a creation timestamp for TTL-based expiry.
@@ -218,32 +199,31 @@ struct TimedSubscription {
     subscribed_at: Instant,
 }
 
-/// Internal consumer state: primary receiver + priority retry queue.
-///
-/// The retry queue uses a `VecDeque` ordered by next-retry-time, ensuring
-/// retries are always dispatched before new announcements — preventing
-/// starvation of retried items under load.
-struct ConsumerState {
-    rx: mpsc::Receiver<Announcement>,
-    retry_rx: mpsc::Receiver<Announcement>,
-    retry_queue: VecDeque<(Announcement, Instant)>,
+/// Scheduled announcement entry for the min-heap.
+struct TimedEntry {
+    announcement: Announcement,
+    ready_at: Instant,
+    sequence: u64,
 }
 
-impl ConsumerState {
-    /// Pop the next announcement, prioritizing retries whose delay has elapsed.
-    fn next(&mut self) -> Option<Announcement> {
-        // Priority 1: retries whose backoff has elapsed
-        if let Some((ann, ready_at)) = self.retry_queue.front() {
-            if Instant::now() >= *ready_at {
-                return self.retry_queue.pop_front().map(|(a, _)| a);
-            }
-        }
-        // Priority 2: retries arriving on the retry channel
-        if let Ok(ann) = self.retry_rx.try_recv() {
-            return Some(ann);
-        }
-        // Priority 3: new announcements
-        self.rx.try_recv().ok()
+impl PartialEq for TimedEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.ready_at == other.ready_at && self.sequence == other.sequence
+    }
+}
+impl Eq for TimedEntry {}
+
+impl PartialOrd for TimedEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TimedEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap is max-heap; invert for min-heap semantics.
+        other.ready_at.cmp(&self.ready_at)
+            .then_with(|| other.sequence.cmp(&self.sequence))
     }
 }
 
@@ -253,21 +233,15 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 4096;
 impl AnnounceRouter {
     /// Create a new announce router.
     pub fn new(retry_policy: RetryPolicy) -> Self {
-        let (tx, rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (retry_tx, retry_rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY / 4);
         Self {
-            tx,
-            retry_tx,
-            rx: tokio::sync::Mutex::new(ConsumerState {
-                rx,
-                retry_rx,
-                retry_queue: VecDeque::new(),
-            }),
+            queue: Mutex::new(BinaryHeap::with_capacity(1024)),
+            next_sequence: AtomicU64::new(0),
             retry_policy,
             delivered_count: AtomicU64::new(0),
             failed_count: AtomicU64::new(0),
             subscriptions: DashMap::new(),
             subscription_ttl: DEFAULT_SUBSCRIPTION_TTL,
+            max_capacity: DEFAULT_CHANNEL_CAPACITY,
         }
     }
 
@@ -280,6 +254,10 @@ impl AnnounceRouter {
     pub fn with_subscription_ttl(mut self, ttl: Duration) -> Self {
         self.subscription_ttl = ttl;
         self
+    }
+
+    fn next_seq(&self) -> u64 {
+        self.next_sequence.fetch_add(1, AtomicOrdering::Relaxed)
     }
 
     /// Garbage-collect all expired subscriptions across all tasks.
@@ -325,17 +303,14 @@ impl AnnounceRouter {
     }
 
     /// Announce a payload for a task. Creates an `Announcement` for each
-    /// subscribed target and enqueues them for delivery.
-    ///
-    /// Lazily purges expired subscriptions (TTL-based).
+    /// subscribed target and enqueues them for immediate delivery.
     pub fn announce(&self, task_id: &str, source_agent: &str, payload: AnnouncePayload) -> usize {
-        let now = Instant::now();
+        let now_instant = Instant::now();
         let ttl = self.subscription_ttl;
 
-        // Lazily purge expired subscriptions for this task.
         let targets: Vec<DeliveryTarget> = match self.subscriptions.get_mut(task_id) {
             Some(mut subs) => {
-                subs.retain(|s| now.duration_since(s.subscribed_at) < ttl);
+                subs.retain(|s| now_instant.duration_since(s.subscribed_at) < ttl);
                 subs.iter().map(|s| s.target.clone()).collect()
             }
             None => {
@@ -345,44 +320,55 @@ impl AnnounceRouter {
         };
 
         let mut count = 0;
-        for target in targets {
-            let announcement = Announcement {
-                id: format!("ann_{}_{}", task_id, count),
-                task_id: task_id.to_string(),
-                source_agent: source_agent.to_string(),
-                target,
-                payload: payload.clone(),
-                created_at: Utc::now(),
-                attempts: 0,
-                max_attempts: self.retry_policy.max_attempts,
-            };
-            // try_send: non-blocking. If channel is full, drop the announcement
-            // and log a warning. In practice, 4096 capacity means this is rare.
-            if self.tx.try_send(announcement).is_err() {
-                warn!(task_id = task_id, "delivery queue full, dropping announcement");
-            } else {
-                count += 1;
+        // Spin-try the lock — consumer holds it only for O(log n) pop.
+        for _ in 0..200 {
+            if let Ok(mut queue) = self.queue.try_lock() {
+                for (i, target) in targets.into_iter().enumerate() {
+                    if queue.len() >= self.max_capacity {
+                        warn!(task_id = task_id, "delivery queue at capacity, rejecting");
+                        break;
+                    }
+                    let announcement = Announcement {
+                        id: format!("ann_{}_{}", task_id, i),
+                        task_id: task_id.to_string(),
+                        source_agent: source_agent.to_string(),
+                        target,
+                        payload: payload.clone(),
+                        created_at: Utc::now(),
+                        attempts: 0,
+                        max_attempts: self.retry_policy.max_attempts,
+                    };
+                    queue.push(TimedEntry {
+                        announcement,
+                        ready_at: now_instant,
+                        sequence: self.next_seq(),
+                    });
+                    count += 1;
+                }
+                info!(task_id = task_id, targets = count, "announcements queued");
+                return count;
             }
+            std::hint::spin_loop();
         }
-
+        warn!(task_id = task_id, "failed to acquire queue lock for announce");
         info!(task_id = task_id, targets = count, "announcements queued");
         count
     }
 
-    /// Pop the next announcement for delivery. Returns `None` if the queue is empty.
-    ///
-    /// Priority order: elapsed retries > retry channel > new announcements.
-    /// This ensures retried items are never starved by new announcements.
+    /// Pop next announcement whose `ready_at` has elapsed.
     pub async fn next_delivery(&self) -> Option<Announcement> {
-        let mut state = self.rx.lock().await;
-        state.next()
+        let mut queue = self.queue.lock().await;
+        if let Some(entry) = queue.peek() {
+            if Instant::now() >= entry.ready_at {
+                return queue.pop().map(|e| e.announcement);
+            }
+        }
+        None
     }
 
-    /// Re-enqueue an announcement for retry after a failed delivery.
-    /// Returns `false` if max attempts exhausted.
-    ///
-    /// Uses the dedicated retry channel to guarantee delivery — retries
-    /// are never silently dropped due to backpressure on the primary channel.
+    /// Re-enqueue with exponential backoff. Returns `false` if max attempts
+    /// exhausted. The announcement will NOT be returned by `next_delivery()`
+    /// until its backoff delay has elapsed — this guarantee is unconditional.
     pub fn retry(&self, mut announcement: Announcement) -> bool {
         announcement.attempts += 1;
         if announcement.attempts >= announcement.max_attempts {
@@ -392,66 +378,77 @@ impl AnnounceRouter {
                 attempts = announcement.attempts,
                 "delivery permanently failed after max retries"
             );
-            self.failed_count.fetch_add(1, Ordering::Relaxed);
+            self.failed_count.fetch_add(1, AtomicOrdering::Relaxed);
             return false;
         }
+
+        let delay = self.retry_policy.delay_for_attempt(announcement.attempts.saturating_sub(1));
+        let ready_at = Instant::now() + delay;
 
         debug!(
             id = announcement.id,
             attempt = announcement.attempts,
-            "re-enqueuing for retry via dedicated retry channel"
+            delay_ms = delay.as_millis() as u64,
+            "scheduling retry with backoff"
         );
-        // Use the retry channel — bounded at 1/4 of main capacity.
-        // If even this overflows, fall back to try_send on main channel.
-        if self.retry_tx.try_send(announcement.clone()).is_err() {
-            warn!(id = announcement.id, "retry channel full, falling back to main channel");
-            let _ = self.tx.try_send(announcement);
+
+        // Spin-try the lock — consumer holds it only for O(log n) pop.
+        for _ in 0..200 {
+            if let Ok(mut queue) = self.queue.try_lock() {
+                queue.push(TimedEntry {
+                    announcement,
+                    ready_at,
+                    sequence: self.next_seq(),
+                });
+                return true;
+            }
+            std::hint::spin_loop();
         }
-        true
+        warn!("retry: queue lock contention exceeded spin limit");
+        self.failed_count.fetch_add(1, AtomicOrdering::Relaxed);
+        false
     }
 
     /// Record a successful delivery.
     pub fn record_delivered(&self) {
-        self.delivered_count.fetch_add(1, Ordering::Relaxed);
+        self.delivered_count.fetch_add(1, AtomicOrdering::Relaxed);
     }
 
-    /// Number of pending deliveries.
-    ///
-    /// Note: This is an approximation when accessed concurrently — the
-    /// channel length can change between the call and when you act on it.
+    /// Number of pending deliveries — authoritative, single queue.
     pub fn pending(&self) -> usize {
-        // mpsc::Sender::max_capacity() - mpsc::Sender::capacity() = items in channel
-        DEFAULT_CHANNEL_CAPACITY - self.tx.capacity()
+        self.queue.try_lock().map(|q| q.len()).unwrap_or(0)
     }
 
     /// Whether there are pending deliveries.
     pub fn has_pending(&self) -> bool {
-        self.pending() > 0
+        self.queue.try_lock().map(|q| !q.is_empty()).unwrap_or(false)
     }
 
     /// Drain all pending announcements (for shutdown / batch processing).
     pub async fn drain_pending(&self) -> Vec<Announcement> {
-        let mut state = self.rx.lock().await;
-        let mut drained = Vec::new();
-        // Drain retry queue first
-        while let Some((ann, _)) = state.retry_queue.pop_front() {
-            drained.push(ann);
-        }
-        while let Ok(ann) = state.retry_rx.try_recv() {
-            drained.push(ann);
-        }
-        while let Ok(ann) = state.rx.try_recv() {
-            drained.push(ann);
+        let mut queue = self.queue.lock().await;
+        let mut drained = Vec::with_capacity(queue.len());
+        while let Some(entry) = queue.pop() {
+            drained.push(entry.announcement);
         }
         drained
     }
 
-    /// Summary for monitoring.
+    /// Summary for monitoring — all counts are authoritative.
     pub fn summary(&self) -> AnnounceSummary {
+        let (total, ready, waiting) = self.queue.try_lock().map(|q| {
+            let now = Instant::now();
+            let total = q.len();
+            let ready = q.iter().filter(|e| now >= e.ready_at).count();
+            (total, ready, total - ready)
+        }).unwrap_or((0, 0, 0));
+
         AnnounceSummary {
-            pending: self.pending(),
-            delivered: self.delivered_count.load(Ordering::Relaxed),
-            failed: self.failed_count.load(Ordering::Relaxed),
+            pending: total,
+            primary_pending: ready,
+            retry_pending: waiting,
+            delivered: self.delivered_count.load(AtomicOrdering::Relaxed),
+            failed: self.failed_count.load(AtomicOrdering::Relaxed),
             subscriptions: self.subscriptions.len(),
         }
     }
@@ -466,7 +463,12 @@ impl Default for AnnounceRouter {
 /// Monitoring summary.
 #[derive(Debug, Clone, Serialize)]
 pub struct AnnounceSummary {
+    /// Total pending: primary channel + retry queue.
     pub pending: usize,
+    /// Items in the primary delivery channel.
+    pub primary_pending: usize,
+    /// Items in the timed retry queue (awaiting backoff expiry).
+    pub retry_pending: usize,
     pub delivered: u64,
     pub failed: u64,
     pub subscriptions: usize,
@@ -528,7 +530,9 @@ mod tests {
     async fn delivery_retry_exhaustion() {
         let policy = RetryPolicy {
             max_attempts: 3,
-            ..Default::default()
+            // Use zero-delay backoff for test determinism.
+            base_delay: Duration::from_millis(0),
+            max_delay: Duration::from_millis(0),
         };
         let router = AnnounceRouter::new(policy);
 
@@ -548,19 +552,22 @@ mod tests {
         let ann = router.next_delivery().await.unwrap();
         assert_eq!(ann.attempts, 0);
 
-        // Retry 1
+        // Retry 1 — scheduled with backoff (0ms for test)
         assert!(router.retry(ann.clone()));
+        // Allow the backoff to "elapse" (0ms)
+        tokio::time::sleep(Duration::from_millis(1)).await;
         let ann = router.next_delivery().await.unwrap();
         assert_eq!(ann.attempts, 1);
 
         // Retry 2
         assert!(router.retry(ann.clone()));
+        tokio::time::sleep(Duration::from_millis(1)).await;
         let ann = router.next_delivery().await.unwrap();
         assert_eq!(ann.attempts, 2);
 
         // Retry 3 — should fail (max_attempts = 3)
         assert!(!router.retry(ann));
-        assert_eq!(router.failed_count.load(Ordering::Relaxed), 1);
+        assert_eq!(router.failed_count.load(AtomicOrdering::Relaxed), 1);
     }
 
     #[test]
@@ -660,6 +667,60 @@ mod tests {
         // Drain all
         let drained = router.drain_pending().await;
         assert_eq!(drained.len(), 10);
+        assert_eq!(router.pending(), 0);
+    }
+
+    #[tokio::test]
+    async fn retry_backoff_delays_delivery() {
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            base_delay: Duration::from_millis(200),
+            max_delay: Duration::from_secs(60),
+        };
+        let router = AnnounceRouter::new(policy);
+        router.subscribe("t", DeliveryTarget::Channel { channel_id: "c".into(), thread_id: None });
+        router.announce("t", "a", AnnouncePayload::Progress { percent: 0.5, message: None });
+
+        let ann = router.next_delivery().await.unwrap();
+
+        // Retry with backoff (attempt 0 → 200ms delay)
+        assert!(router.retry(ann));
+
+        // Immediately polling should NOT yield the retry (backoff not elapsed).
+        assert!(router.next_delivery().await.is_none());
+
+        // Wait for backoff to elapse.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Now it should be available.
+        let retried = router.next_delivery().await.unwrap();
+        assert_eq!(retried.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn pending_includes_retry_queue() {
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            base_delay: Duration::from_secs(300), // Long delay — won't elapse in test.
+            max_delay: Duration::from_secs(600),
+        };
+        let router = AnnounceRouter::new(policy);
+        router.subscribe("t", DeliveryTarget::Channel { channel_id: "c".into(), thread_id: None });
+        router.announce("t", "a", AnnouncePayload::Progress { percent: 1.0, message: None });
+
+        let ann = router.next_delivery().await.unwrap();
+        assert_eq!(router.pending(), 0);
+
+        // Retry schedules into the retry queue with long backoff.
+        assert!(router.retry(ann));
+
+        // pending() should now report 1 (the retry-queue item).
+        assert_eq!(router.pending(), 1);
+        assert!(router.has_pending());
+
+        // drain_pending should include the retry-queue item.
+        let drained = router.drain_pending().await;
+        assert_eq!(drained.len(), 1);
         assert_eq!(router.pending(), 0);
     }
 }

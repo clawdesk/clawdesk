@@ -1,0 +1,34 @@
+[package]
+name = "clawdesk-rag"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Document ingestion, chunking, and RAG for ClawDesk"
+
+[dependencies]
+# Internal
+clawdesk-types = { workspace = true }
+clawdesk-sochdb = { workspace = true }
+
+# Async
+tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# PDF extraction
+pdf-extract = "0.7"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }

@@ -147,7 +147,7 @@ impl Default for ToolPolicy {
             require_approval: HashSet::new(),
             granted_capabilities: HashSet::new(),
             max_concurrent: 8,
-            tool_timeout_secs: 30,
+            tool_timeout_secs: 120,
         }
     }
 }

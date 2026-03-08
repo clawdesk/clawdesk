@@ -28,18 +28,29 @@ pub mod commands_voice;
 pub mod commands_sandbox;
 pub mod commands_mcp;
 pub mod commands_extensions;
+pub mod commands_orchestration;
+pub mod pty_session;
 pub mod commands_migrate;
 pub mod commands_tunnel;
 pub mod commands_browser;
+pub mod commands_files;
+pub mod commands_canvas_a2ui;
 pub mod commands_skills_admin;
+pub mod commands_local_models;
+pub mod commands_rag;
+pub mod commands_preview;
 pub mod deep_link;
 pub mod engine;
+pub mod enriched_backend;
 pub mod error;
 pub mod message_pipeline;
 pub mod i18n;
 pub mod persistence;
+pub mod pipeline_bridge;
+pub mod session_cache;
 pub mod state;
 pub mod state_aggregates;
+pub mod streaming_response;
 pub mod tray;
 pub mod updater;
 
@@ -67,6 +78,9 @@ pub fn run() {
             tracing::info!(?args, %cwd, "Second instance blocked — focused existing window");
         }))
         .manage(AppState::new())
+        .manage(commands_canvas_a2ui::CanvasA2uiState::new())
+        .manage(commands_preview::PreviewRegistry::new())
+        .manage(pty_session::PtySessionManager::new())
         .invoke_handler(tauri::generate_handler![
             // ── Core commands ──────────────────────────────────────
             commands::get_health,
@@ -155,6 +169,7 @@ pub fn run() {
             commands_security::approve_request,
             commands_security::deny_request,
             commands_security::get_approval_status,
+            commands_security::respond_to_ask_human,
             // ── Discovery + pairing ───────────────────────
             commands_discovery::get_mdns_service_info,
             commands_discovery::start_pairing,
@@ -284,6 +299,11 @@ pub fn run() {
             commands_debug::debug_rehydrate,
             // ── Terminal ───────────────────────────────────────────
             commands_terminal::run_shell_command,
+            commands_terminal::pty_create_session,
+            commands_terminal::pty_write_input,
+            commands_terminal::pty_resize,
+            commands_terminal::pty_kill_session,
+            commands_terminal::pty_list_sessions,
             // ── Threads: namespaced chat-thread persistence ────────
             commands_threads::thread_create,
             commands_threads::thread_get,
@@ -389,7 +409,54 @@ pub fn run() {
             commands_skills_admin::admin_reload_skills,
             commands_skills_admin::admin_activate_skill,
             commands_skills_admin::admin_deactivate_skill,
-            commands_skills_admin::admin_get_skills_dir,        ])
+            commands_skills_admin::admin_get_skills_dir,
+            // ── Canvas A2UI: Agent-controlled WebView + A2UI protocol ──
+            commands_canvas_a2ui::canvas_a2ui_present,
+            commands_canvas_a2ui::canvas_a2ui_hide,
+            commands_canvas_a2ui::canvas_a2ui_navigate,
+            commands_canvas_a2ui::canvas_a2ui_eval,
+            commands_canvas_a2ui::canvas_a2ui_snapshot,
+            commands_canvas_a2ui::canvas_a2ui_push,
+            commands_canvas_a2ui::canvas_a2ui_reset,
+            commands_canvas_a2ui::canvas_a2ui_status,
+            // ── Device: Info, status, location, capabilities ──────────
+            commands_canvas_a2ui::device_get_info,
+            commands_canvas_a2ui::device_get_status,
+            commands_canvas_a2ui::device_get_location,
+            commands_canvas_a2ui::device_capabilities,
+            // ── Orchestration: task DAG, dispatch, capabilities ─────
+            commands_orchestration::list_capabilities,
+            commands_orchestration::get_orchestration_status,
+            // ── Files: workspace file browser ─────────────────────────
+            commands_files::get_workspace_root,
+            commands_files::list_workspace_files,
+            commands_files::read_workspace_file,
+            // ── Local Models: manage local LLMs ───────────────────────
+            commands_local_models::local_models_status,
+            commands_local_models::local_models_system_info,
+            commands_local_models::local_models_recommend,
+            commands_local_models::local_models_start,
+            commands_local_models::local_models_stop,
+            commands_local_models::local_models_running,
+            commands_local_models::local_models_download,
+            commands_local_models::local_models_delete,
+            commands_local_models::local_models_set_server_path,
+            commands_local_models::local_models_scan_directory,
+            commands_local_models::local_models_import,
+            commands_local_models::local_models_set_ttl,
+            // ── RAG: document ingestion & retrieval ───────────────────
+            commands_rag::rag_ingest_document,
+            commands_rag::rag_list_documents,
+            commands_rag::rag_delete_document,
+            commands_rag::rag_search,
+            commands_rag::rag_get_chunks,
+            commands_rag::rag_build_context,
+            // ── Preview: live web app preview ─────────────────────────
+            commands_preview::preview_register,
+            commands_preview::preview_list,
+            commands_preview::preview_remove,
+            commands_preview::preview_check_port,
+        ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
@@ -413,6 +480,16 @@ pub fn run() {
             let warnings = state.verify_health();
             if !warnings.is_empty() {
                 warn!("Startup health check: {} warning(s)", warnings.len());
+            }
+
+            // Start the TTL reaper for local models (needs Tokio runtime)
+            {
+                let lm_guard = state.local_model_manager.read().unwrap();
+                if let Some(ref mgr) = *lm_guard {
+                    clawdesk_local_models::LocalModelManager::start_ttl_reaper(
+                        std::sync::Arc::clone(&mgr.server),
+                    );
+                }
             }
 
             // ── Embedded gateway server ──────────────────────────────
@@ -444,21 +521,16 @@ pub fn run() {
                 };
 
                 let gw_plugin_host = clawdesk_plugin::PluginHost::new(
-                    std::sync::Arc::new(state::NoopPluginFactory),
+                    std::sync::Arc::new(clawdesk_plugin::NoopPluginFactory),
                     128,
                 );
                 let gw_cron = clawdesk_cron::CronManager::new(
-                    std::sync::Arc::new(state::NoopAgentExecutor),
+                    std::sync::Arc::new(clawdesk_cron::executor::NoopAgentExecutor),
                     std::sync::Arc::new(state::NoOpDelivery),
                 );
 
                 // Skills
-                let skills_dir = std::env::var("HOME")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join(".clawdesk")
-                    .join("data")
-                    .join("skills");
+                let skills_dir = clawdesk_types::dirs::skills();
                 let _ = std::fs::create_dir_all(&skills_dir);
                 let gw_skill_loader = clawdesk_skills::loader::SkillLoader::new(skills_dir);
                 let gw_skills = clawdesk_skills::registry::SkillRegistry::new();
@@ -588,6 +660,72 @@ pub fn run() {
                     Ok(_tracer) => info!("OpenTelemetry tracer initialized"),
                     Err(e) => warn!("Failed to initialize OTEL tracer: {}", e),
                 }
+            }
+
+            // Periodic SochDB + ThreadStore checkpoint every 30 seconds.
+            // Reduced from 60s to 30s for better crash safety.
+            // Protects against data loss from crashes or force-quit by ensuring
+            // WAL entries are checkpointed regularly, not just on message send.
+
+            // ── Spawn orchestration event bridge ─────────────────────
+            // Forwards OrchestrationEvents to the Tauri frontend and the
+            // reactive event bus so skills/pipelines can react.
+            commands_orchestration::spawn_orchestration_bridge(
+                app.handle().clone(),
+                &state,
+            );
+
+            // ── Initialize event bus standard topics ──────────────────
+            // Pre-create standard topics including orchestrator topics
+            // so they're ready for publish without lazy creation on hot path.
+            {
+                let bus = state.event_bus.clone();
+                let cancel = state.cancel.clone();
+                std::thread::Builder::new()
+                    .name("bus-init".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("bus init runtime");
+                        rt.block_on(async move {
+                            let topics = [
+                                "channel.inbound.telegram",
+                                "channel.inbound.discord",
+                                "channel.inbound.slack",
+                                "channel.inbound.webchat",
+                                "channel.inbound.internal",
+                                "agent.message.sent",
+                                "cron.task.executed",
+                                "pipeline.completed",
+                                "memory.stored",
+                                "skill.lifecycle",
+                                "system.startup",
+                                "system.shutdown",
+                                "orchestrator.task.completed",
+                                "orchestrator.task.failed",
+                                "orchestrator.dag.created",
+                                "orchestrator.finished",
+                                "orchestrator.escalated",
+                                "orchestrator.event",
+                            ];
+                            for topic in &topics {
+                                bus.topic(topic).await;
+                            }
+                            info!(topics = topics.len(), "Event bus standard topics initialized");
+
+                            // Emit startup event so bus subscribers can react
+                            bus_integration::emit_startup(&bus).await;
+
+                            // Spawn inbound bridge for channel adapter → bus event conversion
+                            let _inbound_tx = bus_integration::spawn_inbound_bridge(
+                                bus.clone(),
+                                cancel,
+                            );
+                            info!("Event bus fully initialized with inbound bridge");
+                        });
+                    })
+                    .ok();
             }
 
             // Periodic SochDB + ThreadStore checkpoint every 30 seconds.

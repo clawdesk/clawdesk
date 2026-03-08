@@ -254,6 +254,8 @@ mod tests {
                 source: "clawdesk".to_string(),
                 template_id: None,
                 channels: vec![],
+                team_id: None,
+                team_role: None,
             },
         );
 

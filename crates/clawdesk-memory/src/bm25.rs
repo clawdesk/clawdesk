@@ -32,6 +32,8 @@ pub struct Bm25Index {
     avg_dl: f64,
     /// Total number of documents.
     doc_count: usize,
+    /// Running sum of all document lengths — avoids O(N) recomputation.
+    total_length: u64,
 }
 
 /// Indexed document.
@@ -63,6 +65,7 @@ impl Bm25Index {
             inverted: HashMap::new(),
             avg_dl: 0.0,
             doc_count: 0,
+            total_length: 0,
         }
     }
 
@@ -93,7 +96,9 @@ impl Bm25Index {
         });
 
         self.doc_count = self.docs.len();
-        self.avg_dl = self.docs.iter().map(|d| d.length as f64).sum::<f64>() / self.doc_count as f64;
+        // O(1) incremental avg_dl update instead of O(N) full sum.
+        self.total_length += length as u64;
+        self.avg_dl = self.total_length as f64 / self.doc_count as f64;
     }
 
     /// Search for documents matching the query.
@@ -162,6 +167,7 @@ impl Bm25Index {
         self.inverted.clear();
         self.avg_dl = 0.0;
         self.doc_count = 0;
+        self.total_length = 0;
     }
 }
 

@@ -6,6 +6,7 @@
 //! Uses a concurrent `HashMap` for O(1) lookup by `SubAgentId`.
 
 use serde::{Deserialize, Serialize};
+use clawdesk_types::truncate_to_char_boundary;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -232,7 +233,8 @@ impl SubAgentManager {
         let entry = entries.get_mut(&id.0).ok_or("Sub-agent not found")?;
         // Truncate preview to 500 chars.
         let preview = if output.len() > 500 {
-            format!("{}…", &output[..500])
+            let end = truncate_to_char_boundary(output, 500);
+            format!("{}…", &output[..end])
         } else {
             output.to_string()
         };

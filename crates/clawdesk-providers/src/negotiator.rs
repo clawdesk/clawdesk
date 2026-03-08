@@ -373,7 +373,7 @@ mod tests {
             self.models.clone()
         }
         async fn complete(&self, _req: &ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-            unimplemented!()
+            Err(ProviderError::format_error(self.name, "mock provider does not support completion"))
         }
         async fn health_check(&self) -> Result<(), ProviderError> {
             Ok(())

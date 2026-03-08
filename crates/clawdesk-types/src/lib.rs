@@ -19,6 +19,7 @@
 pub mod artifact;
 pub mod autoreply;
 pub mod channel;
+pub mod dirs;
 pub mod config;
 pub mod cron;
 pub mod error;
@@ -43,6 +44,7 @@ pub use config::{ClawDeskConfig, ValidatedConfig};
 pub use error::{ClawDeskError, ProviderError, ProviderErrorKind};
 pub use ring::DropOldest;
 pub use tokenizer::estimate_tokens;
+pub use tokenizer::truncate_to_char_boundary;
 pub use token_usage::TokenUsage;
 pub use isolation::IsolationLevel;
 pub use message::{

@@ -189,14 +189,18 @@ impl DigestWindow {
     /// Compact entries if threshold exceeded.
     ///
     /// Retains only the top-K entries by importance score.
-    /// O(n log K) via partial sort, O(K) space after compaction.
+    /// Uses `select_nth_unstable_by` for O(n) partial sort instead of
+    /// O(n log n) full sort — we only need the top-K, not sorted order.
     pub fn compact(&mut self, top_k: usize) {
         if self.entries.len() <= top_k {
             return;
         }
-        // Sort by importance descending, keep top-K
+        // O(n) partial sort: partition so that entries[..top_k] are the
+        // top-K by importance, though not necessarily in sorted order.
         self.entries
-            .sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+            .select_nth_unstable_by(top_k, |a, b| {
+                b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal)
+            });
         self.entries.truncate(top_k);
         self.compacted = true;
     }

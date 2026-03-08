@@ -625,23 +625,31 @@ impl MemoryBackend for SochMemoryBackend {
         // We generate a lightweight query embedding by scanning for the most
         // similar episodes using stored summary embeddings. If the collection
         // is empty or embeddings are unavailable, fall back to text matching.
+        // SAFETY: We run the async search on a separate blocking thread to
+        // avoid deadlocking the current Tokio runtime. `handle.block_on()`
+        // inside an async context panics on multi-threaded runtimes; using
+        // `tokio::task::block_in_place` avoids this by moving the blocking
+        // call to a worker thread that won't starve the executor.
+        let store_clone = self.store.clone();
+        let query_owned = query.to_string();
+        let k_over = k * 2;
         let vector_results = {
-            // Check if we have any episode embeddings to search against
             let rt = tokio::runtime::Handle::try_current();
             if let Ok(handle) = rt {
-                handle.block_on(async {
-                    use clawdesk_storage::vector_store::VectorStore;
-                    // Try hybrid search with text query for BM25 + vector scoring
-                    // Use a dummy zero-vector since we don't have an embedding model here;
-                    // the BM25 component of hybrid_search will still provide keyword matching.
-                    let dummy_query = vec![0.0f32; 1]; // Will be ignored if no vectors match
-                    self.store.hybrid_search(
-                        "episode_embeddings",
-                        &dummy_query,
-                        query,
-                        k * 2, // Over-fetch for merging with text results
-                        0.0, // Full text weight since we have no real embedding
-                    ).await.ok()
+                // block_in_place is safe here: it yields the current runtime
+                // thread to a blocking context, preventing deadlock.
+                tokio::task::block_in_place(|| {
+                    handle.block_on(async {
+                        use clawdesk_storage::vector_store::VectorStore;
+                        let dummy_query = vec![0.0f32; 1];
+                        store_clone.hybrid_search(
+                            "episode_embeddings",
+                            &dummy_query,
+                            &query_owned,
+                            k_over,
+                            0.0,
+                        ).await.ok()
+                    })
                 })
             } else {
                 None

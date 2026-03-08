@@ -12,6 +12,7 @@
 //! - **Social module**: Platform-specific metric collectors with EWMA trend detection
 
 pub mod circuit_breaker;
+pub mod integration;
 pub mod oauth;
 pub mod rate_limit;
 pub mod service;

@@ -466,6 +466,17 @@ impl OpenAiCompatibleProvider {
             });
         }
 
+        // Strip trailing assistant message (prefill) — some servers with
+        // `enable_thinking` enabled reject requests that end with an
+        // assistant message.  This is safe: a trailing assistant message
+        // without tool_calls is always an optional prefill hint that we can
+        // drop without changing semantics.
+        if let Some(last) = msgs.last() {
+            if last.role == "assistant" && last.tool_calls.is_none() {
+                msgs.pop();
+            }
+        }
+
         msgs
     }
 
@@ -515,6 +526,15 @@ impl OpenAiCompatibleProvider {
         }
         if lower.contains("context") && (lower.contains("length") || lower.contains("window")) {
             return ProviderError::context_length_exceeded(provider, String::new(), body.to_string());
+        }
+        // Detect thinking/prefill incompatibility — server has enable_thinking
+        // active and rejects the assistant prefill we sent. Treat as a format
+        // error with a clear message so failover can proceed.
+        if lower.contains("prefill") && lower.contains("thinking") {
+            return ProviderError::format_error(
+                provider,
+                format!("thinking/prefill conflict (server has enable_thinking active): {body}"),
+            );
         }
 
         if status >= 500 {
@@ -582,7 +602,10 @@ impl Provider for OpenAiCompatibleProvider {
     ) -> Result<ProviderResponse, ProviderError> {
         let url = self.completions_url();
         let messages = self.build_messages(request);
-        let model = if request.model.is_empty() {
+        let model = if request.model.is_empty()
+            || request.model == "default"
+            || request.model == "auto"
+        {
             &self.config.default_model
         } else {
             &request.model
@@ -678,7 +701,10 @@ impl Provider for OpenAiCompatibleProvider {
 
         let url = self.completions_url();
         let messages = self.build_messages(request);
-        let model = if request.model.is_empty() {
+        let model = if request.model.is_empty()
+            || request.model == "default"
+            || request.model == "auto"
+        {
             &self.config.default_model
         } else {
             &request.model
@@ -724,9 +750,30 @@ impl Provider for OpenAiCompatibleProvider {
         let mut buffer = String::new();
         let mut tool_accum: Vec<(String, String, String)> = Vec::new(); // (id, name, args)
         let mut last_usage: Option<TokenUsage> = None;
+        let mut first_chunk = true;
 
         while let Some(chunk_result) = stream.next().await {
             let bytes = chunk_result.map_err(|e| ProviderError::network_error(self.config.name.clone(), e.to_string()))?;
+
+            // Detect binary/compressed responses on the first chunk.
+            // Gzip starts with 0x1f 0x8b; other non-UTF-8 payloads will
+            // also fail this check.  Bail early instead of pushing lossy
+            // replacement characters into the SSE parser.
+            if first_chunk {
+                first_chunk = false;
+                if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
+                    return Err(ProviderError::format_error(
+                        self.config.name.clone(),
+                        "server returned gzip-compressed body — expected text/event-stream SSE".to_string(),
+                    ));
+                }
+                if std::str::from_utf8(&bytes).is_err() {
+                    return Err(ProviderError::format_error(
+                        self.config.name.clone(),
+                        "server returned non-UTF-8 binary data — expected text/event-stream SSE".to_string(),
+                    ));
+                }
+            }
 
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 

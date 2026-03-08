@@ -232,7 +232,14 @@ pub async fn generate_tunnel_invite(
     ttl_hours: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<InviteDetailResponse, String> {
-    let gateway_pubkey = [0u8; 32]; // TODO: use real public key from TunnelManager
+    let gateway_pubkey = {
+        let tunnel_mgr = state.tunnel_manager.read().await;
+        if let Some(ref mgr) = *tunnel_mgr {
+            mgr.public_key().bytes
+        } else {
+            return Err("Tunnel not started — start the tunnel before generating invites".into());
+        }
+    };
     let ttl = std::time::Duration::from_secs(ttl_hours.unwrap_or(24) * 3600);
     let mut invites = state.invites.write().map_err(|e| e.to_string())?;
     let invite = invites.create_invite_with_ttl(gateway_pubkey, endpoint.clone(), label.clone(), ttl);

@@ -85,15 +85,8 @@ impl SkillProvider for BrowserSkillProvider {
             selected_skill_ids: vec!["browser_automation".to_string()],
             excluded_skill_ids: vec![],
             total_tokens: 450,
-            tool_names: vec![
-                "browser_navigate".into(),
-                "browser_observe".into(),
-                "browser_click".into(),
-                "browser_type".into(),
-                "browser_screenshot".into(),
-                "browser_scroll".into(),
-                "browser_close".into(),
-            ],
+            // Derive tool names from the canonical registry — single source of truth.
+            tool_names: clawdesk_browser::BrowserToolId::core_tool_names(),
         }
     }
 }

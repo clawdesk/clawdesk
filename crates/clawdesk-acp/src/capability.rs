@@ -19,15 +19,33 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Maximum number of well-known capabilities before requiring width expansion.
-const MAX_KNOWN_CAPABILITIES: usize = 32;
+/// Maximum number of well-known capabilities — derived from the registry.
+/// Updated automatically by the `define_capabilities!` macro.
+/// Used for weight vector sizing and validation.
+///
+/// `CAP_WORDS = ⌈CAP_COUNT / 64⌉` gives the const-generic width.
+// These are set by the macro expansion below.
 
 /// Compile-time capability registry entry.
 /// Each entry maps a capability name to a unique bit index.
+///
+/// The macro also generates:
+/// - `CAP_COUNT: usize` — total number of capabilities
+/// - `CAP_WORDS: usize` — minimum CapSet width (`⌈CAP_COUNT / 64⌉`)
 macro_rules! define_capabilities {
     (
         $( $variant:ident = $index:expr => $parent:expr ),* $(,)?
     ) => {
+        /// Number of capabilities in the registry (derived at compile time).
+        /// Equals 1 + max bit_index across all variants.
+        pub const CAP_COUNT: usize = 0 $( + { let _ = $index; 0 } )* + {
+            // Count by expanding one per variant.
+            0usize $( + { let _ = stringify!($variant); 1 } )*
+        };
+
+        /// Minimum CapSet<N> width required: ⌈CAP_COUNT / 64⌉.
+        pub const CAP_WORDS: usize = (CAP_COUNT + 63) / 64;
+
         /// Well-known capability identifiers with guaranteed unique bit positions.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
@@ -310,7 +328,8 @@ impl CapabilityId {
             "web" | "search" | "internet" => Some(Self::WebSearch),
             "file" | "filesystem" | "files" => Some(Self::FileProcessing),
             "image" | "vision" | "visual" => Some(Self::ImageProcessing),
-            "audio" | "speech" | "tts" | "transcription" => Some(Self::AudioProcessing),
+            "audio" | "speech" | "transcription" => Some(Self::AudioProcessing),
+            "tts" | "text-to-speech" | "text_to_speech" => Some(Self::TextToSpeech),
             "video" => Some(Self::VideoProcessing),
             "media" => Some(Self::MediaProcessing),
             "api" | "integration" | "http" => Some(Self::ApiIntegration),
@@ -455,7 +474,7 @@ mod tests {
             .collect();
 
         // Weight TextGeneration=2.0, CodeExecution=1.0, WebSearch=1.0
-        let mut weights = vec![0.0; MAX_KNOWN_CAPABILITIES];
+        let mut weights = vec![0.0; CAP_COUNT];
         weights[CapabilityId::TextGeneration.bit_index()] = 2.0;
         weights[CapabilityId::CodeExecution.bit_index()] = 1.0;
         weights[CapabilityId::WebSearch.bit_index()] = 1.0;
@@ -494,5 +513,39 @@ mod tests {
         let s = format!("{}", set);
         assert!(s.contains("TextGeneration"));
         assert!(s.contains("WebSearch"));
+    }
+
+    #[test]
+    fn from_tag_and_from_str_loose_agree_on_shared_tokens() {
+        // Tokens that appear in both from_tag and from_str_loose must map
+        // to the same CapabilityId, or routing will be inconsistent.
+        let shared_tokens = [
+            "text", "code", "web", "search", "file", "image", "audio",
+            "video", "media", "api", "data", "math", "mathematics",
+            "schedule", "message", "messaging", "summarize", "translate",
+            "translation", "tts", "tool",
+        ];
+
+        for token in &shared_tokens {
+            let tag_result = CapabilityId::from_tag(token);
+            let loose_result = CapabilityId::from_str_loose(token);
+            if let (Some(a), Some(b)) = (tag_result, loose_result) {
+                assert_eq!(
+                    a, b,
+                    "from_tag and from_str_loose disagree on token '{}': {:?} vs {:?}",
+                    token, a, b
+                );
+            }
+        }
+
+        // Specifically verify the "tts" fix
+        assert_eq!(
+            CapabilityId::from_tag("tts"),
+            Some(CapabilityId::TextToSpeech)
+        );
+        assert_eq!(
+            CapabilityId::from_str_loose("tts"),
+            Some(CapabilityId::TextToSpeech)
+        );
     }
 }

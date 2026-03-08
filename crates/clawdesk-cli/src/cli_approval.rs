@@ -19,6 +19,7 @@
 
 use async_trait::async_trait;
 use clawdesk_agents::runner::{ApprovalDecision, ApprovalGate};
+use clawdesk_types::truncate_to_char_boundary;
 use std::io::{self, BufRead, Write};
 use tracing::{debug, info};
 
@@ -81,7 +82,8 @@ impl CliApprovalGate {
                         .and_then(|v| v.as_str())
                         .map(|s| {
                             if s.len() > 80 {
-                                format!("{}...", &s[..80])
+                                let end = truncate_to_char_boundary(s, 80);
+                                format!("{}...", &s[..end])
                             } else {
                                 s.to_string()
                             }
@@ -100,7 +102,8 @@ impl CliApprovalGate {
                         .and_then(|v| v.as_str())
                         .map(|s| {
                             if s.len() > 120 {
-                                format!("{}...", &s[..120])
+                                let end = truncate_to_char_boundary(s, 120);
+                                format!("{}...", &s[..end])
                             } else {
                                 s.to_string()
                             }
@@ -113,13 +116,15 @@ impl CliApprovalGate {
             // Fallback: pretty-print JSON (truncated)
             let pretty = serde_json::to_string_pretty(&args).unwrap_or_else(|_| arguments.to_string());
             if pretty.len() > 300 {
-                return format!("  Args: {}...", &pretty[..300]);
+                let end = truncate_to_char_boundary(&pretty, 300);
+                return format!("  Args: {}...", &pretty[..end]);
             }
             return format!("  Args: {}", pretty);
         }
         // Not valid JSON — show raw (truncated)
         if arguments.len() > 300 {
-            format!("  Args: {}...", &arguments[..300])
+            let end = truncate_to_char_boundary(arguments, 300);
+            format!("  Args: {}...", &arguments[..end])
         } else {
             format!("  Args: {}", arguments)
         }

@@ -30,7 +30,7 @@ pub async fn list_a2a_agents(state: State<'_, AppState>) -> Result<Vec<AgentCard
         AgentCardInfo {
             id: card.id.clone(),
             name: card.name.clone(),
-            capabilities: card.capabilities.iter().map(|c| format!("{:?}", c)).collect(),
+            capabilities: card.capabilities().iter().map(|c| format!("{:?}", c)).collect(),
             active_tasks: entry.map(|e| e.active_tasks).unwrap_or(0),
             is_healthy: entry.map(|e| e.is_healthy).unwrap_or(false),
         }
@@ -96,7 +96,7 @@ pub async fn get_self_agent_card(state: State<'_, AppState>) -> Result<serde_jso
         .with_capability(clawdesk_acp::CapabilityId::CodeExecution);
 
     // Serialize capabilities as plain strings for UI display.
-    let caps: Vec<String> = card.capabilities.iter().map(|c| c.name().to_string()).collect();
+    let caps: Vec<String> = card.capabilities().iter().map(|c| c.name().to_string()).collect();
 
     Ok(serde_json::json!({
         "id": card.id,

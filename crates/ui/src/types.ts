@@ -1033,7 +1033,12 @@ export type AgentEventPayload =
   | { type: "PromptAssembled"; total_tokens: number; skills_included: string[]; skills_excluded: string[]; memory_fragments: number; budget_utilization: number }
   | { type: "IdentityVerified"; hash_match: boolean; version: number }
   | { type: "ContextGuardAction"; action: string; token_count: number; threshold: number }
-  | { type: "FallbackTriggered"; from_model: string; to_model: string; reason: string };
+  | { type: "FallbackTriggered"; from_model: string; to_model: string; reason: string }
+  | { type: "RetryStatus"; attempt: number; max_attempts: number; reason: string }
+  | { type: "ToolBlocked"; name: string; reason: string }
+  | { type: "ToolExecutionResult"; name: string; tool_call_id: string; is_error: boolean; preview: string; duration_ms: number }
+  | { type: "SkillDecision"; skill_id: string; included: boolean; reason: string; token_cost: number; budget_remaining: number }
+  | { type: "InputRequired"; question: string; options: string[]; urgent: boolean };
 
 export interface AgentEventEnvelope {
   agent_id: string;
@@ -1052,6 +1057,30 @@ export interface ApprovalPendingEvent {
   agent_id: string;
   action: string;
   detail: string;
+}
+
+export interface AskHumanPendingEvent {
+  id: string;
+  question: string;
+  options: string[];
+  urgent: boolean;
+  sent_to_channels?: string[];
+}
+
+/** Emitted when a channel inbound message resolves a pending ask-human. */
+export interface AskHumanRespondedEvent {
+  id: string;
+  response: string;
+  via_channel: string;
+}
+
+/** Entry returned by list_workspace_files Tauri command. */
+export interface WorkspaceFileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified: string;
 }
 
 // ── View Identifiers ─────────────────────────────────────────

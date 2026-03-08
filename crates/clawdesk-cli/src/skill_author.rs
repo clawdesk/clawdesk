@@ -7,6 +7,7 @@ use clawdesk_skills::scaffold::{
     SkillScaffoldInput, ScaffoldParam, generate_scaffold, lint_skill, dry_run_skill,
     LintSeverity, is_valid_skill_id, estimate_tokens,
 };
+use clawdesk_types::truncate_to_char_boundary;
 use std::path::{Path, PathBuf};
 
 /// Run the skill creation wizard (non-interactive mode for programmatic use).
@@ -140,7 +141,8 @@ pub fn cmd_skill_test(skill_dir: &Path, input: &str) -> Result<TestReport, Strin
         bound_tools: result.bound_tools,
         warnings: result.warnings,
         prompt_preview: if result.assembled_prompt.len() > 500 {
-            format!("{}...", &result.assembled_prompt[..500])
+            let end = truncate_to_char_boundary(&result.assembled_prompt, 500);
+            format!("{}...", &result.assembled_prompt[..end])
         } else {
             result.assembled_prompt
         },

@@ -46,7 +46,9 @@
 //! where w(c) is the importance weight of capability c.
 
 pub mod agent_card;
+pub mod agent_descriptor;
 pub mod announce;
+pub mod durable_announce;
 pub mod capability;
 pub mod capability_algebra;
 pub mod content_router;

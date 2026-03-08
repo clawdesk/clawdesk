@@ -4,14 +4,20 @@
 //! DashMap provides concurrent O(1) reads across non-colliding agent IDs.
 //! Each session is behind `Arc<Mutex>` to serialize CDP commands per agent
 //! (CDP protocol is inherently sequential per page).
+//!
+//! ## Profile support
+//! Sessions can be created with a named profile. The profile's persistent
+//! `user-data-dir` is used instead of a temporary directory, preserving
+//! logins, cookies, and preferences across sessions.
 
 use crate::cdp::{CdpConfig, CdpSession};
+use crate::profile::ProfileManager;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Per-agent browser session: CdpSession + Chrome child process.
 pub struct ManagedSession {
@@ -20,7 +26,28 @@ pub struct ManagedSession {
     pub last_active: Instant,
     pub pages_visited: u32,
     pub port: u16,
+    /// Profile name this session was created with.
+    pub profile_name: String,
+    /// Captured console messages (console.log/warn/error from the page).
+    pub console_log: Vec<ConsoleEntry>,
 }
+
+/// A captured console message from the browser page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleEntry {
+    /// Log level: "log", "warning", "error", "info", "debug".
+    pub level: String,
+    /// Message text.
+    pub text: String,
+    /// Source URL (if available).
+    pub source: Option<String>,
+    /// Line number (if available).
+    pub line: Option<u32>,
+    /// Timestamp (ms since epoch).
+    pub timestamp: u64,
+}
+
+use serde::{Deserialize, Serialize};
 
 /// Centralized browser configuration.
 #[derive(Debug, Clone)]
@@ -42,6 +69,12 @@ pub struct BrowserConfig {
     pub wrap_external_content: bool,
     // Approval
     pub require_purchase_approval: bool,
+    // Profile
+    /// Default profile name for new sessions ("default" if not set).
+    pub default_profile: String,
+    // Console capture
+    /// Whether to capture console.log/warn/error output from pages.
+    pub capture_console: bool,
 }
 
 impl Default for BrowserConfig {
@@ -61,6 +94,8 @@ impl Default for BrowserConfig {
             max_content_chars: 50_000,
             wrap_external_content: true,
             require_purchase_approval: true,
+            default_profile: "default".into(),
+            capture_console: true,
         }
     }
 }
@@ -70,19 +105,31 @@ pub struct BrowserManager {
     sessions: DashMap<String, Arc<Mutex<ManagedSession>>>,
     pub config: BrowserConfig,
     next_port: AtomicU16,
+    profile_mgr: Option<ProfileManager>,
 }
 
 impl BrowserManager {
     pub fn new(config: BrowserConfig) -> Arc<Self> {
         let base = config.base_debug_port;
+        // Try to create a profile manager at the default location
+        let profile_mgr = match ProfileManager::default_location() {
+            Ok(pm) => {
+                if let Err(e) = pm.ensure_defaults() {
+                    warn!("failed to ensure default browser profile: {e}");
+                }
+                Some(pm)
+            }
+            Err(e) => {
+                warn!("no profile manager: {e}");
+                None
+            }
+        };
         let mgr = Arc::new(Self {
             sessions: DashMap::new(),
             config,
             next_port: AtomicU16::new(base),
+            profile_mgr,
         });
-        // Only start the idle-session reaper if we're inside a Tokio runtime.
-        // During Tauri's synchronous setup phase there is no reactor yet, so we
-        // defer the spawn and let callers invoke `start_reaper()` later if needed.
         if tokio::runtime::Handle::try_current().is_ok() {
             mgr.start_reaper();
         }
@@ -103,9 +150,25 @@ impl BrowserManager {
     /// - If session exists: return it (O(1) DashMap lookup)
     /// - If at capacity: return error
     /// - Otherwise: spawn Chrome, connect CDP, insert session
+    ///
+    /// Uses the default profile. For profile-specific sessions, use
+    /// `get_or_create_with_profile`.
     pub async fn get_or_create(
         &self,
         agent_id: &str,
+    ) -> Result<Arc<Mutex<ManagedSession>>, String> {
+        self.get_or_create_with_profile(agent_id, None).await
+    }
+
+    /// Get or create a session with a specific browser profile.
+    ///
+    /// If `profile_name` is None, uses the default profile from config.
+    /// The profile's persistent user-data-dir is used for Chrome, preserving
+    /// logins, cookies, and preferences across sessions.
+    pub async fn get_or_create_with_profile(
+        &self,
+        agent_id: &str,
+        profile_name: Option<&str>,
     ) -> Result<Arc<Mutex<ManagedSession>>, String> {
         // Fast path: existing session
         if let Some(entry) = self.sessions.get(agent_id) {
@@ -121,6 +184,9 @@ impl BrowserManager {
             ));
         }
 
+        // Resolve profile
+        let profile = profile_name.unwrap_or(&self.config.default_profile);
+
         // Allocate port (wait-free atomic increment)
         let port = self.next_port.fetch_add(1, Ordering::Relaxed);
 
@@ -130,10 +196,31 @@ impl BrowserManager {
             timeout_ms: (self.config.timeout_secs as u64) * 1000,
             headless: self.config.headless,
             browser_path: self.config.browser_path.clone(),
+            remote_cdp_url: None,
+            max_retries: 3,
+            retry_base_delay_ms: 200,
+        };
+
+        // Determine user-data-dir: profile-managed or temp
+        let user_data_dir = if let Some(ref pm) = self.profile_mgr {
+            let dir = pm.user_data_dir(profile);
+            // Ensure the directory exists
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                warn!("failed to create profile dir: {e}, falling back to temp");
+                format!("/tmp/clawdesk-browser-{}", port)
+            } else {
+                // Touch the profile's last_used timestamp
+                let _ = pm.touch(profile);
+                dir.to_string_lossy().to_string()
+            }
+        } else {
+            format!("/tmp/clawdesk-browser-{}", port)
         };
 
         // Spawn Chrome with sandboxed environment
-        let (child, cdp, actual_port) = self.spawn_chrome_sandboxed(&cdp_config, port).await?;
+        let (child, cdp, actual_port) = self
+            .spawn_chrome_sandboxed(&cdp_config, port, &user_data_dir)
+            .await?;
 
         let session = Arc::new(Mutex::new(ManagedSession {
             cdp,
@@ -141,11 +228,13 @@ impl BrowserManager {
             last_active: Instant::now(),
             pages_visited: 0,
             port: actual_port,
+            profile_name: profile.to_string(),
+            console_log: Vec::new(),
         }));
 
         self.sessions
             .insert(agent_id.to_string(), Arc::clone(&session));
-        info!(agent_id, port = actual_port, "browser session created");
+        info!(agent_id, port = actual_port, profile, "browser session created");
 
         Ok(session)
     }
@@ -155,6 +244,7 @@ impl BrowserManager {
         &self,
         config: &CdpConfig,
         port: u16,
+        user_data_dir: &str,
     ) -> Result<(std::process::Child, CdpSession, u16), String> {
         let browser_path = config
             .browser_path
@@ -162,8 +252,7 @@ impl BrowserManager {
             .or_else(CdpSession::detect_browser)
             .ok_or("no browser found — install Chrome, Chromium, or Edge")?;
 
-        let data_dir = format!("/tmp/clawdesk-browser-{}", port);
-        let args = CdpSession::browser_launch_args(port, config.headless, &data_dir);
+        let args = CdpSession::browser_launch_args(port, config.headless, user_data_dir);
 
         // SECURITY: Clear environment, pass through only what Chrome needs
         let mut cmd = std::process::Command::new(&browser_path);
@@ -230,6 +319,14 @@ impl BrowserManager {
         // Enable required CDP domains
         let _ = session.send(session.enable_page()).await;
         let _ = session.send(session.enable_dom()).await;
+        // Enable Runtime for console capture
+        let _ = session
+            .send(session.build_command("Runtime.enable", serde_json::json!({})))
+            .await;
+        // Enable Log domain for browser-level log entries
+        let _ = session
+            .send(session.build_command("Log.enable", serde_json::json!({})))
+            .await;
 
         Ok((child, session, port))
     }
@@ -242,6 +339,11 @@ impl BrowserManager {
             let _ = s.child.wait();
             debug!(agent_id, "browser session closed");
         }
+    }
+
+    /// Get the profile manager (if available).
+    pub fn profile_manager(&self) -> Option<&ProfileManager> {
+        self.profile_mgr.as_ref()
     }
 
     /// List active session agent IDs (for API/debug).
@@ -330,6 +432,7 @@ mod tests {
             sessions: DashMap::new(),
             config,
             next_port: AtomicU16::new(19222),
+            profile_mgr: None,
         };
         let result = mgr.get_or_create("agent-1").await;
         assert!(result.is_err());

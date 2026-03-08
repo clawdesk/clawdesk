@@ -33,6 +33,31 @@ use clawdesk_sochdb::{SochMemoryBackend, SochTemporalGraph};
 use clawdesk_types::tokenizer::estimate_tokens;
 
 // ---------------------------------------------------------------------------
+// Safety / behavioral directive — injected via PromptBuilder::safety()
+// ---------------------------------------------------------------------------
+
+/// Behavioral directive that teaches the agent to ask for human approval
+/// instead of refusing or restating capabilities.
+const HUMAN_DECISION_DIRECTIVE: &str = "\
+<decision_protocol>
+When a task requires a decision that should be made by the human (e.g. deployment, \
+file execution, destructive actions, choosing between options, spending money, \
+or anything where the user's explicit preference matters):
+
+1. Do NOT refuse or say \"I cannot do that\".
+2. Do NOT just list what you can do.
+3. Instead, call the `ask_human` tool with a clear question and suggested options.
+4. Wait for the human's response, then proceed based on their decision.
+
+Examples of when to use ask_human:
+- \"Should I run this code locally or generate it for you to review first?\"
+- \"This will modify 15 files. Proceed, or review the changes first?\"
+- \"I can deploy via Option A or Option B. Which do you prefer?\"
+
+Never guess the user's preference for consequential actions — ask.
+</decision_protocol>";
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -248,6 +273,7 @@ pub(crate) async fn build_prompt_pipeline(
         Ok(builder) => {
             let (assembled, manifest) = builder
                 .identity(input.persona.to_string())
+                .safety(HUMAN_DECISION_DIRECTIVE.to_string())
                 .runtime(runtime_ctx)
                 .skills(scored_skills)
                 .memory(memory_fragments)
@@ -471,6 +497,10 @@ pub(crate) async fn store_conversation_memory(
                 source = %source_id,
                 "Memory stored (filtered by importance)"
             );
+
+            // Note: event bus emission for memory.stored would go here
+            // but we don't have access to the EventBus in this function.
+            // The caller (send_message) should emit if needed.
 
             // Temporal edges: record that this source discussed these memories now
             if let Some(tg) = temporal_graph {

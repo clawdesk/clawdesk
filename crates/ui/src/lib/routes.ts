@@ -1,11 +1,11 @@
-export type AppNavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "settings" | "logs" | "extensions" | "mcp";
+export type AppNavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "files" | "settings" | "logs" | "extensions" | "mcp" | "local-models" | "documents";
 
 export interface AppRoute {
   nav: AppNavKey;
   threadId?: string;
 }
 
-const NAV_SET = new Set<AppNavKey>(["chat", "overview", "a2a", "runtime", "skills", "automations", "agents", "channels", "settings", "logs", "extensions", "mcp"]);
+const NAV_SET = new Set<AppNavKey>(["chat", "overview", "a2a", "runtime", "skills", "automations", "agents", "channels", "files", "settings", "logs", "extensions", "mcp", "local-models", "documents"]);
 
 // Legacy nav keys → new mapping
 const LEGACY_MAP: Record<string, AppNavKey> = {

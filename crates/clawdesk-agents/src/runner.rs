@@ -378,10 +378,25 @@ pub enum AgentEvent {
         attempt: usize,
     },
 
+    /// Emitted when the runner retries due to empty/filtered response.
+    RetryStatus {
+        attempt: usize,
+        max_attempts: usize,
+        reason: String,
+    },
+
     /// Emitted when identity is verified.
     IdentityVerified {
         hash_match: bool,
         version: u64,
+    },
+
+    /// Emitted when the agent calls `ask_human` to request a decision from the user.
+    /// The frontend should display the question and options, then relay the response.
+    InputRequired {
+        question: String,
+        options: Vec<String>,
+        urgent: bool,
     },
 }
 
@@ -1555,14 +1570,90 @@ impl AgentRunner {
 
         self.emit(AgentEvent::StreamChunk { text: String::new(), done: true });
 
-        // Diagnostic: warn when the provider returned zero content
+        // Empty content + no tool calls is almost always a content filter or
+        // provider issue. Retry locally up to 3 times with a short delay before
+        // propagating to the failover controller (which may exhaust quickly if
+        // no fallback models are configured).
         if streamed_content.is_empty() && stream_tool_calls.is_empty() {
-            warn!(
-                round,
-                finish_reason = ?stream_finish,
-                "Provider returned empty content with no tool calls — \
-                 possible content filter, malformed request, or provider issue"
-            );
+            const MAX_EMPTY_RETRIES: usize = 3;
+            const EMPTY_RETRY_DELAY_MS: u64 = 2000;
+
+            for retry in 1..=MAX_EMPTY_RETRIES {
+                warn!(
+                    round,
+                    retry,
+                    max_retries = MAX_EMPTY_RETRIES,
+                    finish_reason = ?stream_finish,
+                    "Provider returned empty content (possible content filter) — retrying"
+                );
+                self.emit(AgentEvent::RetryStatus {
+                    attempt: retry,
+                    max_attempts: MAX_EMPTY_RETRIES,
+                    reason: "Content filter — retrying".to_string(),
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(EMPTY_RETRY_DELAY_MS)).await;
+
+                if self.cancel.is_cancelled() {
+                    return Err(ClawDeskError::Agent(AgentError::Cancelled));
+                }
+
+                // Re-stream
+                let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<clawdesk_providers::StreamChunk>(128);
+                let retry_provider = Arc::clone(&self.provider);
+                let retry_request = request.clone();
+                let retry_handle = tokio::spawn(async move {
+                    retry_provider.stream(&retry_request, retry_tx).await
+                });
+
+                streamed_content.clear();
+                stream_tool_calls.clear();
+
+                while let Some(chunk) = retry_rx.recv().await {
+                    if !chunk.reasoning_delta.is_empty() {
+                        self.emit(AgentEvent::ThinkingChunk { text: chunk.reasoning_delta });
+                    }
+                    if !chunk.delta.is_empty() {
+                        streamed_content.push_str(&chunk.delta);
+                        self.emit(AgentEvent::StreamChunk { text: chunk.delta, done: false });
+                    }
+                    if chunk.done {
+                        stream_finish = chunk.finish_reason.unwrap_or(FinishReason::Stop);
+                        stream_usage = chunk.usage.unwrap_or_default();
+                        if !chunk.tool_calls.is_empty() {
+                            stream_tool_calls = chunk.tool_calls;
+                        }
+                    }
+                }
+
+                match retry_handle.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(ClawDeskError::Provider(e)),
+                    Err(e) => return Err(ClawDeskError::Agent(AgentError::ContextAssemblyFailed {
+                        detail: format!("stream retry task panicked: {e}"),
+                    })),
+                }
+
+                if !streamed_content.is_empty() || !stream_tool_calls.is_empty() {
+                    info!(round, retry, "content filter retry succeeded");
+                    break;
+                }
+            }
+
+            // If still empty after all retries, propagate as retryable error for failover
+            if streamed_content.is_empty() && stream_tool_calls.is_empty() {
+                warn!(round, "All {} content filter retries exhausted — returning error", MAX_EMPTY_RETRIES);
+                self.emit(AgentEvent::RetryStatus {
+                    attempt: MAX_EMPTY_RETRIES,
+                    max_attempts: MAX_EMPTY_RETRIES,
+                    reason: "Content filter — all retries exhausted".to_string(),
+                });
+                return Err(ClawDeskError::Provider(
+                    clawdesk_types::error::ProviderError::format_error(
+                        "content_filter",
+                        "Provider returned empty response after retries (content filter). Retrying with failover.",
+                    ),
+                ));
+            }
         }
 
         // Fallback token estimation
@@ -2528,7 +2619,7 @@ impl AgentRunner {
                 if let Some(tx) = &event_tx {
                     if tx.receiver_count() > 0 {
                         let preview = if tool_result.content.len() > 200 {
-                            format!("{}...", &tool_result.content[..200])
+                            format!("{}...", safe_prefix(&tool_result.content, 200))
                         } else {
                             tool_result.content.clone()
                         };

@@ -551,8 +551,8 @@ mod tests {
         let est = CalibratedTokenEstimator::new();
         assert!((est.ratio() - 4.0).abs() < f64::EPSILON);
         assert!(!est.is_calibrated());
-        // Should match simple estimate for default ratio
-        assert_eq!(est.estimate("hello world!"), estimate_tokens("hello world!"));
+        // Default ratio 4.0 → ceil(12 / 4.0) = 3 tokens for "hello world!"
+        assert_eq!(est.estimate("hello world!"), 3);
     }
 
     #[test]

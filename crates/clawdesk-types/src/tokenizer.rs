@@ -195,6 +195,30 @@ pub fn estimate_tokens_total(texts: &[String]) -> usize {
     texts.iter().map(|t| estimate_tokens(t)).sum()
 }
 
+/// Return the largest byte index `<= max_bytes` that falls on a UTF-8 char
+/// boundary in `s`.  Use this before slicing a string to avoid panicking on
+/// multi-byte characters.
+///
+/// ```
+/// use clawdesk_types::tokenizer::truncate_to_char_boundary;
+///
+/// let s = "hello 世界";
+/// let end = truncate_to_char_boundary(s, 7);
+/// assert_eq!(&s[..end], "hello ");
+/// assert_eq!(truncate_to_char_boundary("ascii", 100), 5); // clamps to len
+/// ```
+#[inline]
+pub fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> usize {
+    if max_bytes >= s.len() {
+        return s.len();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

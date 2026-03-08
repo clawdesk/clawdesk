@@ -9,6 +9,7 @@
 //! - Clipboard history with configurable retention
 
 use serde::{Deserialize, Serialize};
+use clawdesk_types::truncate_to_char_boundary;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -126,14 +127,16 @@ impl ClipboardEntry {
             ClipboardContentType::PlainText => {
                 let text = self.text.as_deref().unwrap_or("");
                 if text.len() > 200 {
-                    format!("[clipboard text: {}... ({} chars)]", &text[..200], text.len())
+                    let end = truncate_to_char_boundary(text, 200);
+                    format!("[clipboard text: {}... ({} chars)]", &text[..end], text.len())
                 } else {
                     format!("[clipboard text: {}]", text)
                 }
             }
             ClipboardContentType::Html | ClipboardContentType::RichText => {
                 let fallback = self.text.as_deref().unwrap_or("[rich content]");
-                format!("[clipboard HTML/rich: {}]", &fallback[..fallback.len().min(200)])
+                let end = truncate_to_char_boundary(fallback, 200);
+                format!("[clipboard HTML/rich: {}]", &fallback[..end])
             }
             ClipboardContentType::Image => {
                 let mime = self.image_mime.as_deref().unwrap_or("image/*");

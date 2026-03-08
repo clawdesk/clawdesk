@@ -33,7 +33,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 # WASM sandbox (optional, +15MB binary)
-wasmtime = { version = "29", optional = true }
+wasmtime = { workspace = true, optional = true }
 
 # Utilities
 uuid = { workspace = true }

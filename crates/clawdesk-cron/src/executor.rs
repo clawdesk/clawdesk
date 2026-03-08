@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use clawdesk_types::cron::{CronRunLog, CronRunStatus, CronTask, DeliveryTarget};
 use clawdesk_types::error::CronError;
+use clawdesk_types::truncate_to_char_boundary;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -15,6 +16,19 @@ pub trait AgentExecutor: Send + Sync + 'static {
     async fn execute(&self, prompt: &str, agent_id: Option<&str>) -> Result<String, String>;
 }
 
+/// No-op agent executor — always returns an error.
+///
+/// Use this when the binary doesn't run agents (gateway, bench). The real
+/// executor is wired at boot when an agent runner is available.
+pub struct NoopAgentExecutor;
+
+#[async_trait]
+impl AgentExecutor for NoopAgentExecutor {
+    async fn execute(&self, _prompt: &str, _agent_id: Option<&str>) -> Result<String, String> {
+        Err("Agent executor not configured".into())
+    }
+}
+
 /// Trait for delivering results to targets.
 #[async_trait]
 pub trait DeliveryHandler: Send + Sync + 'static {
@@ -23,6 +37,23 @@ pub trait DeliveryHandler: Send + Sync + 'static {
         target: &DeliveryTarget,
         content: &str,
     ) -> Result<(), String>;
+}
+
+/// No-op delivery handler — always returns an error.
+///
+/// Use this when the binary doesn't deliver scheduled results (gateway boot,
+/// bench). The real handler is wired when a channel registry is available.
+pub struct NoopDeliveryHandler;
+
+#[async_trait]
+impl DeliveryHandler for NoopDeliveryHandler {
+    async fn deliver(
+        &self,
+        _target: &DeliveryTarget,
+        _content: &str,
+    ) -> Result<(), String> {
+        Err("Delivery handler not configured".into())
+    }
 }
 
 /// Cron task executor with overlap prevention and timeout.
@@ -122,7 +153,8 @@ impl CronExecutor {
                 }
 
                 let preview = if response.len() > 200 {
-                    format!("{}...", &response[..200])
+                    let end = truncate_to_char_boundary(&response, 200);
+                    format!("{}...", &response[..end])
                 } else {
                     response.clone()
                 };

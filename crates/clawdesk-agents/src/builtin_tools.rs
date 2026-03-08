@@ -1321,20 +1321,8 @@ impl Tool for MemoryForgetTool {
 ///             ─→ channel gateway delivers to Telegram/Discord/Slack/etc.
 /// ```
 pub struct MessageSendTool {
-    /// Async callback that performs the actual message delivery through the
-    /// channel gateway. Parameters: (target, channel_id, content, media_urls).
-    /// Returns Ok(delivery_id) or Err(error_message).
-    send_fn: std::sync::Arc<
-        dyn Fn(
-                String,
-                Option<String>,
-                String,
-                Vec<String>,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    /// Typed async port for message delivery.
+    send_fn: crate::port::AsyncPort<crate::port::MessageSendRequest, Result<String, String>>,
     /// Actually-connected channel names (populated from ChannelRegistry).
     /// Used in the tool schema so the LLM only sees channels that exist.
     available_channels: Vec<String>,
@@ -1439,27 +1427,12 @@ impl MessagingToolTracker {
 }
 
 impl MessageSendTool {
-    /// Create with an async send callback.
-    ///
-    /// The callback receives `(target, channel_id, content, media_urls)` and
-    /// returns `Ok(delivery_id)` or `Err(error_msg)`.
+    /// Create with a typed async port for message delivery.
     ///
     /// `available_channels` is the list of actually-connected channel names
     /// (e.g., `["telegram", "discord"]`) from `ChannelRegistry`.
     pub fn new(
-        send_fn: std::sync::Arc<
-            dyn Fn(
-                    String,
-                    Option<String>,
-                    String,
-                    Vec<String>,
-                )
-                    -> std::pin::Pin<
-                        Box<dyn std::future::Future<Output = Result<String, String>> + Send>,
-                    >
-                + Send
-                + Sync,
-        >,
+        send_fn: crate::port::AsyncPort<crate::port::MessageSendRequest, Result<String, String>>,
         available_channels: Vec<String>,
     ) -> Self {
         Self { send_fn, available_channels }
@@ -1468,9 +1441,9 @@ impl MessageSendTool {
     /// Create a no-op messaging tool (for testing or when messaging is disabled).
     pub fn noop() -> Self {
         Self {
-            send_fn: std::sync::Arc::new(|target, _channel, _content, _media| {
+            send_fn: std::sync::Arc::new(|req| {
                 Box::pin(async move {
-                    Ok(format!("noop-delivery-{}", target))
+                    Ok(format!("noop-delivery-{}", req.target))
                 })
             }),
             available_channels: vec![],
@@ -1560,12 +1533,12 @@ impl Tool for MessageSendTool {
             "MessageSendTool executing"
         );
 
-        let delivery_id = (self.send_fn)(
-            target.clone(),
-            channel.clone(),
-            content.clone(),
-            media_urls.clone(),
-        )
+        let delivery_id = (self.send_fn)(crate::port::MessageSendRequest {
+            target: target.clone(),
+            channel: channel.clone(),
+            content: content.clone(),
+            media_urls: media_urls.clone(),
+        })
         .await?;
 
         // Return a human-friendly result that the LLM can relay to the user
@@ -1667,33 +1640,13 @@ impl Tool for WorkspaceSearchTool {
 /// Returns matching file paths with line numbers and context, confined by
 /// [`WorkspaceGuard`].
 pub struct WorkspaceGrepTool {
-    /// `(query, is_regex, include_glob, max_results) → Ok(json_matches)`
-    grep_fn: Arc<
-        dyn Fn(
-                String,
-                bool,
-                Option<String>,
-                usize,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    /// Typed async port for workspace grep.
+    grep_fn: crate::port::AsyncPort<crate::port::WorkspaceGrepRequest, Result<String, String>>,
 }
 
 impl WorkspaceGrepTool {
     pub fn new(
-        grep_fn: Arc<
-            dyn Fn(
-                    String,
-                    bool,
-                    Option<String>,
-                    usize,
-                )
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-                + Send
-                + Sync,
-        >,
+        grep_fn: crate::port::AsyncPort<crate::port::WorkspaceGrepRequest, Result<String, String>>,
     ) -> Self {
         Self { grep_fn }
     }
@@ -1765,14 +1718,16 @@ impl Tool for WorkspaceGrepTool {
             .unwrap_or(50)
             .min(500) as usize;
 
-        (self.grep_fn)(query, is_regex, include_pattern, max_results).await
+        (self.grep_fn)(crate::port::WorkspaceGrepRequest {
+            query, is_regex, include_glob: include_pattern, max_results,
+        }).await
     }
 }
 
 /// Register the workspace_search (glob) and workspace_grep (text search) tools.
 ///
 /// - `search_fn`: `(glob_pattern, max_results) → Ok(json_paths)`
-/// - `grep_fn`: `(query, is_regex, include_glob, max_results) → Ok(json_matches)`
+/// - `grep_fn`: typed `WorkspaceGrepRequest` port
 pub fn register_workspace_tools(
     registry: &mut crate::tools::ToolRegistry,
     search_fn: Arc<
@@ -1784,17 +1739,7 @@ pub fn register_workspace_tools(
             + Send
             + Sync,
     >,
-    grep_fn: Arc<
-        dyn Fn(
-                String,
-                bool,
-                Option<String>,
-                usize,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    grep_fn: crate::port::AsyncPort<crate::port::WorkspaceGrepRequest, Result<String, String>>,
 ) {
     use std::sync::Arc;
     registry.register(Arc::new(WorkspaceSearchTool::new(search_fn)));
@@ -1990,32 +1935,13 @@ pub fn register_builtin_tools(
 /// and incorporate it into its own response. Uses the `SpawnConfig` types from
 /// `crate::subagent`.
 pub struct SpawnSubAgentTool {
-    /// Callback that actually spawns and runs the sub-agent.
-    /// Receives (agent_id, task, timeout_secs) → Result<response_text, error>.
-    spawn_fn: Arc<
-        dyn Fn(
-                String,
-                String,
-                u64,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    /// Typed async port for sub-agent spawning.
+    spawn_fn: crate::port::AsyncPort<crate::port::SpawnSubAgentRequest, Result<String, String>>,
 }
 
 impl SpawnSubAgentTool {
     pub fn new(
-        spawn_fn: Arc<
-            dyn Fn(
-                    String,
-                    String,
-                    u64,
-                )
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-                + Send
-                + Sync,
-        >,
+        spawn_fn: crate::port::AsyncPort<crate::port::SpawnSubAgentRequest, Result<String, String>>,
     ) -> Self {
         Self { spawn_fn }
     }
@@ -2047,8 +1973,8 @@ impl crate::tools::Tool for SpawnSubAgentTool {
                     },
                     "timeout_secs": {
                         "type": "integer",
-                        "description": "Maximum seconds to wait for the sub-agent (default: 120).",
-                        "default": 120
+                        "description": "Maximum seconds to wait for the sub-agent (default: 300).",
+                        "default": 300
                     }
                 },
                 "required": ["agent_id", "task"]
@@ -2076,14 +2002,16 @@ impl crate::tools::Tool for SpawnSubAgentTool {
         let timeout_secs = args
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
-            .unwrap_or(120);
+            .unwrap_or(300);
 
         // Recursion depth check — prevent runaway sub-agent spawning.
         if let Err(e) = crate::recursion_depth::check_depth() {
             return Err(format!("sub-agent spawn blocked: {}", e));
         }
         crate::recursion_depth::with_incremented_depth(
-            (self.spawn_fn)(agent_id, task, timeout_secs),
+            (self.spawn_fn)(crate::port::SpawnSubAgentRequest {
+                agent_id, task, timeout_secs,
+            }),
         ).await
     }
 }
@@ -2094,41 +2022,19 @@ impl crate::tools::Tool for SpawnSubAgentTool {
 /// `Ok(response_text)` from the sub-agent or `Err(error_message)`.
 pub fn register_subagent_tool(
     registry: &mut crate::tools::ToolRegistry,
-    spawn_fn: Arc<
-        dyn Fn(
-                String,
-                String,
-                u64,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    spawn_fn: crate::port::AsyncPort<crate::port::SpawnSubAgentRequest, Result<String, String>>,
 ) {
     registry.register(Arc::new(SpawnSubAgentTool::new(spawn_fn)));
 }
 
-/// Register the messaging tool with an async send callback.
-///
-/// The callback receives `(target, channel_id, content, media_urls)` and
-/// returns `Ok(delivery_id)` or `Err(error_message)`.
+/// Register the messaging tool with a typed async port.
 ///
 /// `available_channels` is the list of actually-connected channel names
 /// (e.g., `["telegram", "discord"]`) — embedded in the tool schema so the
 /// LLM only sees channels that actually exist.
 pub fn register_messaging_tool(
     registry: &mut crate::tools::ToolRegistry,
-    send_fn: std::sync::Arc<
-        dyn Fn(
-                String,
-                Option<String>,
-                String,
-                Vec<String>,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    send_fn: crate::port::AsyncPort<crate::port::MessageSendRequest, Result<String, String>>,
     available_channels: Vec<String>,
 ) {
     use std::sync::Arc;
@@ -2165,35 +2071,15 @@ impl NotificationPriority {
 /// single channel, this tool is designed for operational notifications that
 /// may need to reach the user on multiple platforms at once.
 pub struct SendNotificationTool {
-    /// `(channels, target, message, priority) → Ok(vec_of_delivery_ids_json)`
-    notify_fn: Arc<
-        dyn Fn(
-                Vec<String>,
-                Option<String>,
-                String,
-                String,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    /// Typed async port for fan-out notification.
+    notify_fn: crate::port::AsyncPort<crate::port::SendNotificationRequest, Result<String, String>>,
     /// Connected channel names, embedded into the schema for LLM visibility.
     available_channels: Vec<String>,
 }
 
 impl SendNotificationTool {
     pub fn new(
-        notify_fn: Arc<
-            dyn Fn(
-                    Vec<String>,
-                    Option<String>,
-                    String,
-                    String,
-                )
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-                + Send
-                + Sync,
-        >,
+        notify_fn: crate::port::AsyncPort<crate::port::SendNotificationRequest, Result<String, String>>,
         available_channels: Vec<String>,
     ) -> Self {
         Self {
@@ -2286,27 +2172,16 @@ impl Tool for SendNotificationTool {
             .unwrap_or("info")
             .to_string();
 
-        (self.notify_fn)(channels, target, message, priority).await
+        (self.notify_fn)(crate::port::SendNotificationRequest {
+            channels, target, message, priority,
+        }).await
     }
 }
 
-/// Register the send_notification tool with an async fan-out callback.
-///
-/// The callback receives `(channels, target, message, priority)` and should
-/// deliver to each channel, returning a JSON summary of delivery results.
+/// Register the send_notification tool with a typed async port.
 pub fn register_notification_tool(
     registry: &mut crate::tools::ToolRegistry,
-    notify_fn: Arc<
-        dyn Fn(
-                Vec<String>,
-                Option<String>,
-                String,
-                String,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    notify_fn: crate::port::AsyncPort<crate::port::SendNotificationRequest, Result<String, String>>,
     available_channels: Vec<String>,
 ) {
     use std::sync::Arc;
@@ -2324,33 +2199,13 @@ pub fn register_notification_tool(
 /// The response lists discovered tools with their schemas so the LLM can
 /// subsequently invoke them via [`McpCallTool`].
 pub struct McpConnectTool {
-    /// `(server_name, transport_type, command_or_url, args) → Ok(discovered_tools_json)`
-    connect_fn: Arc<
-        dyn Fn(
-                String,
-                String,
-                String,
-                Vec<String>,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    /// `McpConnectRequest → Ok(discovered_tools_json)`
+    connect_fn: crate::port::AsyncPort<crate::port::McpConnectRequest, Result<String, String>>,
 }
 
 impl McpConnectTool {
     pub fn new(
-        connect_fn: Arc<
-            dyn Fn(
-                    String,
-                    String,
-                    String,
-                    Vec<String>,
-                )
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-                + Send
-                + Sync,
-        >,
+        connect_fn: crate::port::AsyncPort<crate::port::McpConnectRequest, Result<String, String>>,
     ) -> Self {
         Self { connect_fn }
     }
@@ -2426,7 +2281,9 @@ impl Tool for McpConnectTool {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
-        (self.connect_fn)(server_name, transport, command_or_url, cmd_args).await
+        (self.connect_fn)(crate::port::McpConnectRequest {
+            server_name, transport, command_or_url, args: cmd_args,
+        }).await
     }
 }
 
@@ -2528,21 +2385,11 @@ impl Tool for McpCallTool {
 
 /// Register the MCP connect + call tools with async callbacks.
 ///
-/// - `connect_fn`: `(server_name, transport, command_or_url, args) → Ok(tools_json)`
+/// - `connect_fn`: typed `McpConnectRequest` port
 /// - `call_fn`: `(server, tool_name, arguments) → Ok(result_text)`
 pub fn register_mcp_tools(
     registry: &mut crate::tools::ToolRegistry,
-    connect_fn: Arc<
-        dyn Fn(
-                String,
-                String,
-                String,
-                Vec<String>,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    connect_fn: crate::port::AsyncPort<crate::port::McpConnectRequest, Result<String, String>>,
     call_fn: Arc<
         dyn Fn(
                 String,
@@ -2790,31 +2637,13 @@ pub fn register_memory_forget_tool_async(
 ///         ←─ task result text
 /// ```
 pub struct SessionsSendTool {
-    /// Async callback: (target_agent, message, skill_id) → Result<response>
-    send_fn: Arc<
-        dyn Fn(
-                String,
-                String,
-                Option<String>,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    /// Typed async port for A2A session messaging.
+    send_fn: crate::port::AsyncPort<crate::port::SessionsSendRequest, Result<String, String>>,
 }
 
 impl SessionsSendTool {
     pub fn new(
-        send_fn: Arc<
-            dyn Fn(
-                    String,
-                    String,
-                    Option<String>,
-                )
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-                + Send
-                + Sync,
-        >,
+        send_fn: crate::port::AsyncPort<crate::port::SessionsSendRequest, Result<String, String>>,
     ) -> Self {
         Self { send_fn }
     }
@@ -2884,26 +2713,16 @@ impl Tool for SessionsSendTool {
             "SessionsSendTool executing"
         );
 
-        (self.send_fn)(target_agent, message, skill_id).await
+        (self.send_fn)(crate::port::SessionsSendRequest {
+            target_agent, message, skill_id,
+        }).await
     }
 }
 
-/// Register the A2A sessions_send tool with an async callback.
-///
-/// The callback receives `(target_agent, message, skill_id)` and returns
-/// `Ok(response_text)` from the target agent or `Err(error_message)`.
+/// Register the A2A sessions_send tool with a typed async port.
 pub fn register_sessions_send_tool(
     registry: &mut crate::tools::ToolRegistry,
-    send_fn: Arc<
-        dyn Fn(
-                String,
-                String,
-                Option<String>,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    send_fn: crate::port::AsyncPort<crate::port::SessionsSendRequest, Result<String, String>>,
 ) {
     registry.register(Arc::new(SessionsSendTool::new(send_fn)));
 }
@@ -3123,7 +2942,7 @@ const MAX_DYNAMIC_TIMEOUT_SECS: u64 = 600;
 /// Maximum tool rounds for a dynamically spawned agent.
 const MAX_DYNAMIC_TOOL_ROUNDS: usize = 20;
 /// Default timeout for dynamic spawn (seconds).
-const DEFAULT_DYNAMIC_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_DYNAMIC_TIMEOUT_SECS: u64 = 300;
 /// Default tool rounds for dynamic spawn.
 const DEFAULT_DYNAMIC_TOOL_ROUNDS: usize = 5;
 
@@ -3531,24 +3350,14 @@ pub fn register_browser_tools(
 
 /// Schedule a recurring task via the cron manager.
 ///
-/// Callback: `(name, schedule, prompt, agent_id, timeout_secs, task_id) → Result<task_id, error>`.
+/// Uses typed [`CronScheduleRequest`] instead of 6 positional args.
 pub struct CronScheduleTool {
-    schedule_fn: Arc<
-        dyn Fn(
-                String, String, String, Option<String>, u64, Option<String>,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send + Sync,
-    >,
+    schedule_fn: crate::port::AsyncPort<crate::port::CronScheduleRequest, Result<String, String>>,
 }
 
 impl CronScheduleTool {
     pub fn new(
-        schedule_fn: Arc<
-            dyn Fn(
-                    String, String, String, Option<String>, u64, Option<String>,
-                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-                + Send + Sync,
-        >,
+        schedule_fn: crate::port::AsyncPort<crate::port::CronScheduleRequest, Result<String, String>>,
     ) -> Self {
         Self { schedule_fn }
     }
@@ -3594,7 +3403,9 @@ impl crate::tools::Tool for CronScheduleTool {
         let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(300);
         let task_id = args.get("task_id").and_then(|v| v.as_str()).map(String::from);
 
-        (self.schedule_fn)(name, schedule, prompt, agent_id, timeout_secs, task_id).await
+        (self.schedule_fn)(crate::port::CronScheduleRequest {
+            name, schedule, prompt, agent_id, timeout_secs, task_id,
+        }).await
     }
 }
 
@@ -3742,12 +3553,7 @@ impl crate::tools::Tool for CronTriggerTool {
 /// Call this during state initialization after constructing the CronManager.
 pub fn register_cron_tools(
     registry: &mut crate::tools::ToolRegistry,
-    schedule_fn: Arc<
-        dyn Fn(
-                String, String, String, Option<String>, u64, Option<String>,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-            + Send + Sync,
-    >,
+    schedule_fn: crate::port::AsyncPort<crate::port::CronScheduleRequest, Result<String, String>>,
     list_fn: Arc<
         dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
             + Send + Sync,
@@ -4126,4 +3932,100 @@ pub fn register_mcp_bridge_tools(
             call_fn: Arc::clone(&call_fn),
         }));
     }
+}
+
+// ─── Ask Human Tool ──────────────────────────────────────────────────
+
+/// Tool that pauses agent execution and asks the human for a decision.
+///
+/// Instead of refusing or restating capabilities, the agent calls this tool
+/// to present a question with optional choices. The tool blocks until the
+/// human responds, then returns their answer as the tool result so the
+/// agent can proceed accordingly.
+pub struct AskHumanTool {
+    ask_fn: crate::port::AsyncPort<crate::port::AskHumanRequest, Result<String, String>>,
+}
+
+impl AskHumanTool {
+    pub fn new(
+        ask_fn: crate::port::AsyncPort<crate::port::AskHumanRequest, Result<String, String>>,
+    ) -> Self {
+        Self { ask_fn }
+    }
+}
+
+#[async_trait]
+impl Tool for AskHumanTool {
+    fn name(&self) -> &str {
+        "ask_human"
+    }
+
+    fn schema(&self) -> crate::tools::ToolSchema {
+        crate::tools::ToolSchema {
+            name: "ask_human".into(),
+            description: "Ask the human user for a decision, confirmation, or input before proceeding. \
+                Use this when you need the user's approval, preference, or choice — instead of refusing \
+                or just listing options. The tool blocks until the user responds and returns their answer."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question or decision to present to the user. Be specific about what you need from them."
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of suggested choices. If empty, the user gives a free-form answer."
+                    },
+                    "urgent": {
+                        "type": "boolean",
+                        "description": "Whether this needs immediate attention (true) or is a non-blocking preference question (false)."
+                    }
+                },
+                "required": ["question"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let question = args
+            .get("question")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'question' argument")?
+            .to_string();
+
+        let options: Vec<String> = args
+            .get("options")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let urgent = args
+            .get("urgent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let request = crate::port::AskHumanRequest {
+            question,
+            options,
+            urgent,
+        };
+
+        (self.ask_fn)(request).await
+    }
+}
+
+/// Register the `ask_human` tool with the given callback for soliciting user input.
+pub fn register_ask_human_tool(
+    registry: &mut crate::tools::ToolRegistry,
+    ask_fn: crate::port::AsyncPort<crate::port::AskHumanRequest, Result<String, String>>,
+) {
+    use std::sync::Arc;
+    registry.register(Arc::new(AskHumanTool::new(ask_fn)));
 }

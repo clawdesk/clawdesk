@@ -28,6 +28,9 @@ clawdesk-gateway = { workspace = true }
 clawdesk-plugin = { workspace = true }
 clawdesk-skills = { workspace = true }
 clawdesk-cron = { workspace = true }
+clawdesk-daemon = { workspace = true }
+clawdesk-runtime = { workspace = true }
+clawdesk-bus = { workspace = true }
 clawdesk-tui = { workspace = true, optional = true }
 async-trait = { workspace = true }
 clap = { workspace = true }
@@ -43,3 +46,9 @@ toml = { workspace = true }
 regex = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+chrono = { workspace = true }
+aes-gcm = { workspace = true }
+argon2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

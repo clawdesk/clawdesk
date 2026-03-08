@@ -5,14 +5,48 @@ fn main() {
     load_dotenv();
 
     // Initialize tracing subscriber so info!/warn!/error! logs are visible
-    // on stderr. Without this, all tracing output is silently dropped.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+    // on stderr AND written to ~/.clawdesk/logs/desktop.log for post-mortem
+    // debugging (e.g. investigating why deleted agents reappear).
+    use tracing_subscriber::prelude::*;
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    // Stderr layer — same as before.
+    let stderr_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
-        .with_thread_names(true)
+        .with_thread_names(true);
+
+    // File layer — write to ~/.clawdesk/logs/desktop.log (rotated on startup).
+    let log_dir = clawdesk_types::dirs::dot_clawdesk().join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("desktop.log");
+    // Rotate: keep the previous run's log as desktop.log.prev
+    if log_path.exists() {
+        let prev = log_dir.join("desktop.log.prev");
+        let _ = std::fs::rename(&log_path, &prev);
+    }
+    let file_layer = match std::fs::File::create(&log_path) {
+        Ok(file) => {
+            eprintln!("[clawdesk] Logging to {}", log_path.display());
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_target(true)
+                    .with_thread_names(true)
+                    .with_writer(std::sync::Mutex::new(file)),
+            )
+        }
+        Err(e) => {
+            eprintln!("[clawdesk] WARNING: could not open log file {}: {}", log_path.display(), e);
+            None
+        }
+    };
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .with(file_layer)
         .init();
 
     clawdesk_tauri_lib::run();

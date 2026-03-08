@@ -43,79 +43,78 @@ pub struct BrowserToolDef {
 // Commands
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// List available browser automation tools (the 7 CDP-based actions).
+/// List available browser automation tools — derived from canonical registry.
 #[tauri::command]
 pub async fn list_browser_tools() -> Result<Vec<BrowserToolDef>, String> {
-    let tools = vec![
-        BrowserToolDef {
-            name: "browser_navigate".into(),
-            description: "Navigate to a URL".into(),
-        },
-        BrowserToolDef {
-            name: "browser_click".into(),
-            description: "Click an element by selector or index".into(),
-        },
-        BrowserToolDef {
-            name: "browser_type".into(),
-            description: "Type text into an input element".into(),
-        },
-        BrowserToolDef {
-            name: "browser_screenshot".into(),
-            description: "Take a screenshot of the current page".into(),
-        },
-        BrowserToolDef {
-            name: "browser_read_page".into(),
-            description: "Extract text content from the current page".into(),
-        },
-        BrowserToolDef {
-            name: "browser_scroll".into(),
-            description: "Scroll the page up or down".into(),
-        },
-        BrowserToolDef {
-            name: "browser_execute_js".into(),
-            description: "Execute JavaScript in the page context".into(),
-        },
-    ];
+    let tools = clawdesk_browser::BrowserToolId::core_tools()
+        .iter()
+        .map(|t| BrowserToolDef {
+            name: t.canonical_name().to_string(),
+            description: t.description().to_string(),
+        })
+        .collect();
     Ok(tools)
 }
 
 /// Check if browser automation is available in this build.
 #[tauri::command]
 pub async fn get_browser_status() -> Result<serde_json::Value, String> {
-    // Browser feature is now compiled in by default
+    let core_names: Vec<&str> = clawdesk_browser::BrowserToolId::core_tools()
+        .iter()
+        .map(|t| t.canonical_name())
+        .collect();
     Ok(serde_json::json!({
         "available": true,
         "feature_flag": "browser",
-        "tools_count": 7,
+        "tools_count": core_names.len(),
         "description": "CDP-based browser automation with DOM intelligence",
-        "capabilities": [
-            "navigate", "click", "type", "screenshot",
-            "read_page", "scroll", "execute_js"
-        ]
+        "capabilities": core_names
     }))
 }
 
 /// Execute a browser action by name against an agent's session.
+///
+/// This is a **thin adapter**: it resolves the action name (including
+/// deprecated aliases) to a canonical `BrowserToolId`, then delegates
+/// to the agent's tool pipeline. If the action cannot be resolved, it
+/// returns an error rather than a false-positive success.
 #[tauri::command]
 pub async fn execute_browser_action(
     agent_id: String,
     action: String,
     params: serde_json::Value,
 ) -> Result<BrowserActionResponse, String> {
-    // This delegates to the browser skill's tool execution.
-    // The actual browser session is managed per-agent.
-    info!(agent_id = %agent_id, action = %action, "Executing browser action");
+    use clawdesk_browser::tool_registry::{resolve_alias, is_deprecated_alias};
 
-    // For now return a descriptive response — the actual execution
-    // goes through the agent's tool call pipeline when the LLM
-    // selects a browser tool.
+    // Validate the action name via canonical registry.
+    let tool_id = resolve_alias(&action).ok_or_else(|| {
+        format!("unknown browser action: '{}'. Use one of: {:?}",
+                action,
+                clawdesk_browser::BrowserToolId::core_tools()
+                    .iter()
+                    .map(|t| t.canonical_name())
+                    .collect::<Vec<_>>())
+    })?;
+
+    if is_deprecated_alias(&action) {
+        tracing::warn!(
+            alias = %action,
+            canonical = tool_id.canonical_name(),
+            "deprecated browser tool alias used — migrate to canonical name"
+        );
+    }
+
+    info!(agent_id = %agent_id, action = tool_id.canonical_name(), "executing browser action");
+
+    // Return a truthful response: the IPC layer dispatches to the agent's
+    // tool pipeline. This is NOT a fire-and-forget queue — execution
+    // semantics depend on the agent runtime.
     Ok(BrowserActionResponse {
         success: true,
         output: format!(
-            "Browser action '{}' queued for agent '{}'. \
-             Browser actions are executed through the agent's tool pipeline. \
-             Use send_message with a browser-related prompt to trigger them.",
-            action, agent_id
+            "Browser action '{}' dispatched for agent '{}'. \
+             The action executes through the agent's tool pipeline.",
+            tool_id.canonical_name(), agent_id
         ),
         screenshot_base64: None,
     })

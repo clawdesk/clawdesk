@@ -264,11 +264,10 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
                 let cancel_ref = cancel.clone();
                 let agent_map = Arc::new(agent_map);
 
-                let spawn_fn: Arc<
-                    dyn Fn(String, String, u64)
-                        -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-                        + Send + Sync,
-                > = Arc::new(move |agent_id: String, task: String, timeout_secs: u64| {
+                let spawn_fn: clawdesk_agents::port::AsyncPort<clawdesk_agents::port::SpawnSubAgentRequest, Result<String, String>> = Arc::new(move |req: clawdesk_agents::port::SpawnSubAgentRequest| {
+                    let agent_id = req.agent_id;
+                    let task = req.task;
+                    let timeout_secs = req.timeout_secs;
                     let provider = Arc::clone(&provider_ref);
                     let ws = sub_workspace.clone();
                     let cancel = cancel_ref.clone();

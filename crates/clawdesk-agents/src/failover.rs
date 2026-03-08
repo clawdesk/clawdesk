@@ -305,7 +305,7 @@ impl FailoverController {
                 // Skip directly to next model
                 self.advance_to_next_model(current_model_index);
             }
-            FailoverReason::ServerError | FailoverReason::NetworkError | FailoverReason::Timeout => {
+            FailoverReason::ServerError | FailoverReason::NetworkError | FailoverReason::Timeout | FailoverReason::ContentFilter => {
                 // Transient: retry same configuration, but cap consecutive retries
                 // to avoid burning all attempts on a dead endpoint.
                 self.consecutive_transient_retries += 1;

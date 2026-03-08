@@ -27,6 +27,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
+use clawdesk_types::truncate_to_char_boundary;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -285,7 +286,8 @@ pub async fn receive_webhook(
             // Fallback: use a summary of the payload
             let summary = serde_json::to_string(&payload).unwrap_or_default();
             if summary.len() > 500 {
-                format!("{}...", &summary[..500])
+                let end = truncate_to_char_boundary(&summary, 500);
+                format!("{}...", &summary[..end])
             } else {
                 summary
             }

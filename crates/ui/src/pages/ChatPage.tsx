@@ -12,6 +12,8 @@ import type {
 import { AGENT_TEMPLATES } from "../types";
 import { Icon } from "../components/Icon";
 import { VoiceInput } from "../components/VoiceInput";
+import { XTerminal } from "../components/XTerminal";
+import { PreviewPanel } from "../components/PreviewPanel";
 import { PROVIDER_MODELS } from "../onboarding/OnboardingWizard";
 import {
   ProviderConfig,
@@ -23,11 +25,40 @@ import {
 // ── Local types ───────────────────────────────────────────────
 
 interface ToolCallInfo {
+  id: string;
   name: string;
   argsPreview?: string;
   status: "running" | "done" | "error";
   result?: string;
   durationMs?: number;
+}
+
+interface TraceLogEntry {
+  ts: number;
+  type: string;
+  summary: string;
+  detail?: string;
+  level: "info" | "warn" | "error" | "debug";
+  /** Tool name if this entry relates to a specific tool */
+  toolName?: string;
+}
+
+type SidePanelTab = "trace" | "tasks" | "skills";
+
+interface ActiveTask {
+  id: string;
+  name: string;
+  startedAt: number;
+  status: "running" | "done" | "error";
+  durationMs?: number;
+  detail?: string;
+}
+
+interface SkillUsage {
+  id: string;
+  included: boolean;
+  reason?: string;
+  tokenCost?: number;
 }
 
 interface ThreadMessage {
@@ -43,15 +74,12 @@ interface ThreadMessage {
   duration?: number;
   toolCalls?: ToolCallInfo[];
   isStreaming?: boolean;
+  retryStatus?: string;
+  askHuman?: { requestId: string; question: string; options: string[]; urgent: boolean; answered: boolean; response?: string; sentToChannels?: string[]; viaChannel?: string };
 }
 
 interface Suggestion {
   icon: string;
-  text: string;
-}
-
-interface TerminalLine {
-  type: "input" | "stdout" | "stderr" | "info";
   text: string;
 }
 
@@ -107,20 +135,335 @@ function ThinkingBlock({ text, duration }: { text: string; duration?: number }) 
   );
 }
 
-function ToolBrick({ icon, name, status, result }: { icon: string; name: string; status: "running" | "done" | "error"; result?: string }) {
+function ToolBrick({ icon, name, status, result, onTraceClick }: { icon: string; name: string; status: "running" | "done" | "error"; result?: string; onTraceClick?: () => void }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <div className={`agentic-tool ${status}`}>
-      <div className="tool-main" onClick={() => result && setExpanded(!expanded)}>
+      <div className="tool-main">
         <div className={`tool-status-icon ${status}`}>
           {status === "running" ? <Icon name="loader" className="spin" /> : status === "done" ? <Icon name="check" /> : <Icon name="alert-circle" />}
         </div>
-        <span className="tool-name">{name}</span>
-        {result && <Icon name="chevron-down" className={`tool-chevron ${expanded ? "rotated" : ""}`} />}
+        <span className="tool-name" onClick={onTraceClick} style={{ cursor: onTraceClick ? "pointer" : undefined }}>{name}</span>
+        {result && (
+          <span className="tool-chevron-wrap" onClick={() => setExpanded(!expanded)} style={{ cursor: "pointer", display: "flex" }}>
+            <Icon name="chevron-down" className={`tool-chevron ${expanded ? "rotated" : ""}`} />
+          </span>
+        )}
+        {onTraceClick && (
+          <button className="tool-trace-btn" onClick={onTraceClick} title="View trace logs">
+            <Icon name="terminal" />
+          </button>
+        )}
       </div>
       {expanded && result && (
         <pre className="tool-result">{result}</pre>
       )}
+    </div>
+  );
+}
+
+/* ── Side Panel (right-side tabbed panel: Trace / Tasks / Skills) ── */
+
+function SidePanel({ tab, onTabChange, traceEntries, traceFilter, onTraceFilterChange, activeTasks, skillUsages, isSending, onCancelRun, onClose }: {
+  tab: SidePanelTab;
+  onTabChange: (t: SidePanelTab) => void;
+  traceEntries: TraceLogEntry[];
+  traceFilter: string | null;
+  onTraceFilterChange: (f: string | null) => void;
+  activeTasks: ActiveTask[];
+  skillUsages: SkillUsage[];
+  isSending: boolean;
+  onCancelRun: () => void;
+  onClose: () => void;
+}) {
+  const runningCount = activeTasks.filter((t) => t.status === "running").length;
+
+  return (
+    <div className="trace-panel">
+      <div className="trace-panel-header">
+        <div className="side-panel-tabs">
+          <button className={`side-tab ${tab === "trace" ? "active" : ""}`} onClick={() => onTabChange("trace")}>
+            <Icon name="terminal" />
+            <span>Trace</span>
+          </button>
+          <button className={`side-tab ${tab === "tasks" ? "active" : ""}`} onClick={() => onTabChange("tasks")}>
+            <Icon name="activity" />
+            <span>Tasks</span>
+            {runningCount > 0 && <span className="side-tab-badge">{runningCount}</span>}
+          </button>
+          <button className={`side-tab ${tab === "skills" ? "active" : ""}`} onClick={() => onTabChange("skills")}>
+            <Icon name="zap" />
+            <span>Skills</span>
+          </button>
+        </div>
+        <button className="trace-collapse-btn" onClick={onClose} title="Collapse panel">
+          <Icon name="chevron-right" />
+          <span>Close</span>
+        </button>
+      </div>
+
+      {tab === "trace" && (
+        <TraceTab entries={traceEntries} filter={traceFilter} onFilterChange={onTraceFilterChange} />
+      )}
+      {tab === "tasks" && (
+        <TasksTab tasks={activeTasks} isSending={isSending} onCancelRun={onCancelRun} />
+      )}
+      {tab === "skills" && (
+        <SkillsTab skillUsages={skillUsages} />
+      )}
+    </div>
+  );
+}
+
+/* ── Trace Tab ── */
+
+function TraceTab({ entries, filter, onFilterChange }: {
+  entries: TraceLogEntry[];
+  filter: string | null;
+  onFilterChange: (f: string | null) => void;
+}) {
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+
+  useEffect(() => {
+    if (autoScroll && bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [entries.length, autoScroll]);
+
+  const filtered = filter
+    ? entries.filter((e) => e.toolName === filter || e.type === filter)
+    : entries;
+
+  const toolNames = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of entries) {
+      if (e.toolName) set.add(e.toolName);
+    }
+    return [...set];
+  }, [entries]);
+
+  return (
+    <>
+      {toolNames.length > 0 && (
+        <div className="trace-panel-filters">
+          <button
+            className={`trace-chip ${filter === null ? "active" : ""}`}
+            onClick={() => onFilterChange(null)}
+          >All</button>
+          {toolNames.map((tn) => (
+            <button
+              key={tn}
+              className={`trace-chip ${filter === tn ? "active" : ""}`}
+              onClick={() => onFilterChange(filter === tn ? null : tn)}
+            >{tn}</button>
+          ))}
+        </div>
+      )}
+
+      <div className="trace-panel-body" onScroll={(e) => {
+        const el = e.currentTarget;
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        if (atBottom !== autoScroll) setAutoScroll(atBottom);
+      }}>
+        {filtered.length === 0 ? (
+          <div className="trace-empty">
+            <Icon name="terminal" />
+            <span>Waiting for events…</span>
+          </div>
+        ) : (
+          filtered.map((entry, i) => (
+            <div key={i} className={`trace-entry trace-${entry.level}`}>
+              <span className="trace-ts">{formatTraceTs(entry.ts)}</span>
+              <span className={`trace-type-badge trace-type-${entry.type.toLowerCase()}`}>{entry.type}</span>
+              <span className="trace-summary">{entry.summary}</span>
+              {entry.detail && <pre className="trace-detail">{entry.detail}</pre>}
+            </div>
+          ))
+        )}
+        <div ref={bottomRef} />
+      </div>
+    </>
+  );
+}
+
+/* ── Tasks Tab ── */
+
+function TasksTab({ tasks, isSending, onCancelRun }: {
+  tasks: ActiveTask[];
+  isSending: boolean;
+  onCancelRun: () => void;
+}) {
+  const running = tasks.filter((t) => t.status === "running");
+  const completed = tasks.filter((t) => t.status !== "running");
+
+  return (
+    <div className="tasks-tab-body">
+      {/* Global cancel */}
+      {isSending && (
+        <div className="tasks-global-bar">
+          <div className="tasks-global-status">
+            <span className="tasks-pulse" />
+            <span>Agent is running</span>
+          </div>
+          <button className="tasks-kill-btn" onClick={onCancelRun}>
+            <Icon name="square" />
+            <span>Stop All</span>
+          </button>
+        </div>
+      )}
+
+      {/* Running tasks */}
+      {running.length > 0 && (
+        <div className="tasks-section">
+          <div className="tasks-section-label">Running ({running.length})</div>
+          {running.map((t) => (
+            <div key={t.id} className="task-row task-running">
+              <Icon name="loader" className="spin" />
+              <span className="task-name">{t.name}</span>
+              <span className="task-elapsed">{formatElapsed(t.startedAt)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Completed tasks */}
+      {completed.length > 0 && (
+        <div className="tasks-section">
+          <div className="tasks-section-label">Completed ({completed.length})</div>
+          {completed.map((t) => (
+            <div key={t.id} className={`task-row task-${t.status}`}>
+              {t.status === "done" ? <Icon name="check" /> : <Icon name="alert-circle" />}
+              <span className="task-name">{t.name}</span>
+              {t.durationMs != null && <span className="task-duration">{t.durationMs}ms</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!isSending && tasks.length === 0 && (
+        <div className="trace-empty">
+          <Icon name="activity" />
+          <span>No tasks running</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatElapsed(startedAt: number): string {
+  const elapsed = Math.round((Date.now() - startedAt) / 1000);
+  if (elapsed < 60) return `${elapsed}s`;
+  return `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+}
+
+/* ── Skills Tab ── */
+
+function SkillsTab({ skillUsages }: { skillUsages: SkillUsage[] }) {
+  const included = skillUsages.filter((s) => s.included);
+  const excluded = skillUsages.filter((s) => !s.included);
+
+  return (
+    <div className="skills-tab-body">
+      {skillUsages.length === 0 ? (
+        <div className="trace-empty">
+          <Icon name="zap" />
+          <span>No skill data for this run</span>
+        </div>
+      ) : (
+        <>
+          {included.length > 0 && (
+            <div className="tasks-section">
+              <div className="tasks-section-label">Included ({included.length})</div>
+              {included.map((s) => (
+                <div key={s.id} className="skill-row skill-included">
+                  <Icon name="check" />
+                  <span className="task-name">{s.id}</span>
+                  {s.tokenCost != null && <span className="task-duration">{s.tokenCost} tok</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          {excluded.length > 0 && (
+            <div className="tasks-section">
+              <div className="tasks-section-label">Excluded ({excluded.length})</div>
+              {excluded.map((s) => (
+                <div key={s.id} className="skill-row skill-excluded">
+                  <Icon name="x" />
+                  <span className="task-name">{s.id}</span>
+                  {s.reason && <span className="skill-reason">{s.reason}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function formatTraceTs(ts: number): string {
+  const d = new Date(ts);
+  return d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }) + "." + String(d.getMilliseconds()).padStart(3, "0");
+}
+
+function AskHumanCard({ askHuman, onRespond }: {
+  askHuman: { requestId: string; question: string; options: string[]; urgent: boolean; answered: boolean; response?: string; sentToChannels?: string[]; viaChannel?: string };
+  onRespond: (requestId: string, response: string) => void;
+}) {
+  const [freeText, setFreeText] = useState("");
+  const channelBadges = askHuman.sentToChannels && askHuman.sentToChannels.length > 0 ? (
+    <div className="ask-human-channels">
+      <Icon name="globe" />
+      <span>Also sent to: {askHuman.sentToChannels.join(", ")}</span>
+    </div>
+  ) : null;
+
+  if (askHuman.answered) {
+    return (
+      <div className="ask-human-card answered">
+        <div className="ask-human-header">
+          <Icon name="check-circle" />
+          <span className="ask-human-label">Decision made{askHuman.viaChannel ? ` (via ${askHuman.viaChannel})` : ""}</span>
+        </div>
+        <div className="ask-human-question">{askHuman.question}</div>
+        <div className="ask-human-response">
+          <Icon name="user" />
+          <span>{askHuman.response}</span>
+        </div>
+        {channelBadges}
+      </div>
+    );
+  }
+  return (
+    <div className={`ask-human-card ${askHuman.urgent ? "urgent" : ""}`}>
+      <div className="ask-human-header">
+        <Icon name="help-circle" />
+        <span className="ask-human-label">{askHuman.urgent ? "Decision needed (urgent)" : "Your input needed"}</span>
+      </div>
+      <div className="ask-human-question">{askHuman.question}</div>
+      {channelBadges}
+      {askHuman.options.length > 0 && (
+        <div className="ask-human-options">
+          {askHuman.options.map((opt, i) => (
+            <button key={i} className="ask-human-option-btn" onClick={() => onRespond(askHuman.requestId, opt)}>
+              {opt}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="ask-human-freetext">
+        <input
+          type="text"
+          placeholder="Or type your answer..."
+          value={freeText}
+          onChange={(e) => setFreeText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && freeText.trim()) { onRespond(askHuman.requestId, freeText.trim()); setFreeText(""); } }}
+        />
+        <button disabled={!freeText.trim()} onClick={() => { if (freeText.trim()) { onRespond(askHuman.requestId, freeText.trim()); setFreeText(""); } }}>
+          <Icon name="send" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -424,20 +767,31 @@ export function ChatPage({
   const [lastError, setLastError] = useState<string | null>(null);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
+
+  // ── Trace panel state ──
+  const [traceEntries, setTraceEntries] = useState<TraceLogEntry[]>([]);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [traceFilter, setTraceFilter] = useState<string | null>(null);
+  const [sidePanelTab, setSidePanelTab] = useState<SidePanelTab>("trace");
+  const [activeTasks, setActiveTasks] = useState<ActiveTask[]>([]);
+  const [skillUsages, setSkillUsages] = useState<SkillUsage[]>([]);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const toolIdCounterRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
-  // Terminal state
-  const [termInput, setTermInput] = useState("");
-  const [termLines, setTermLines] = useState<TerminalLine[]>([
-    { type: "info", text: "ClawDesk Terminal \u2014 type \"help\" for built-in commands" },
-  ]);
-  const [termHistory, setTermHistory] = useState<string[]>([]);
-  const [termHistoryIdx, setTermHistoryIdx] = useState(-1);
-  const [termRunning, setTermRunning] = useState(false);
-  const [termCwd, setTermCwd] = useState<string | undefined>(undefined);
-  const termBodyRef = useRef<HTMLDivElement>(null);
-  const termInputRef = useRef<HTMLInputElement>(null);
+  const pushTrace = useCallback((type: string, summary: string, opts?: { detail?: string; level?: TraceLogEntry["level"]; toolName?: string }) => {
+    setTraceEntries((prev) => [...prev, {
+      ts: Date.now(),
+      type,
+      summary,
+      detail: opts?.detail,
+      level: opts?.level ?? "info",
+      toolName: opts?.toolName,
+    }]);
+  }, []);
+
+
 
   // Thread history state — multi-chat model
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -702,6 +1056,66 @@ export function ChatPage({
   // ── Streaming: Subscribe to Tauri agent-event for live updates ──
   // Event types match TauriAgentEvent in state.rs
 
+  // Map agent events to trace panel entries
+  const pushTraceFromEvent = useCallback((event: AgentEventPayload) => {
+    const ev = event as any;
+    switch (event.type) {
+      case "RoundStart":
+        pushTrace("Round", `Round ${ev.round} started`, { level: "info" });
+        break;
+      case "ToolStart":
+        pushTrace("ToolStart", `${ev.name}`, { detail: ev.args, level: "info", toolName: ev.name });
+        break;
+      case "ToolEnd":
+        pushTrace("ToolEnd", `${ev.name} — ${ev.success ? "ok" : "FAILED"} (${ev.duration_ms}ms)`, { level: ev.success ? "info" : "error", toolName: ev.name });
+        break;
+      case "ToolBlocked":
+        pushTrace("Blocked", `${ev.name} blocked: ${ev.reason}`, { level: "warn", toolName: ev.name });
+        break;
+      case "ToolExecutionResult":
+        pushTrace("Result", `${ev.name} [${ev.is_error ? "err" : "ok"}] (${ev.duration_ms}ms)`, { detail: ev.preview, level: ev.is_error ? "error" : "debug", toolName: ev.name });
+        break;
+      case "PromptAssembled":
+        pushTrace("Prompt", `${ev.total_tokens} tokens — ${ev.skills_included?.length || 0} skills, ${ev.memory_fragments} memory fragments (${Math.round((ev.budget_utilization || 0) * 100)}% budget)`, { level: "info" });
+        break;
+      case "ContextGuardAction":
+        pushTrace("Guard", `${ev.action} — ${ev.token_count} tokens (threshold ${Math.round(ev.threshold * 100)}%)`, { level: "warn" });
+        break;
+      case "Compaction":
+        pushTrace("Compact", `${ev.level}: ${ev.tokens_before} → ${ev.tokens_after} tokens`, { level: "info" });
+        break;
+      case "FallbackTriggered":
+        pushTrace("Fallback", `${ev.from_model} → ${ev.to_model}: ${ev.reason}`, { level: "warn" });
+        break;
+      case "RetryStatus":
+        pushTrace("Retry", `${ev.reason} (${ev.attempt}/${ev.max_attempts})`, { level: "warn" });
+        break;
+      case "SkillDecision":
+        pushTrace("Skill", `${ev.skill_id} ${ev.included ? "included" : "excluded"}: ${ev.reason} (${ev.token_cost} tokens, ${ev.budget_remaining} remaining)`, { level: "debug" });
+        break;
+      case "ThinkingChunk":
+        // Don't log every thinking chunk — too noisy
+        break;
+      case "StreamChunk":
+        // Don't log stream chunks
+        break;
+      case "Response":
+        pushTrace("Response", `Content received (finish: ${ev.finish_reason})`, { level: "info" });
+        break;
+      case "Done":
+        pushTrace("Done", `Agent finished — ${ev.total_rounds} round(s)`, { level: "info" });
+        break;
+      case "Error":
+        pushTrace("Error", ev.error, { level: "error" });
+        break;
+      case "InputRequired":
+        pushTrace("AskHuman", ev.question, { level: "warn" });
+        break;
+      default:
+        pushTrace(event.type, JSON.stringify(event).slice(0, 200), { level: "debug" });
+    }
+  }, [pushTrace]);
+
   useEffect(() => {
     const agentId = selectedAgentId ?? agent?.id;
     if (!agentId) return;
@@ -725,6 +1139,43 @@ export function ChatPage({
 
       const event = data.event;
       console.log("[STREAM] processing event:", event.type, "for msgId:", msgId);
+
+      // ── Push ALL events to trace panel ──
+      pushTraceFromEvent(event);
+
+      // ── Update activeTasks / skillUsages for side panel ──
+      if (event.type === "ToolStart") {
+        const toolName = typeof (event as any).name === "string" ? (event as any).name : "unknown";
+        setActiveTasks((prev) => [...prev, { id: `task-${Date.now()}-${toolName}`, name: toolName, startedAt: Date.now(), status: "running" }]);
+      } else if (event.type === "ToolEnd") {
+        const toolName = typeof (event as any).name === "string" ? (event as any).name : "unknown";
+        const dur = typeof (event as any).duration_ms === "number" ? (event as any).duration_ms : undefined;
+        const ok = Boolean((event as any).success);
+        setActiveTasks((prev) => {
+          const idx = prev.findIndex((t) => t.name === toolName && t.status === "running");
+          if (idx < 0) return prev;
+          const copy = [...prev];
+          copy[idx] = { ...copy[idx], status: ok ? "done" : "error", durationMs: dur };
+          return copy;
+        });
+      } else if (event.type === "SkillDecision") {
+        const ev = event as any;
+        setSkillUsages((prev) => [...prev.filter((s) => s.id !== ev.skill_id), { id: ev.skill_id, included: ev.included, reason: ev.reason, tokenCost: ev.token_cost }]);
+      } else if (event.type === "PromptAssembled") {
+        // Bulk add included/excluded skills if available
+        const ev = event as any;
+        if (Array.isArray(ev.skills_included)) {
+          setSkillUsages((prev) => {
+            const existing = new Set(prev.map((s) => s.id));
+            const newSkills = (ev.skills_included as string[]).filter((id) => !existing.has(id)).map((id) => ({ id, included: true }));
+            const excl = Array.isArray(ev.skills_excluded) ? (ev.skills_excluded as string[]).filter((id) => !existing.has(id)).map((id) => ({ id, included: false })) : [];
+            return [...prev, ...newSkills, ...excl];
+          });
+        }
+      } else if (event.type === "Done") {
+        // Mark any remaining running tasks as done
+        setActiveTasks((prev) => prev.map((t) => t.status === "running" ? { ...t, status: "done", durationMs: Date.now() - t.startedAt } : t));
+      }
 
       // ── StreamChunk: Append streamed text in real-time ──
       if (event.type === "StreamChunk") {
@@ -756,13 +1207,14 @@ export function ChatPage({
       if (event.type === "ToolStart") {
         const toolName = typeof event.name === "string" ? event.name : "unknown";
         const argsPreview = typeof event.args === "string" ? event.args : undefined;
+        const toolId = `tool-${++toolIdCounterRef.current}`;
         setMessages((prev) =>
           prev.map((m) => {
             if (m.id !== msgId) return m;
             const existing = m.toolCalls ?? [];
             return {
               ...m,
-              toolCalls: [...existing, { name: toolName, argsPreview, status: "running" as const }],
+              toolCalls: [...existing, { id: toolId, name: toolName, argsPreview, status: "running" as const }],
             };
           })
         );
@@ -805,10 +1257,33 @@ export function ChatPage({
       if (event.type === "Done") {
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === msgId ? { ...m, isStreaming: false } : m
+            m.id === msgId ? { ...m, isStreaming: false, retryStatus: undefined } : m
           )
         );
         // Don't clear streamingMsgIdRef yet — sendMessage finalization needs it
+        return;
+      }
+
+      // ── RetryStatus: Provider is retrying (content filter, etc.) ──
+      if (event.type === "RetryStatus") {
+        const attempt = typeof event.attempt === "number" ? event.attempt : 0;
+        const maxAttempts = typeof event.max_attempts === "number" ? event.max_attempts : 0;
+        const reason = typeof event.reason === "string" ? event.reason : "Retrying…";
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === msgId ? { ...m, retryStatus: `${reason} (${attempt}/${maxAttempts})` } : m
+          )
+        );
+        return;
+      }
+
+      // ── InputRequired: Agent asks the human for a decision ──
+      if (event.type === "InputRequired") {
+        const question = typeof (event as any).question === "string" ? (event as any).question : "";
+        const options: string[] = Array.isArray((event as any).options) ? (event as any).options : [];
+        const urgent = Boolean((event as any).urgent);
+        // We don't have the requestId from agent-event; the ask-human:pending event carries it.
+        // Stash the question so the pending listener can match it.
         return;
       }
 
@@ -837,9 +1312,47 @@ export function ChatPage({
       // Event subscription unavailable (browser-dev mode)
     });
 
+    // ── ask-human:pending: Tauri event carrying the request UUID ──
+    let unlistenAskHuman: (() => void) | null = null;
+    listen<{ id: string; question: string; options: string[]; urgent: boolean; sent_to_channels?: string[] }>("ask-human:pending", (ev) => {
+      if (aborted) return;
+      const { id, question, options, urgent, sent_to_channels } = ev.payload;
+      const msgId = streamingMsgIdRef.current;
+      if (!msgId) return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msgId
+            ? { ...m, askHuman: { requestId: id, question, options, urgent, answered: false, sentToChannels: sent_to_channels } }
+            : m
+        )
+      );
+    }).then((dispose) => {
+      if (aborted) { dispose(); return; }
+      unlistenAskHuman = dispose;
+    }).catch(() => {});
+
+    // ── ask-human:responded: a channel inbound resolved the ask-human ──
+    let unlistenAskHumanResponded: (() => void) | null = null;
+    listen<{ id: string; response: string; via_channel: string }>("ask-human:responded", (ev) => {
+      if (aborted) return;
+      const { id, response, via_channel } = ev.payload;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.askHuman?.requestId === id
+            ? { ...m, askHuman: { ...m.askHuman, answered: true, response, viaChannel: via_channel } }
+            : m
+        )
+      );
+    }).then((dispose) => {
+      if (aborted) { dispose(); return; }
+      unlistenAskHumanResponded = dispose;
+    }).catch(() => {});
+
     return () => {
       aborted = true;
       if (unlisten) unlisten();
+      if (unlistenAskHuman) unlistenAskHuman();
+      if (unlistenAskHumanResponded) unlistenAskHumanResponded();
     };
   }, [selectedAgentId, agent?.id]);
 
@@ -888,6 +1401,23 @@ export function ChatPage({
     pushToast("Stopped.");
   }, [isSending, pushToast]);
 
+  // ── Human-in-the-loop: respond to ask_human requests ──
+  const handleAskHumanRespond = useCallback(async (requestId: string, response: string) => {
+    try {
+      await api.respondToAskHuman(requestId, response);
+    } catch (err) {
+      console.error("[ASK_HUMAN] respond failed:", err);
+    }
+    // Mark the card as answered in UI
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.askHuman?.requestId === requestId
+          ? { ...m, askHuman: { ...m.askHuman, answered: true, response } }
+          : m
+      )
+    );
+  }, []);
+
   // Select a chat from the sidebar
   const selectSession = useCallback((session: SessionSummary) => {
     // Switch to the agent if different
@@ -930,6 +1460,12 @@ export function ChatPage({
     }
 
     console.log("[SEND] starting sendMessage, agentId:", agentId, "content:", content.slice(0, 50));
+
+    // Clear trace entries for the new message
+    setTraceEntries([]);
+    setActiveTasks([]);
+    setSkillUsages([]);
+    toolIdCounterRef.current = 0;
 
     // Generation counter + AbortController for scoped cancellation
     const gen = ++sendGenRef.current;
@@ -997,7 +1533,7 @@ export function ChatPage({
       // Add a 120-second timeout to prevent hanging indefinitely
       const invokePromise = api.sendMessage(agentId, content, userModel, currentChatId ?? undefined, userProvider, userApiKey, userBaseUrl);
       const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Request timed out after 300 seconds. Check your API key and model configuration.")), 300000)
+        setTimeout(() => reject(new Error("Request timed out after 120 seconds. The provider may be slow or unresponsive.")), 120_000)
       );
       const response = await Promise.race([invokePromise, timeoutPromise]);
 
@@ -1030,7 +1566,7 @@ export function ChatPage({
         if (hasPlaceholder) {
           return prev.map((m) => {
             if (m.id !== streamMsgId) return m;
-            const finalText = m.text || response.message.content;
+            const finalText = m.text || response.message.content || "(No response received — the provider may have filtered the content. Try rephrasing your message.)";
             return {
               ...m,
               id: response.message.id,
@@ -1040,6 +1576,7 @@ export function ChatPage({
               duration: response.message.metadata?.duration_ms,
               skills: response.message.metadata?.skills_activated ?? m.skills,
               isStreaming: false,
+              retryStatus: undefined,
             };
           });
         }
@@ -1147,139 +1684,11 @@ export function ChatPage({
     }
   }, [selectedAgentId, agent?.id, agent?.name, pushToast, effectiveModel, effectiveProvider, effectiveApiKey, effectiveBaseUrl]);
 
-  // ── Terminal command execution ──────────────────────────────
-  const runTerminalCommand = useCallback(async (cmd: string) => {
-    if (!cmd.trim()) return;
-
-    // Record input line
-    setTermLines((prev) => [...prev, { type: "input", text: cmd }]);
-    setTermHistory((prev) => [...prev, cmd]);
-    setTermHistoryIdx(-1);
-    setTermInput("");
-
-    const trimmed = cmd.trim();
-
-    // Handle built-in commands that work without Tauri backend
-    if (trimmed === "clear") {
-      setTermLines([]);
-      return;
-    }
-    if (trimmed === "help") {
-      setTermLines((prev) => [
-        ...prev,
-        { type: "info", text: "Built-in commands:" },
-        { type: "stdout", text: "  help       Show this help message" },
-        { type: "stdout", text: "  clear      Clear the terminal" },
-        { type: "stdout", text: "  whoami     Current user" },
-        { type: "stdout", text: "  date       Current date and time" },
-        { type: "stdout", text: "  pwd        Print working directory" },
-        { type: "stdout", text: "  echo       Print text" },
-        { type: "stdout", text: "  cd <dir>   Change directory" },
-        { type: "info", text: "All other commands are sent to the system shell (requires Tauri runtime)." },
-      ]);
-      return;
-    }
-    if (trimmed === "whoami") {
-      setTermLines((prev) => [...prev, { type: "stdout", text: "clawdesk" }]);
-      return;
-    }
-    if (trimmed === "date") {
-      setTermLines((prev) => [...prev, { type: "stdout", text: new Date().toString() }]);
-      return;
-    }
-    if (trimmed === "pwd") {
-      setTermLines((prev) => [...prev, { type: "stdout", text: termCwd || "~" }]);
-      return;
-    }
-    if (trimmed.startsWith("echo ")) {
-      setTermLines((prev) => [...prev, { type: "stdout", text: trimmed.slice(5) }]);
-      return;
-    }
-
-    // Handle "cd" to update cwd
-    if (cmd.trim().startsWith("cd ")) {
-      const target = cmd.trim().slice(3).trim();
-      // Use a subshell to resolve the path, then store it
-      setTermRunning(true);
-      try {
-        const res = await api.runShellCommand(
-          `cd ${target} && pwd`,
-          termCwd,
-        );
-        if (res.success && res.stdout.trim()) {
-          const newCwd = res.stdout.trim();
-          setTermCwd(newCwd);
-          setTermLines((prev) => [
-            ...prev,
-            { type: "info", text: `cd ${newCwd}` },
-          ]);
-        } else {
-          setTermLines((prev) => [
-            ...prev,
-            { type: "stderr", text: res.stderr || `cd: no such directory: ${target}` },
-          ]);
-        }
-      } catch (err: any) {
-        const msg = err?.message || err?.toString() || "Unknown error";
-        setTermLines((prev) => [
-          ...prev,
-          { type: "stderr", text: msg },
-        ]);
-      } finally {
-        setTermRunning(false);
-      }
-      return;
-    }
-
-    setTermRunning(true);
-    try {
-      const res = await api.runShellCommand(cmd, termCwd);
-      if (res.stdout) {
-        setTermLines((prev) => [
-          ...prev,
-          { type: "stdout", text: res.stdout },
-        ]);
-      }
-      if (res.stderr) {
-        setTermLines((prev) => [
-          ...prev,
-          { type: "stderr", text: res.stderr },
-        ]);
-      }
-      if (!res.success && !res.stderr) {
-        setTermLines((prev) => [
-          ...prev,
-          { type: "stderr", text: `Process exited with code ${res.exit_code}` },
-        ]);
-      }
-    } catch (err: any) {
-      const msg = err?.message || err?.toString() || "Unknown error";
-      setTermLines((prev) => [
-        ...prev,
-        { type: "stderr", text: msg },
-      ]);
-    } finally {
-      setTermRunning(false);
-    }
-  }, [termCwd]);
-
-  // Auto-scroll terminal
-  useEffect(() => {
-    termBodyRef.current?.scrollTo(0, termBodyRef.current.scrollHeight);
-  }, [termLines]);
-
-  // Focus terminal input when panel opens
-  useEffect(() => {
-    if (showTerminal) {
-      setTimeout(() => termInputRef.current?.focus(), 50);
-    }
-  }, [showTerminal]);
-
   return (
     <div className="view chat-page">
 
       {/* Body: optional sidebar + main chat */}
-      <div className={`chat-page-body ${showSidebar ? "with-sidebar" : ""}`}>
+      <div className={`chat-page-body ${showSidebar ? "with-sidebar" : ""} ${traceOpen ? "with-trace" : ""} ${previewOpen ? "with-preview" : ""}`}>
         {/* Thread history sidebar */}
         {showSidebar && (
           <div className="chat-thread-sidebar">
@@ -1580,19 +1989,34 @@ export function ChatPage({
                       <div className="chat-msg-tools">
                         {m.toolCalls.map((tc, i) => (
                           <ToolBrick
-                            key={`${tc.name}-${i}`}
+                            key={tc.id || `${tc.name}-${i}`}
                             icon={tc.status === "running" ? "loader" : tc.status === "done" ? "check" : "alert-circle"}
                             name={tc.name}
                             status={tc.status}
                             result={tc.result}
+                            onTraceClick={() => {
+                              setTraceFilter(tc.name);
+                              setSidePanelTab("trace");
+                              setTraceOpen(true);
+                            }}
                           />
                         ))}
                       </div>
                     )}
 
+                    {m.role === "assistant" && m.askHuman && (
+                      <AskHumanCard askHuman={m.askHuman} onRespond={handleAskHumanRespond} />
+                    )}
+
                     <div className="chat-msg-content">
                       {m.role === "assistant" && m.thinkingText && (
                         <ThinkingBlock text={m.thinkingText} />
+                      )}
+                      {m.role === "assistant" && m.retryStatus && !m.text && (
+                        <div className="chat-retry-status">
+                          <Icon name="loader" className="spin" />
+                          <span>{m.retryStatus}</span>
+                        </div>
                       )}
                       <MarkdownContent content={m.text} isStreaming={m.isStreaming} />
                     </div>
@@ -1698,6 +2122,22 @@ export function ChatPage({
                     <div className="badge-safe" title="Safe Mode is on — your data stays on your device and is never sent to external servers without your permission.">
                       <Icon name="shield" /> Safe Mode
                     </div>
+                    <button
+                      className={`btn ghost ${traceOpen ? "active" : ""}`}
+                      onClick={() => setTraceOpen(!traceOpen)}
+                      title="Toggle Trace Panel"
+                      style={{ padding: "4px 8px", color: traceOpen ? "var(--accent)" : "var(--text-soft)" }}
+                    >
+                      <Icon name="activity" />
+                    </button>
+                    <button
+                      className={`btn ghost ${previewOpen ? "active" : ""}`}
+                      onClick={() => setPreviewOpen(!previewOpen)}
+                      title="Toggle Preview Panel"
+                      style={{ padding: "4px 8px", color: previewOpen ? "var(--accent)" : "var(--text-soft)" }}
+                    >
+                      <Icon name="eye" />
+                    </button>
                   </div>
                   <VoiceInput
                     onTranscription={(text) => {
@@ -1745,90 +2185,35 @@ export function ChatPage({
             </div>
           </div>
         </div>{/* end chat-page-main */}
+
+        {/* Side panel (right side - Trace / Tasks / Skills tabs) */}
+        {traceOpen && (
+          <SidePanel
+            tab={sidePanelTab}
+            onTabChange={setSidePanelTab}
+            traceEntries={traceEntries}
+            traceFilter={traceFilter}
+            onTraceFilterChange={setTraceFilter}
+            activeTasks={activeTasks}
+            skillUsages={skillUsages}
+            isSending={isSending}
+            onCancelRun={async () => {
+              await api.cancelActiveRun(activeChatIdRef.current ?? undefined);
+            }}
+            onClose={() => setTraceOpen(false)}
+          />
+        )}
+
+        {/* Preview panel (live web app preview) */}
+        {previewOpen && (
+          <div style={{ width: 480, minWidth: 360, flexShrink: 0, height: "100%" }}>
+            <PreviewPanel onClose={() => setPreviewOpen(false)} />
+          </div>
+        )}
       </div>{/* end chat-page-body */}
 
       {/* Terminal panel */}
-      {showTerminal && (
-        <div className="chat-terminal">
-          <div className="chat-terminal-header">
-            <span>Terminal <span className="chat-terminal-shell">{termCwd || "/bin/zsh"}</span></span>
-            <div style={{ display: "flex", gap: 4 }}>
-              <button
-                className="btn ghost"
-                onClick={() => setTermLines([])}
-                title="Clear"
-                style={{ color: "#d4d4d4", fontSize: 11 }}
-              >
-                Clear
-              </button>
-              <button className="btn ghost" onClick={() => setShowTerminal(false)}>
-                <Icon name="close" />
-              </button>
-            </div>
-          </div>
-          <div className="chat-terminal-body" ref={termBodyRef}>
-            {termLines.map((line, i) => (
-              <div key={i} className={`chat-terminal-line chat-terminal-line-${line.type}`}>
-                {line.type === "input" ? (
-                  <><span className="chat-terminal-prompt">$</span> {line.text}</>
-                ) : (
-                  <span style={{ whiteSpace: "pre-wrap" }}>{line.text}</span>
-                )}
-              </div>
-            ))}
-            <div className="chat-terminal-input-row">
-              <span className="chat-terminal-prompt">$</span>
-              <input
-                ref={termInputRef}
-                className="chat-terminal-input"
-                type="text"
-                value={termInput}
-                onChange={(e) => setTermInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !termRunning) {
-                    runTerminalCommand(termInput);
-                  } else if (e.key === "ArrowUp") {
-                    e.preventDefault();
-                    if (termHistory.length > 0) {
-                      const newIdx = termHistoryIdx < 0
-                        ? termHistory.length - 1
-                        : Math.max(0, termHistoryIdx - 1);
-                      setTermHistoryIdx(newIdx);
-                      setTermInput(termHistory[newIdx]);
-                    }
-                  } else if (e.key === "ArrowDown") {
-                    e.preventDefault();
-                    if (termHistoryIdx >= 0) {
-                      const newIdx = termHistoryIdx + 1;
-                      if (newIdx >= termHistory.length) {
-                        setTermHistoryIdx(-1);
-                        setTermInput("");
-                      } else {
-                        setTermHistoryIdx(newIdx);
-                        setTermInput(termHistory[newIdx]);
-                      }
-                    }
-                  } else if (e.key === "c" && e.ctrlKey) {
-                    setTermInput("");
-                    setTermLines((prev) => [
-                      ...prev,
-                      { type: "info", text: "^C" },
-                    ]);
-                  } else if (e.key === "l" && e.ctrlKey) {
-                    e.preventDefault();
-                    setTermLines([]);
-                  }
-                }}
-                disabled={termRunning}
-                placeholder={termRunning ? "Running..." : "Enter command..."}
-                autoComplete="off"
-                spellCheck={false}
-              />
-              {termRunning && <span className="chat-terminal-spinner">⏳</span>}
-            </div>
-          </div>
-        </div>
-      )}
+      <XTerminal visible={showTerminal} onClose={() => setShowTerminal(false)} />
     </div>
   );
 }

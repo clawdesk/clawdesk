@@ -31,6 +31,41 @@ pub enum BrowserAction {
     Forward,
     /// Reload.
     Reload,
+    // ── Extended actions (Phase 3) ───────────────────────────
+    /// Hover over an element.
+    Hover { selector: String },
+    /// Drag an element and drop on another.
+    DragDrop {
+        source_selector: String,
+        target_selector: String,
+    },
+    /// Select an option from a <select> dropdown.
+    SelectOption {
+        selector: String,
+        value: String,
+    },
+    /// Fill a form field using CDP Input.dispatchKeyEvent (character-by-character).
+    Fill {
+        selector: String,
+        text: String,
+    },
+    /// Press a keyboard key (e.g., "Enter", "Tab", "Escape", "ArrowDown").
+    PressKey { key: String },
+    /// Resize the browser viewport.
+    ResizeViewport { width: u32, height: u32 },
+    /// Wait for navigation to complete.
+    WaitForNavigation { timeout_ms: u64 },
+    /// Wait for network to be idle (no requests for N ms).
+    WaitForNetworkIdle { idle_ms: u64, timeout_ms: u64 },
+    /// Focus an element without clicking.
+    Focus { selector: String },
+    /// Execute JavaScript with a safety timeout — kills execution if it exceeds timeout_ms.
+    SafeEval {
+        expression: String,
+        timeout_ms: u64,
+    },
+    /// Export page as PDF (headless only).
+    ExportPdf,
 }
 
 /// Screenshot format.
@@ -164,6 +199,53 @@ pub fn action_tool_definitions() -> Vec<ToolDef> {
             description: "Execute JavaScript on the page",
             parameters: vec![("expression", "string", "JavaScript to evaluate", true)],
         },
+        ToolDef {
+            name: "browser_hover",
+            description: "Hover over an element to trigger tooltips or dropdown menus",
+            parameters: vec![("selector", "string", "CSS selector for the element", true)],
+        },
+        ToolDef {
+            name: "browser_drag_drop",
+            description: "Drag an element and drop it on another",
+            parameters: vec![
+                ("source", "string", "CSS selector for the drag source", true),
+                ("target", "string", "CSS selector for the drop target", true),
+            ],
+        },
+        ToolDef {
+            name: "browser_select",
+            description: "Select an option from a <select> dropdown",
+            parameters: vec![
+                ("selector", "string", "CSS selector for the select element", true),
+                ("value", "string", "Option value to select", true),
+            ],
+        },
+        ToolDef {
+            name: "browser_fill",
+            description: "Fill a form field character by character (more realistic than type)",
+            parameters: vec![
+                ("selector", "string", "CSS selector for the input", true),
+                ("text", "string", "Text to fill", true),
+            ],
+        },
+        ToolDef {
+            name: "browser_press_key",
+            description: "Press a keyboard key (Enter, Tab, Escape, ArrowDown, etc.)",
+            parameters: vec![("key", "string", "Key name to press", true)],
+        },
+        ToolDef {
+            name: "browser_resize",
+            description: "Resize the browser viewport",
+            parameters: vec![
+                ("width", "integer", "Viewport width in pixels", true),
+                ("height", "integer", "Viewport height in pixels", true),
+            ],
+        },
+        ToolDef {
+            name: "browser_export_pdf",
+            description: "Export the current page as a PDF (headless mode only)",
+            parameters: vec![],
+        },
     ]
 }
 
@@ -175,35 +257,104 @@ pub struct ToolDef {
 }
 
 /// Parse a tool call into a browser action.
+///
+/// Supports both canonical names and deprecated aliases via `resolve_alias`.
+/// For element-targeting tools (click, type), accepts `index` (preferred),
+/// `selector` (fallback), or both — promoting `ElementTarget` through
+/// the parsing layer.
 pub fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<BrowserAction> {
-    match name {
-        "browser_navigate" => {
+    use crate::tool_registry::{BrowserToolId, resolve_alias};
+
+    let tool_id = resolve_alias(name)?;
+
+    match tool_id {
+        BrowserToolId::Navigate => {
             let url = args["url"].as_str()?.to_string();
             Some(BrowserAction::Navigate { url })
         }
-        "browser_click" => {
-            let selector = args["selector"].as_str()?.to_string();
+        BrowserToolId::Click => {
+            // Prefer index-based targeting, fall back to selector.
+            let selector = resolve_element_selector(args)?;
             Some(BrowserAction::Click { selector })
         }
-        "browser_type" => {
-            let selector = args["selector"].as_str()?.to_string();
+        BrowserToolId::Type => {
+            let selector = resolve_element_selector(args)?;
             let text = args["text"].as_str()?.to_string();
             Some(BrowserAction::Type { selector, text })
         }
-        "browser_screenshot" => Some(BrowserAction::Screenshot {
+        BrowserToolId::Screenshot => Some(BrowserAction::Screenshot {
             format: ScreenshotFormat::Png,
         }),
-        "browser_extract_text" => {
+        BrowserToolId::ExtractText => {
             let selector = args.get("selector").and_then(|v| v.as_str()).map(String::from);
             Some(BrowserAction::ExtractText { selector })
         }
-        "browser_get_title" => Some(BrowserAction::GetTitle),
-        "browser_eval_js" => {
+        BrowserToolId::GetTitle => Some(BrowserAction::GetTitle),
+        BrowserToolId::EvalJs => {
             let expression = args["expression"].as_str()?.to_string();
             Some(BrowserAction::EvalJs { expression })
         }
-        _ => None,
+        BrowserToolId::Hover => {
+            let selector = resolve_element_selector(args)?;
+            Some(BrowserAction::Hover { selector })
+        }
+        BrowserToolId::DragDrop => {
+            let source = args["source"].as_str()?.to_string();
+            let target = args["target"].as_str()?.to_string();
+            Some(BrowserAction::DragDrop {
+                source_selector: source,
+                target_selector: target,
+            })
+        }
+        BrowserToolId::Select => {
+            let selector = resolve_element_selector(args)?;
+            let value = args["value"].as_str()?.to_string();
+            Some(BrowserAction::SelectOption { selector, value })
+        }
+        BrowserToolId::Fill => {
+            let selector = resolve_element_selector(args)?;
+            let text = args["text"].as_str()?.to_string();
+            Some(BrowserAction::Fill { selector, text })
+        }
+        BrowserToolId::PressKey => {
+            let key = args["key"].as_str()?.to_string();
+            Some(BrowserAction::PressKey { key })
+        }
+        BrowserToolId::Resize => {
+            let width = args["width"].as_u64()? as u32;
+            let height = args["height"].as_u64()? as u32;
+            Some(BrowserAction::ResizeViewport { width, height })
+        }
+        BrowserToolId::ExportPdf => Some(BrowserAction::ExportPdf),
+        BrowserToolId::Scroll => {
+            let dir = args.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
+            let direction = match dir {
+                "up" => ScrollDirection::Up,
+                "left" => ScrollDirection::Left,
+                "right" => ScrollDirection::Right,
+                _ => ScrollDirection::Down,
+            };
+            let amount = args.get("amount").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
+            Some(BrowserAction::Scroll { direction, amount })
+        }
+        // Tools that don't map to BrowserAction directly (handled by agent tools).
+        BrowserToolId::Observe | BrowserToolId::Close |
+        BrowserToolId::TabList | BrowserToolId::TabOpen | BrowserToolId::TabClose |
+        BrowserToolId::Snapshot | BrowserToolId::Upload | BrowserToolId::Console => None,
     }
+}
+
+/// Resolve an element target from tool arguments.
+///
+/// Prefers `index` (DOM intelligence data-ci attribute) over `selector`
+/// (CSS selector), converting index to `[data-ci="N"]` selector.
+fn resolve_element_selector(args: &serde_json::Value) -> Option<String> {
+    // Prefer index-based targeting (DOM intelligence).
+    if let Some(index) = args.get("index").and_then(|v| v.as_u64()) {
+        return Some(format!("[data-ci=\"{}\"]", index));
+    }
+    // Fall back to CSS selector.
+    args.get("selector").and_then(|v| v.as_str()).map(String::from)
 }
 
 // ─── Execution Bridge ────────────────────────────────────────────────────────
@@ -405,6 +556,336 @@ pub async fn execute_action(
                 Err(e) => ActionResult::err("reload", e),
             }
         }
+
+        // ── Extended Actions ─────────────────────────────────
+
+        BrowserAction::Hover { selector } => {
+            let js = format!(
+                r#"(() => {{
+                    const el = document.querySelector('{}');
+                    if (!el) return {{ success: false, error: 'element not found' }};
+                    el.scrollIntoView({{ block: 'center' }});
+                    el.dispatchEvent(new MouseEvent('mouseover', {{ bubbles: true }}));
+                    el.dispatchEvent(new MouseEvent('mouseenter', {{ bubbles: true }}));
+                    return {{ success: true }};
+                }})()"#,
+                selector.replace('\'', "\\'")
+            );
+            match session.eval(&js).await {
+                Ok(_) => ActionResult::ok(
+                    "hover",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("hover", e),
+            }
+        }
+
+        BrowserAction::DragDrop {
+            source_selector,
+            target_selector,
+        } => {
+            let js = format!(
+                r#"(() => {{
+                    const src = document.querySelector('{}');
+                    const tgt = document.querySelector('{}');
+                    if (!src) return {{ success: false, error: 'source not found' }};
+                    if (!tgt) return {{ success: false, error: 'target not found' }};
+                    const dt = new DataTransfer();
+                    src.dispatchEvent(new DragEvent('dragstart', {{ bubbles: true, dataTransfer: dt }}));
+                    tgt.dispatchEvent(new DragEvent('dragover', {{ bubbles: true, dataTransfer: dt }}));
+                    tgt.dispatchEvent(new DragEvent('drop', {{ bubbles: true, dataTransfer: dt }}));
+                    src.dispatchEvent(new DragEvent('dragend', {{ bubbles: true, dataTransfer: dt }}));
+                    return {{ success: true }};
+                }})()"#,
+                source_selector.replace('\'', "\\'"),
+                target_selector.replace('\'', "\\'")
+            );
+            match session.eval(&js).await {
+                Ok(_) => ActionResult::ok(
+                    "drag_drop",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("drag_drop", e),
+            }
+        }
+
+        BrowserAction::SelectOption { selector, value } => {
+            let js = format!(
+                r#"(() => {{
+                    const el = document.querySelector('{}');
+                    if (!el || el.tagName !== 'SELECT') return {{ success: false, error: 'select element not found' }};
+                    el.value = '{}';
+                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    const opt = el.options[el.selectedIndex];
+                    return {{ success: true, text: opt ? opt.text : el.value }};
+                }})()"#,
+                selector.replace('\'', "\\'"),
+                value.replace('\'', "\\'")
+            );
+            match session.eval(&js).await {
+                Ok(val) => {
+                    let text = val
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or(&value)
+                        .to_string();
+                    ActionResult::ok(
+                        "select_option",
+                        ActionData::Text(text),
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Err(e) => ActionResult::err("select_option", e),
+            }
+        }
+
+        BrowserAction::Fill { selector, text } => {
+            // Use CDP Input.dispatchKeyEvent for character-by-character typing
+            // (more realistic than setting .value directly)
+            let focus_js = format!(
+                r#"(() => {{
+                    const el = document.querySelector('{}');
+                    if (!el) return {{ success: false }};
+                    el.focus();
+                    el.value = '';
+                    return {{ success: true }};
+                }})()"#,
+                selector.replace('\'', "\\'")
+            );
+            match session.eval(&focus_js).await {
+                Ok(_) => {
+                    // Type each character using CDP Input domain
+                    for ch in text.chars() {
+                        let key_cmd = session.build_command(
+                            "Input.dispatchKeyEvent",
+                            serde_json::json!({
+                                "type": "keyDown",
+                                "text": ch.to_string(),
+                                "key": ch.to_string(),
+                            }),
+                        );
+                        if let Err(e) = session.send(key_cmd).await {
+                            return ActionResult::err("fill", e);
+                        }
+                        let key_up = session.build_command(
+                            "Input.dispatchKeyEvent",
+                            serde_json::json!({
+                                "type": "keyUp",
+                                "key": ch.to_string(),
+                            }),
+                        );
+                        let _ = session.send(key_up).await;
+                    }
+                    ActionResult::ok(
+                        "fill",
+                        ActionData::Text(text),
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Err(e) => ActionResult::err("fill", e),
+            }
+        }
+
+        BrowserAction::PressKey { key } => {
+            let cmd = session.build_command(
+                "Input.dispatchKeyEvent",
+                serde_json::json!({
+                    "type": "keyDown",
+                    "key": key,
+                }),
+            );
+            match session.send(cmd).await {
+                Ok(_) => {
+                    let up = session.build_command(
+                        "Input.dispatchKeyEvent",
+                        serde_json::json!({
+                            "type": "keyUp",
+                            "key": key,
+                        }),
+                    );
+                    let _ = session.send(up).await;
+                    ActionResult::ok(
+                        "press_key",
+                        ActionData::Text(key),
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Err(e) => ActionResult::err("press_key", e),
+            }
+        }
+
+        BrowserAction::ResizeViewport { width, height } => {
+            let cmd = session.build_command(
+                "Emulation.setDeviceMetricsOverride",
+                serde_json::json!({
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": 1,
+                    "mobile": false,
+                }),
+            );
+            match session.send(cmd).await {
+                Ok(_) => ActionResult::ok(
+                    "resize_viewport",
+                    ActionData::Text(format!("{}x{}", width, height)),
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("resize_viewport", e),
+            }
+        }
+
+        BrowserAction::WaitForNavigation { timeout_ms } => {
+            let js = format!(
+                r#"new Promise((resolve) => {{
+                    let resolved = false;
+                    const cb = () => {{ if (!resolved) {{ resolved = true; resolve(true); }} }};
+                    window.addEventListener('load', cb, {{ once: true }});
+                    setTimeout(() => {{ if (!resolved) {{ resolved = true; resolve(false); }} }}, {});
+                }})"#,
+                timeout_ms
+            );
+            match session.eval(&js).await {
+                Ok(_) => ActionResult::ok(
+                    "wait_for_navigation",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("wait_for_navigation", e),
+            }
+        }
+
+        BrowserAction::WaitForNetworkIdle {
+            idle_ms,
+            timeout_ms,
+        } => {
+            let js = format!(
+                r#"new Promise((resolve) => {{
+                    let pending = 0;
+                    let timer = null;
+                    const check = () => {{
+                        if (pending <= 0) {{
+                            timer = setTimeout(() => resolve(true), {});
+                        }}
+                    }};
+                    const orig_fetch = window.fetch;
+                    window.fetch = (...args) => {{
+                        pending++;
+                        return orig_fetch(...args).finally(() => {{ pending--; check(); }});
+                    }};
+                    check();
+                    setTimeout(() => resolve(false), {});
+                }})"#,
+                idle_ms, timeout_ms
+            );
+            match session.eval(&js).await {
+                Ok(_) => ActionResult::ok(
+                    "wait_for_network_idle",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("wait_for_network_idle", e),
+            }
+        }
+
+        BrowserAction::Focus { selector } => {
+            let js = format!(
+                r#"(() => {{
+                    const el = document.querySelector('{}');
+                    if (!el) return {{ success: false, error: 'element not found' }};
+                    el.scrollIntoView({{ block: 'center' }});
+                    el.focus();
+                    return {{ success: true }};
+                }})()"#,
+                selector.replace('\'', "\\'")
+            );
+            match session.eval(&js).await {
+                Ok(_) => ActionResult::ok(
+                    "focus",
+                    ActionData::None,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => ActionResult::err("focus", e),
+            }
+        }
+
+        BrowserAction::SafeEval {
+            expression,
+            timeout_ms,
+        } => {
+            // Use Runtime.evaluate with explicit timeout. If it exceeds,
+            // call Runtime.terminateExecution to kill the script.
+            let cmd = session.build_command(
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": expression,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                    "timeout": timeout_ms,
+                }),
+            );
+
+            let timeout = std::time::Duration::from_millis(timeout_ms + 1000);
+            match tokio::time::timeout(timeout, session.send(cmd)).await {
+                Ok(Ok(resp)) => {
+                    let val = resp.result.unwrap_or(serde_json::Value::Null);
+                    ActionResult::ok(
+                        "safe_eval",
+                        ActionData::JsResult(val),
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Ok(Err(e)) => {
+                    // Try to terminate runaway execution
+                    let kill = session.build_command(
+                        "Runtime.terminateExecution",
+                        serde_json::json!({}),
+                    );
+                    let _ = session.send(kill).await;
+                    ActionResult::err("safe_eval", e)
+                }
+                Err(_) => {
+                    // Timed out — terminate execution
+                    let kill = session.build_command(
+                        "Runtime.terminateExecution",
+                        serde_json::json!({}),
+                    );
+                    let _ = session.send(kill).await;
+                    ActionResult::err(
+                        "safe_eval",
+                        format!("execution timed out after {}ms", timeout_ms),
+                    )
+                }
+            }
+        }
+
+        BrowserAction::ExportPdf => {
+            let cmd = session.build_command(
+                "Page.printToPDF",
+                serde_json::json!({
+                    "printBackground": true,
+                    "preferCSSPageSize": true,
+                }),
+            );
+            match session.send(cmd).await {
+                Ok(resp) => {
+                    let data = resp
+                        .result
+                        .as_ref()
+                        .and_then(|r| r.get("data"))
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    ActionResult::ok(
+                        "export_pdf",
+                        ActionData::Text(data),
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Err(e) => ActionResult::err("export_pdf", e),
+            }
+        }
     }
 }
 
@@ -480,7 +961,7 @@ mod tests {
     #[test]
     fn tool_definitions_count() {
         let defs = action_tool_definitions();
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 14);
     }
 
     #[test]

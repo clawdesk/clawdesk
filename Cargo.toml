@@ -36,6 +36,13 @@ members = [
     "crates/clawdesk-extensions",
     "crates/clawdesk-migrate",
     "crates/clawdesk-simd",
+    "crates/clawdesk-canvas",
+    "crates/clawdesk-planner",
+    "crates/clawdesk-consensus",
+    "crates/clawdesk-daemon",
+    "crates/clawdesk-test",
+    "crates/clawdesk-local-models",
+    "crates/clawdesk-rag",
 ]
 resolver = "2"
 
@@ -112,6 +119,13 @@ clawdesk-mcp = { path = "crates/clawdesk-mcp" }
 clawdesk-extensions = { path = "crates/clawdesk-extensions" }
 clawdesk-migrate = { path = "crates/clawdesk-migrate" }
 clawdesk-simd = { path = "crates/clawdesk-simd" }
+clawdesk-canvas = { path = "crates/clawdesk-canvas" }
+clawdesk-planner = { path = "crates/clawdesk-planner" }
+clawdesk-consensus = { path = "crates/clawdesk-consensus" }
+clawdesk-daemon = { path = "crates/clawdesk-daemon" }
+clawdesk-test = { path = "crates/clawdesk-test" }
+clawdesk-local-models = { path = "crates/clawdesk-local-models" }
+clawdesk-rag = { path = "crates/clawdesk-rag" }
 
 # --- SochDB (embedded ACID vector database) ---
 sochdb = { version = "0.5.0", features = ["embedded"] }
