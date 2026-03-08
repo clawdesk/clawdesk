@@ -61,7 +61,7 @@ struct OpenClawAgent {
     max_tokens: Option<u32>,
     tools: Option<Vec<String>>,
     #[serde(default)]
-    metadata: serde_yml::Mapping,
+    metadata: serde_yaml::Mapping,
 }
 
 /// ClawDesk agent config (TOML output).
@@ -86,7 +86,7 @@ struct OpenClawChannel {
     token: Option<String>,
     webhook_url: Option<String>,
     #[serde(default)]
-    extra: serde_yml::Mapping,
+    extra: serde_yaml::Mapping,
 }
 
 /// Run the legacy migration.
@@ -161,7 +161,7 @@ async fn migrate_agents(
 
         match tokio::fs::read_to_string(source_path).await {
             Ok(content) => {
-                match serde_yml::from_str::<OpenClawAgent>(&content) {
+                match serde_yaml::from_str::<OpenClawAgent>(&content) {
                     Ok(agent) => {
                         let clawdesk_agent = ClawDeskAgent {
                             name: agent.name.unwrap_or_else(|| file_stem.to_string()),
@@ -317,7 +317,7 @@ async fn migrate_channels(
 
         match tokio::fs::read_to_string(source_path).await {
             Ok(content) => {
-                match serde_yml::from_str::<OpenClawChannel>(&content) {
+                match serde_yaml::from_str::<OpenClawChannel>(&content) {
                     Ok(channel) => {
                         let channel_type = channel
                             .channel_type
@@ -493,7 +493,7 @@ async fn migrate_config(
     let content = tokio::fs::read_to_string(&config_file).await?;
 
     // Parse as generic YAML value to extract relevant fields
-    let yaml_value: serde_yml::Value = serde_yml::from_str(&content)?;
+    let yaml_value: serde_yaml::Value = serde_yaml::from_str(&content)?;
 
     let dest_config = options.dest_path.join("config.toml");
 
@@ -506,7 +506,7 @@ async fn migrate_config(
 
     if let Some(mapping) = yaml_value.as_mapping() {
         // Extract model preferences
-        if let Some(model) = mapping.get(&serde_yml::Value::String("model".to_string())) {
+        if let Some(model) = mapping.get(&serde_yaml::Value::String("model".to_string())) {
             if let Some(model_str) = model.as_str() {
                 toml_lines.push(format!("[llm]"));
                 toml_lines.push(format!("default_model = \"{}\"", model_str));
@@ -515,7 +515,7 @@ async fn migrate_config(
         }
 
         // Extract default provider
-        if let Some(provider) = mapping.get(&serde_yml::Value::String("provider".to_string())) {
+        if let Some(provider) = mapping.get(&serde_yaml::Value::String("provider".to_string())) {
             if let Some(provider_str) = provider.as_str() {
                 toml_lines.push(format!("[provider]"));
                 toml_lines.push(format!("default = \"{}\"", provider_str));
@@ -524,7 +524,7 @@ async fn migrate_config(
         }
 
         // Extract any log level
-        if let Some(log_level) = mapping.get(&serde_yml::Value::String("log_level".to_string())) {
+        if let Some(log_level) = mapping.get(&serde_yaml::Value::String("log_level".to_string())) {
             if let Some(level_str) = log_level.as_str() {
                 toml_lines.push(format!("[logging]"));
                 toml_lines.push(format!("level = \"{}\"", level_str));

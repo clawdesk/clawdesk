@@ -108,7 +108,7 @@ pub enum MigrateError {
     Io(#[from] std::io::Error),
 
     #[error("YAML parse error: {0}")]
-    Yaml(#[from] serde_yml::Error),
+    Yaml(#[from] serde_yaml::Error),
 
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),

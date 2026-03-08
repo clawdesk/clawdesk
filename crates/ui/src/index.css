@@ -2449,18 +2449,17 @@ h3 {
 .modal-root {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  z-index: 9999;
   display: grid;
   place-items: center;
   animation: fadeIn 0.15s ease-out;
+  -webkit-app-region: no-drag;
 }
 
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 200;
-  display: grid;
-  place-items: center;
+  z-index: 0;
   background: rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
@@ -2469,7 +2468,7 @@ h3 {
 
 .modal-card {
   position: relative;
-  z-index: 201;
+  z-index: 1;
   width: min(760px, calc(100vw - 28px));
   max-height: calc(100vh - 28px);
   border-radius: var(--radius-xl);
@@ -2480,6 +2479,7 @@ h3 {
   grid-template-rows: auto 1fr;
   color: var(--text);
   animation: fadeInUp 0.25s ease-out;
+  -webkit-app-region: no-drag;
 }
 
 .modal-head {
