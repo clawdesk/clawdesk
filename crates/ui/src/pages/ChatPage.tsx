@@ -63,6 +63,12 @@ interface SkillUsage {
   tokenCost?: number;
 }
 
+interface UploadedContextDocument {
+  id: string;
+  filename: string;
+  chunkCount: number;
+}
+
 interface ThreadMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -846,7 +852,7 @@ export function ChatPage({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
-  const [uploadedContextFiles, setUploadedContextFiles] = useState<string[]>([]);
+  const [uploadedContextDocs, setUploadedContextDocs] = useState<UploadedContextDocument[]>([]);
 
   const pushTrace = useCallback((type: string, summary: string, opts?: { detail?: string; level?: TraceLogEntry["level"]; toolName?: string }) => {
     setTraceEntries((prev) => [...prev, {
@@ -989,25 +995,22 @@ export function ChatPage({
       }
 
       setIsUploadingFiles(true);
-      const uploadedNames: string[] = [];
+      const uploadedDocs: UploadedContextDocument[] = [];
       for (const filePath of paths) {
         try {
           const doc = await api.ragIngestDocument(filePath);
-          uploadedNames.push(doc.filename);
+          uploadedDocs.push({ id: doc.id, filename: doc.filename, chunkCount: doc.chunk_count });
           pushToast(`Ingested \"${doc.filename}\" (${doc.chunk_count} chunks)`);
         } catch (err: any) {
           pushToast(`Upload failed: ${err}`);
         }
       }
 
-      if (uploadedNames.length) {
-        setUploadedContextFiles((prev) => {
-          const next = [...uploadedNames, ...prev.filter((name) => !uploadedNames.includes(name))];
+      if (uploadedDocs.length) {
+        setUploadedContextDocs((prev) => {
+          const uploadedIds = new Set(uploadedDocs.map((doc) => doc.id));
+          const next = [...uploadedDocs, ...prev.filter((doc) => !uploadedIds.has(doc.id))];
           return next.slice(0, 6);
-        });
-        setInput((prev) => {
-          const mentions = uploadedNames.map((name) => `[Uploaded: ${name}]`).join("\n");
-          return prev ? `${prev}\n${mentions}` : mentions;
         });
       }
     } catch (err: any) {
@@ -1016,6 +1019,49 @@ export function ChatPage({
       setIsUploadingFiles(false);
     }
   }, [isUploadingFiles, pushToast]);
+
+  const buildUploadedDocsContext = useCallback(async () => {
+    if (!uploadedContextDocs.length) {
+      return "";
+    }
+
+    const maxChars = 6000;
+    const sections: string[] = [];
+    let usedChars = 0;
+
+    for (const doc of uploadedContextDocs) {
+      if (usedChars >= maxChars) {
+        break;
+      }
+
+      try {
+        const chunks = await api.ragGetChunks(doc.id);
+        if (!chunks.length) {
+          continue;
+        }
+
+        const excerpt = chunks.join("\n\n").slice(0, maxChars - usedChars);
+        if (!excerpt.trim()) {
+          continue;
+        }
+
+        sections.push(`Document: ${doc.filename}\n${excerpt}`);
+        usedChars += excerpt.length;
+      } catch (err) {
+        console.warn("[CHAT] failed to load uploaded document context", doc.filename, err);
+      }
+    }
+
+    if (!sections.length) {
+      return "";
+    }
+
+    return [
+      "Attached document context:",
+      ...sections,
+      "Use the attached document context above to answer the user's question. Treat it as source material, not as a filesystem path to open.",
+    ].join("\n\n");
+  }, [uploadedContextDocs]);
 
   const agent = agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? null;
   const isNew = messages.length === 0;
@@ -1648,9 +1694,13 @@ export function ChatPage({
   const sendMessage = useCallback(async (content: string) => {
     const agentId = selectedAgentId ?? agent?.id;
     const agentName = agent?.name;
-    console.log("[SEND] sendMessage called. agentId:", agentId, "content:", content?.slice(0, 50), "sendingRef:", sendingRef.current);
-    if (!agentId || !content.trim()) {
+    const visibleContent = content.replace(/\[Uploaded: [^\]]+\]\s*/g, "").replace(/\n{3,}/g, "\n\n").trim();
+    console.log("[SEND] sendMessage called. agentId:", agentId, "content:", visibleContent?.slice(0, 50), "sendingRef:", sendingRef.current);
+    if (!agentId || !visibleContent) {
       console.warn("[SEND] early return: no agentId or empty content");
+      if (agentId && !visibleContent) {
+        pushToast("Add a message for the uploaded file before sending.");
+      }
       return;
     }
     // Prevent double-send while in-flight
@@ -1659,7 +1709,7 @@ export function ChatPage({
       return;
     }
 
-    console.log("[SEND] starting sendMessage, agentId:", agentId, "content:", content.slice(0, 50));
+    console.log("[SEND] starting sendMessage, agentId:", agentId, "content:", visibleContent.slice(0, 50));
 
     // Clear trace entries for the new message
     setTraceEntries([]);
@@ -1680,7 +1730,7 @@ export function ChatPage({
     const userMsg: ThreadMessage = {
       id: `u_${Date.now()}`,
       role: "user",
-      text: content,
+      text: visibleContent,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
 
@@ -1729,9 +1779,15 @@ export function ChatPage({
         }
       }
 
+      let requestContent = visibleContent;
+      const attachedContext = await buildUploadedDocsContext();
+      if (attachedContext) {
+        requestContent = `${visibleContent}\n\n---\n\n${attachedContext}`;
+      }
+
       // Pass the resolved currentChatId to the backend
       // Add a 120-second timeout to prevent hanging indefinitely
-      const invokePromise = api.sendMessage(agentId, content, userModel, currentChatId ?? undefined, userProvider, userApiKey, userBaseUrl);
+      const invokePromise = api.sendMessage(agentId, requestContent, userModel, currentChatId ?? undefined, userProvider, userApiKey, userBaseUrl);
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("Request timed out after 120 seconds. The provider may be slow or unresponsive.")), 120_000)
       );
@@ -1816,14 +1872,14 @@ export function ChatPage({
           const newSession: SessionSummary = {
             chat_id: response.chat_id,
             agent_id: agentId,
-            title: response.chat_title || content.slice(0, 60),
+            title: response.chat_title || visibleContent.slice(0, 60),
             message_count: 2,
             created_at: new Date().toISOString(),
             last_activity: new Date().toISOString(),
             pending_approvals: 0,
             routine_generated: false,
             has_proof_outputs: false,
-            first_message_preview: content.slice(0, 80) || null,
+            first_message_preview: visibleContent.slice(0, 80) || null,
           };
           return [newSession, ...prev];
         });
@@ -1882,7 +1938,7 @@ export function ChatPage({
       });
       setIsSending(false);
     }
-  }, [selectedAgentId, agent?.id, agent?.name, pushToast, effectiveModel, effectiveProvider, effectiveApiKey, effectiveBaseUrl]);
+  }, [selectedAgentId, agent?.id, agent?.name, pushToast, effectiveModel, effectiveProvider, effectiveApiKey, effectiveBaseUrl, buildUploadedDocsContext]);
 
   return (
     <div className="view chat-page">
@@ -2365,12 +2421,12 @@ export function ChatPage({
                   rows={2}
                   disabled={!agent}
                 />
-                {uploadedContextFiles.length > 0 && (
+                {uploadedContextDocs.length > 0 && (
                   <div className="chat-composer-attachments" aria-label="Uploaded context files">
-                    {uploadedContextFiles.map((name) => (
-                      <span key={name} className="chat-composer-chip">
+                    {uploadedContextDocs.map((doc) => (
+                      <span key={doc.id} className="chat-composer-chip">
                         <Icon name="paperclip" />
-                        {name}
+                        {doc.filename}
                       </span>
                     ))}
                   </div>

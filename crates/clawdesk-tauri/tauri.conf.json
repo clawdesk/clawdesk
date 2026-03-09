@@ -39,6 +39,7 @@
             "core:default",
             "core:window:allow-start-dragging",
             "autostart:default",
+            "dialog:default",
             "shell:default",
             {
               "identifier": "shell:allow-spawn",
