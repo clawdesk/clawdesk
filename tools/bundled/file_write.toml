@@ -1,0 +1,29 @@
+[tool]
+name = "file_write"
+description = "Write content to a file on the filesystem"
+type = "native"
+tags = ["filesystem", "core"]
+
+[tool.parameters.path]
+type = "string"
+description = "Absolute or relative path to the file"
+required = true
+
+[tool.parameters.content]
+type = "string"
+description = "Content to write to the file"
+required = true
+
+[tool.parameters.append]
+type = "boolean"
+description = "Append instead of overwrite"
+default = false
+
+[execution]
+timeout_secs = 10
+
+[security]
+requires = ["filesystem"]
+isolation = "path_scope"
+risk_level = "medium"
+requires_approval = true

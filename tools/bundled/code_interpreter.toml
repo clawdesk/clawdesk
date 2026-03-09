@@ -1,0 +1,32 @@
+[tool]
+name = "code_interpreter"
+description = "Execute code in a sandboxed environment and return results"
+type = "script"
+tags = ["code", "execution", "development"]
+
+[tool.parameters.language]
+type = "string"
+description = "Programming language"
+required = true
+allowed_values = ["python", "javascript", "typescript", "rust", "shell"]
+
+[tool.parameters.code]
+type = "string"
+description = "Code to execute"
+required = true
+
+[tool.parameters.timeout_secs]
+type = "integer"
+description = "Execution timeout"
+default = 30
+
+[execution]
+command = "python3"
+args = ["-c"]
+timeout_secs = 60
+
+[security]
+requires = ["filesystem"]
+isolation = "full_sandbox"
+risk_level = "high"
+requires_approval = true

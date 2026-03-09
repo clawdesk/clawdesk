@@ -438,6 +438,175 @@ pub struct ModelCostSummary {
 }
 
 // ───────────────────────────────────────────────────────────────
+// Budget Enforcement
+// ───────────────────────────────────────────────────────────────
+
+/// Budget limits for cost control.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetConfig {
+    /// Maximum spend per hour in USD (0 = unlimited).
+    #[serde(default)]
+    pub max_hourly_usd: f64,
+    /// Maximum spend per day in USD (0 = unlimited).
+    #[serde(default)]
+    pub max_daily_usd: f64,
+    /// Maximum total spend in USD (0 = unlimited).
+    #[serde(default)]
+    pub max_total_usd: f64,
+    /// Action to take when budget is exceeded.
+    #[serde(default)]
+    pub on_exceeded: BudgetAction,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_hourly_usd: 0.0,
+            max_daily_usd: 0.0,
+            max_total_usd: 0.0,
+            on_exceeded: BudgetAction::RejectRequest,
+        }
+    }
+}
+
+/// Action to take when budget is exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BudgetAction {
+    /// Reject the request.
+    RejectRequest,
+    /// Downgrade to cheapest available model.
+    DowngradeModel,
+    /// Warn but allow.
+    WarnOnly,
+}
+
+impl Default for BudgetAction {
+    fn default() -> Self {
+        Self::RejectRequest
+    }
+}
+
+/// Budget enforcement result.
+#[derive(Debug, Clone)]
+pub enum BudgetCheck {
+    /// Within budget — proceed normally.
+    WithinBudget,
+    /// Budget exceeded — contains the violated limit kind.
+    Exceeded(BudgetLimitKind),
+    /// No budget configured.
+    Unlimited,
+}
+
+/// Which budget limit was hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetLimitKind {
+    Hourly,
+    Daily,
+    Total,
+}
+
+/// Tracks spend against budget limits.
+pub struct BudgetTracker {
+    config: BudgetConfig,
+    /// (timestamp_secs, cost_usd)
+    ledger: std::sync::Mutex<Vec<(u64, f64)>>,
+    total_spend: std::sync::atomic::AtomicU64,
+}
+
+impl BudgetTracker {
+    pub fn new(config: BudgetConfig) -> Self {
+        Self {
+            config,
+            ledger: std::sync::Mutex::new(Vec::new()),
+            total_spend: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Record a spend event.
+    pub fn record_spend(&self, cost_usd: f64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Ok(mut ledger) = self.ledger.lock() {
+            ledger.push((now, cost_usd));
+        }
+        // Atomic total (stored as microdollars to avoid floating-point atomics).
+        let micros = (cost_usd * 1_000_000.0) as u64;
+        self.total_spend
+            .fetch_add(micros, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Check whether a new request is within budget.
+    pub fn check(&self) -> BudgetCheck {
+        let has_any_limit = self.config.max_hourly_usd > 0.0
+            || self.config.max_daily_usd > 0.0
+            || self.config.max_total_usd > 0.0;
+
+        if !has_any_limit {
+            return BudgetCheck::Unlimited;
+        }
+
+        // Total check (fast path).
+        if self.config.max_total_usd > 0.0 {
+            let total =
+                self.total_spend.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
+            if total >= self.config.max_total_usd {
+                return BudgetCheck::Exceeded(BudgetLimitKind::Total);
+            }
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let ledger = match self.ledger.lock() {
+            Ok(l) => l,
+            Err(_) => return BudgetCheck::WithinBudget,
+        };
+
+        // Hourly check.
+        if self.config.max_hourly_usd > 0.0 {
+            let hour_ago = now.saturating_sub(3600);
+            let hourly: f64 = ledger
+                .iter()
+                .filter(|(ts, _)| *ts >= hour_ago)
+                .map(|(_, c)| c)
+                .sum();
+            if hourly >= self.config.max_hourly_usd {
+                return BudgetCheck::Exceeded(BudgetLimitKind::Hourly);
+            }
+        }
+
+        // Daily check.
+        if self.config.max_daily_usd > 0.0 {
+            let day_ago = now.saturating_sub(86_400);
+            let daily: f64 = ledger
+                .iter()
+                .filter(|(ts, _)| *ts >= day_ago)
+                .map(|(_, c)| c)
+                .sum();
+            if daily >= self.config.max_daily_usd {
+                return BudgetCheck::Exceeded(BudgetLimitKind::Daily);
+            }
+        }
+
+        BudgetCheck::WithinBudget
+    }
+
+    /// Current total spend in USD.
+    pub fn total_spend_usd(&self) -> f64 {
+        self.total_spend.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0
+    }
+
+    /// Get the configured budget action.
+    pub fn on_exceeded(&self) -> BudgetAction {
+        self.config.on_exceeded
+    }
+}
+
+// ───────────────────────────────────────────────────────────────
 // Tests
 // ───────────────────────────────────────────────────────────────
 
@@ -554,5 +723,38 @@ mod tests {
 
         let decision = router.select("coding", true, false, 1000, 500).unwrap();
         assert_eq!(decision.model_id, "capable"); // cheap filtered out.
+    }
+
+    #[test]
+    fn test_budget_tracker_within_budget() {
+        let tracker = BudgetTracker::new(BudgetConfig {
+            max_total_usd: 10.0,
+            ..Default::default()
+        });
+        tracker.record_spend(3.0);
+        tracker.record_spend(2.0);
+        assert!(matches!(tracker.check(), BudgetCheck::WithinBudget));
+        assert!((tracker.total_spend_usd() - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_budget_tracker_exceeded() {
+        let tracker = BudgetTracker::new(BudgetConfig {
+            max_total_usd: 5.0,
+            ..Default::default()
+        });
+        tracker.record_spend(3.0);
+        tracker.record_spend(3.0);
+        assert!(matches!(
+            tracker.check(),
+            BudgetCheck::Exceeded(BudgetLimitKind::Total)
+        ));
+    }
+
+    #[test]
+    fn test_budget_unlimited() {
+        let tracker = BudgetTracker::new(BudgetConfig::default());
+        tracker.record_spend(999.0);
+        assert!(matches!(tracker.check(), BudgetCheck::Unlimited));
     }
 }

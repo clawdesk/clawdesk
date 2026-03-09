@@ -70,6 +70,7 @@ pub mod store_cache;
 pub mod store_federation;
 pub mod store_sync;
 pub mod templates;
+pub mod tool_manifest;
 pub mod trigger;
 pub mod trigram_index;
 pub mod watcher;

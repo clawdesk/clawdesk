@@ -1,0 +1,26 @@
+[tool]
+name = "rag_search"
+description = "Search the RAG document store using hybrid vector + keyword search"
+type = "native"
+tags = ["rag", "search", "knowledge"]
+
+[tool.parameters.query]
+type = "string"
+description = "Search query"
+required = true
+
+[tool.parameters.top_k]
+type = "integer"
+description = "Maximum number of results"
+default = 5
+
+[tool.parameters.collection]
+type = "string"
+description = "RAG collection to search"
+default = "default"
+
+[execution]
+timeout_secs = 10
+
+[security]
+risk_level = "low"

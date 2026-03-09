@@ -18,6 +18,7 @@
 //! ```
 
 pub mod economics;
+pub mod cost_tracking;
 
 use opentelemetry::{
     metrics::{Counter, Histogram, Meter, MeterProvider},
@@ -31,6 +32,10 @@ use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub use economics::{CostRecord, TokenUsage, WorkflowEconomics};
+pub use cost_tracking::{
+    BudgetConfig, BudgetStatus, BudgetTracker, CostAggregator, CostSummary, ModelPricing,
+    PricingTable,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Metrics registry

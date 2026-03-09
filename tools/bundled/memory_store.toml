@@ -1,0 +1,31 @@
+[tool]
+name = "memory_store"
+description = "Store a key-value pair in the agent's persistent memory"
+type = "native"
+tags = ["memory", "storage", "core"]
+
+[tool.parameters.key]
+type = "string"
+description = "Memory key"
+required = true
+
+[tool.parameters.value]
+type = "string"
+description = "Value to store"
+required = true
+
+[tool.parameters.namespace]
+type = "string"
+description = "Memory namespace for scoping"
+default = "default"
+
+[tool.parameters.ttl_secs]
+type = "integer"
+description = "Time-to-live in seconds (0 = permanent)"
+default = 0
+
+[execution]
+timeout_secs = 5
+
+[security]
+risk_level = "low"

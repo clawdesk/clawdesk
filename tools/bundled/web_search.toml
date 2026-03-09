@@ -1,0 +1,30 @@
+[tool]
+name = "web_search"
+description = "Search the web using a search engine and return results"
+type = "http"
+tags = ["web", "search", "research"]
+
+[tool.parameters.query]
+type = "string"
+description = "Search query"
+required = true
+
+[tool.parameters.num_results]
+type = "integer"
+description = "Maximum number of results to return"
+default = 10
+
+[tool.parameters.engine]
+type = "string"
+description = "Search engine to use"
+default = "duckduckgo"
+allowed_values = ["duckduckgo", "google", "bing"]
+
+[execution]
+endpoint = "https://api.duckduckgo.com/"
+method = "GET"
+timeout_secs = 15
+
+[security]
+requires = ["network"]
+risk_level = "low"

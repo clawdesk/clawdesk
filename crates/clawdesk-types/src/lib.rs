@@ -37,8 +37,10 @@ pub mod session;
 pub mod taint;
 pub mod token_usage;
 pub mod tokenizer;
+pub mod error_ext;
 
 // Re-export key types at crate root
+pub use error_ext::{RuntimeError, McpProtocolError, ErrorSeverity, ClassifiableError};
 pub use channel::{ChannelId, ChannelMeta};
 pub use config::{ClawDeskConfig, ValidatedConfig};
 pub use error::{ClawDeskError, ProviderError, ProviderErrorKind};

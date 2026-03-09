@@ -28,6 +28,29 @@ use tracing::{debug, warn};
 
 use crate::{Provider, ProviderRequest, ProviderResponse, StreamChunk};
 
+/// Cheap non-cryptographic random u64 using thread-local state.
+/// Good enough for jitter — not for security.
+fn cheap_random_u64() -> u64 {
+    use std::cell::Cell;
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64
+        );
+    }
+    STATE.with(|s| {
+        // xorshift64
+        let mut x = s.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.set(x);
+        x
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -41,8 +64,23 @@ pub struct ReliableConfig {
     pub base_backoff: Duration,
     /// Maximum backoff cap per retry step.
     pub max_backoff: Duration,
+    /// Jitter strategy applied to each backoff duration.
+    pub jitter: JitterStrategy,
     /// Model fallback chains: primary model → list of fallbacks.
     pub model_fallbacks: HashMap<String, Vec<String>>,
+}
+
+/// Jitter strategy to decorrelate retry storms.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum JitterStrategy {
+    /// No jitter — pure exponential backoff.
+    None,
+    /// Full jitter: uniform random in [0, backoff].
+    Full,
+    /// Equal jitter: backoff/2 + uniform random in [0, backoff/2].
+    Equal,
+    /// Decorrelated jitter: min(max_backoff, random_between(base, prev * 3)).
+    Decorrelated,
 }
 
 impl Default for ReliableConfig {
@@ -51,6 +89,7 @@ impl Default for ReliableConfig {
             max_retries: 3,
             base_backoff: Duration::from_millis(500),
             max_backoff: Duration::from_secs(10),
+            jitter: JitterStrategy::Equal,
             model_fallbacks: HashMap::new(),
         }
     }
@@ -141,11 +180,37 @@ impl ReliableProvider {
         }
     }
 
-    /// Calculate exponential backoff duration for a given attempt.
+    /// Calculate exponential backoff duration with jitter for a given attempt.
     fn backoff_duration(&self, attempt: u32) -> Duration {
-        let backoff = self.config.base_backoff.as_millis() as u64
-            * 2u64.saturating_pow(attempt);
-        Duration::from_millis(backoff.min(self.config.max_backoff.as_millis() as u64))
+        let base_ms = self.config.base_backoff.as_millis() as u64;
+        let max_ms = self.config.max_backoff.as_millis() as u64;
+        let exp_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt)).min(max_ms);
+
+        let jittered_ms = match self.config.jitter {
+            JitterStrategy::None => exp_ms,
+            JitterStrategy::Full => {
+                // Uniform random in [0, exp_ms].
+                let r = cheap_random_u64() % (exp_ms + 1);
+                r
+            }
+            JitterStrategy::Equal => {
+                // exp_ms/2 + uniform random in [0, exp_ms/2].
+                let half = exp_ms / 2;
+                let r = cheap_random_u64() % (half + 1);
+                half + r
+            }
+            JitterStrategy::Decorrelated => {
+                // random_between(base_ms, exp_ms * 3), capped at max_ms.
+                let upper = (exp_ms.saturating_mul(3)).min(max_ms);
+                if upper <= base_ms {
+                    base_ms
+                } else {
+                    base_ms + (cheap_random_u64() % (upper - base_ms + 1))
+                }
+            }
+        };
+
+        Duration::from_millis(jittered_ms.min(max_ms))
     }
 
     /// Try a request against a single provider with retries.
@@ -448,6 +513,7 @@ mod tests {
             base_backoff: Duration::from_millis(500),
             max_backoff: Duration::from_secs(10),
             model_fallbacks: HashMap::new(),
+            jitter: JitterStrategy::None,
         };
 
         // Use a dummy provider

@@ -1,0 +1,28 @@
+[tool]
+name = "web_fetch"
+description = "Fetch the content of a web page and return it as text"
+type = "http"
+tags = ["web", "fetch", "research"]
+
+[tool.parameters.url]
+type = "string"
+description = "URL to fetch"
+required = true
+
+[tool.parameters.selector]
+type = "string"
+description = "CSS selector to extract specific content"
+
+[tool.parameters.format]
+type = "string"
+description = "Output format"
+default = "text"
+allowed_values = ["text", "html", "markdown"]
+
+[execution]
+method = "GET"
+timeout_secs = 30
+
+[security]
+requires = ["network"]
+risk_level = "low"

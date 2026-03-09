@@ -15,6 +15,10 @@
 //! | cosine_similarity (d=1536) | 4608 cycles | ~1152 cycles | ~576 cycles |
 //! | batch_cosine (10K × 1536)  | ~46M cycles | ~11.5M cycles | ~5.8M cycles |
 
+pub mod typed;
+
+pub use typed::{Vec384, Vec768, Vec1024, Vec1536, Vec3072, Vector};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Public API
 // ═══════════════════════════════════════════════════════════════════════════

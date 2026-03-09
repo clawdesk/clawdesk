@@ -1,7 +1,7 @@
 <h1 align="center">ClawDesk</h1>
 
 <p align="center">
-  <strong>Privacy-first, security-hardened AI agent desktop runtime — 100% Rust backend, zero cloud dependency.</strong>
+  <strong>Privacy-first, security-hardened AI agent runtime — 100% Rust backend, zero cloud dependency. Desktop, terminal, server, cloud VM, Raspberry Pi & beyond.</strong>
 </p>
 
 <p align="center">
@@ -23,9 +23,19 @@
 
 ---
 
-ClawDesk is a Tauri 2.0 desktop application that runs AI agents locally with full audit trails, identity verification, and zero-trust networking. Built as a **40+-crate Rust workspace**, it provides a production-grade agent runtime with a React + TypeScript frontend, a full CLI with 40+ commands, tmux desktop workspace that mirrors the Tauri experience with 10 screens, and a ratatui-based TUI.
+ClawDesk is a **multi-interface AI agent runtime** that runs locally with full audit trails, identity verification, and zero-trust networking. Built as a **45-crate Rust workspace**, it provides a production-grade agent runtime with:
 
-Inspired by [OpenClaw](https://github.com/openclaw/openclaw) — the TypeScript AI agent gateway — ClawDesk reimagines the same powerful concepts (multi-channel messaging, skill orchestration, agent sessions) as a **native desktop app** with a pure Rust backend. Less moving parts, fewer dependencies, one binary.
+- **Tauri 2.0 Desktop App** — React + TypeScript GUI with 138+ IPC commands and system tray
+- **tmux Desktop Workspace** — 10-screen terminal layout mirroring the Tauri app, perfect for SSH and cloud VMs
+- **TUI Dashboard** — ratatui-based interactive terminal UI with Vim keybindings and 4 themes
+- **CLI** — 40+ commands for scripting, automation, agent REPL, and quick tasks
+- **Gateway Server** — Axum HTTP/WS REST API + OpenAI-compatible endpoints
+- **Daemon** — Background service with platform-native management (launchd/systemd/Windows)
+- **Docker** — Containerized headless deployment
+
+Runs on **macOS, Linux, Windows, cloud VMs (AWS/GCP/Azure/DO), Raspberry Pi, and any machine with Rust**.
+
+Inspired by [OpenClaw](https://github.com/openclaw/openclaw) — the TypeScript AI agent gateway — ClawDesk reimagines the same powerful concepts (multi-channel messaging, skill orchestration, agent sessions) as a **native, multi-interface runtime** with a pure Rust backend. Less moving parts, fewer dependencies, one binary.
 
 ## Goal
 
@@ -33,23 +43,25 @@ Inspired by [OpenClaw](https://github.com/openclaw/openclaw) — the TypeScript 
 
 OpenClaw is incredibly capable — but running a Node.js gateway, wiring up channels, and managing configs can be a lot of moving parts. ClawDesk's goal is to take those same ideas and collapse them into a single desktop app that just works:
 
-- **No gateway to run** — the Tauri app _is_ the runtime.
-- **No config files to write** — everything is managed through the UI.
-- **No separate daemon** — agents, skills, channels, and storage live in one process.
+- **No gateway to run** — the Tauri app _is_ the runtime (or run the gateway server standalone for headless deployments).
+- **No config files to write** — everything is managed through the UI, CLI, or TOML config.
+- **No separate daemon** — agents, skills, channels, and storage live in one process (or run as a daemon for always-on deployments).
 - **No runtime dependencies** — Rust compiles to a single native binary. No Node.js, no Python, no Docker required.
+- **No display required** — tmux, TUI, CLI, gateway, and daemon modes run headless on servers, VMs, and edge devices.
 
 ## Why ClawDesk
 
 - **Your machine, your data.** Agents run locally — no cloud roundtrips, no data leaving your device unless you choose to.
 - **Defense-in-depth by default.** CascadeScanner, SHA-256 audit chain, scoped tokens, and identity contracts ship with every build.
 - **Multi-model, no lock-in.** Swap between Claude, OpenAI, Gemini, Bedrock, and Ollama via a single provider trait.
-- **One binary, full stack.** 27 Rust crates compile into a single Tauri app — agents, skills, security, tunnels, and UI included.
+- **One binary, full stack.** 45 Rust crates compile into a single binary — agents, skills, security, tunnels, and UI included.
+- **Runs anywhere.** Desktop (Tauri), terminal (tmux/TUI), CLI, gateway server, daemon, Docker, cloud VMs, Raspberry Pi.
 
 ## Features
 
 | | |
 |---|---|
-| **Local-First Runtime** | Agents execute on your machine. No cloud dependency required. |
+| **Local-First Runtime** | Agents execute on your hardware — laptop, server, cloud VM, Raspberry Pi. No cloud dependency required. |
 | **Security Hardened** | CascadeScanner (Aho-Corasick + Regex), SHA-256 audit chain, scoped tokens, identity contracts, plugin sandbox. |
 | **Multi-Model Support** | Claude (Haiku/Sonnet/Opus), OpenAI, Gemini, Ollama, Azure, Bedrock, Cohere, Vertex — 8 providers via a single trait. |
 | **25+ Channel Adapters** | Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, IRC, Teams, iMessage, Mastodon, Nostr, Twitch, and more. |
@@ -68,6 +80,33 @@ OpenClaw is incredibly capable — but running a Node.js gateway, wiring up chan
 | **Self-Update** | Atomic binary self-update from GitHub with SHA-256 verification and rollback support. |
 | **Encrypted Backups** | AES-256-GCM encrypted config backups with Argon2 key derivation. |
 | **Desktop UI** | Tauri 2.0 + React frontend with 138+ IPC commands, system tray, markdown rendering, drag-drop. |
+
+## Runs Anywhere
+
+ClawDesk is not just a desktop app — it's a **multi-interface AI runtime** that deploys anywhere:
+
+| Interface | Command | Best For |
+|-----------|---------|----------|
+| **Desktop App** (Tauri 2.0) | `cargo tauri dev` | Everyday GUI use on macOS/Linux/Windows |
+| **tmux Workspace** (10 screens) | `clawdesk tmux launch` | Terminal power users, SSH, cloud VMs |
+| **TUI Dashboard** (ratatui) | `clawdesk tui` | Interactive terminal with Vim keybindings |
+| **CLI** (40+ commands) | `clawdesk agent msg "hello"` | Scripts, automation, cron jobs |
+| **Gateway Server** (Axum) | `clawdesk gateway run` | REST API, webhook integrations |
+| **Daemon** (systemd/launchd) | `clawdesk daemon run` | Always-on background service |
+| **Docker** | `docker-compose up` | Containerized headless deployment |
+
+### Supported Platforms
+
+| Platform | Desktop | tmux/TUI/CLI | Gateway/Daemon | Docker |
+|----------|---------|-------------|----------------|--------|
+| **macOS** (Intel & Apple Silicon) | ✅ | ✅ | ✅ | ✅ |
+| **Linux** (x86_64) | ✅ | ✅ | ✅ | ✅ |
+| **Linux** (ARM64 / Raspberry Pi) | — | ✅ | ✅ | ✅ |
+| **Windows** (10+) | ✅ | ✅ | ✅ | ✅ |
+| **Cloud VMs** (AWS/GCP/Azure/DO) | — | ✅ | ✅ | ✅ |
+| **Headless servers** | — | ✅ | ✅ | ✅ |
+
+> **No display required.** The tmux workspace, TUI, CLI, gateway server, and daemon all run without a GUI — perfect for cloud VMs, Raspberry Pi, headless servers, and SSH sessions.
 
 ## Powered by SochDB
 
@@ -122,7 +161,7 @@ Skills are modular capabilities that extend what an agent can do. ClawDesk's ski
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    ClawDesk Desktop App                       │
+│                    ClawDesk Runtime                          │
 ├──────────────┬───────────────────────────────────────────────┤
 │  React UI    │              Tauri IPC Bridge                 │
 │  (TypeScript)│  138+ commands · typed invoke() wrappers      │

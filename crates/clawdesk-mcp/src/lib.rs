@@ -21,11 +21,15 @@ pub use client::McpClient;
 pub mod server;
 
 pub mod bundled;
+pub mod auth;
+pub mod discovery;
 pub mod namespace;
 pub mod protocol;
 pub mod transport;
 
 pub use protocol::*;
+pub use auth::{McpAuthResolver, McpServerAuth, AuthScheme, AuthHeaders, McpAuthError};
+pub use transport::{McpTransport, StreamableHttpTransport, StreamableHttpConfig};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

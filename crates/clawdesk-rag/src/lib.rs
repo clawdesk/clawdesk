@@ -20,12 +20,18 @@
 //! ```
 
 pub mod chunking;
+pub mod context_window;
+pub mod eval;
 pub mod extract;
+pub mod hybrid;
 pub mod store;
 
 pub use chunking::{chunk_text, ChunkConfig, TextChunk};
 pub use extract::{extract_text, DocType};
+pub use hybrid::{Bm25Scorer, HybridResult, HybridSearchConfig, RrfCombiner, SearchHit};
 pub use store::{RagDocument, RagSearchResult, RagStore, RAG_COLLECTION};
+pub use context_window::{ContextWindowManager, ContextWindowConfig, ContextSegment, ContextZone, ContextUsage, CompactionResult};
+pub use eval::{EvalHarness, EvalReport, EvalQuery, QueryMetrics};
 
 use clawdesk_sochdb::SochStore;
 use std::path::Path;

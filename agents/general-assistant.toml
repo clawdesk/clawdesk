@@ -1,0 +1,37 @@
+[agent]
+name = "general-assistant"
+description = "General-purpose assistant for everyday questions and tasks"
+version = "1.0.0"
+author = "ClawDesk"
+tags = ["general", "assistant", "helpful", "versatile"]
+
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+fallback = ["openai:gpt-4o", "gemini:gemini-2.5-flash"]
+temperature = 0.7
+max_tokens = 4096
+
+[system_prompt]
+content = """
+You are a helpful, knowledgeable assistant. Be direct and helpful.
+
+- Answer questions clearly and concisely
+- If you don't know something, say so
+- Offer to help with follow-up questions
+- Adapt your communication style to the user
+"""
+
+[traits]
+persona = ["friendly"]
+output = ["conversational"]
+
+[capabilities]
+tools = ["read_file", "web_search", "list_directory", "search_files"]
+network = ["*"]
+memory_write = ["self.*"]
+
+[resources]
+max_tokens_per_hour = 300000
+max_tool_iterations = 15
+timeout_seconds = 300

@@ -14,17 +14,23 @@
 //! Call `clawdesk_telemetry::init_telemetry()` first, then optionally call
 //! `init_observability()` to register the observability config.
 
+pub mod agent_spans;
+pub mod audit;
 pub mod batcher;
 pub mod config;
 pub mod genai_conventions;
 pub mod genai_instrumentation;
 pub mod metrics;
+pub mod slo;
 pub mod span_mapper;
 pub mod storage_metrics;
 pub mod tracer;
 
+pub use agent_spans::{AgentSpanBuilder, ToolSpanBuilder, record_agent_completion, record_tool_result};
 pub use metrics::{MetricKey, MetricValue, MetricsAggregator};
+pub use slo::{SloAlert, SloDefinition, SloMonitor, SloStatus, AlertSeverity};
 pub use storage_metrics::{WriteAmplificationMetrics, WriteAmplificationReport};
+pub use audit::{AuditLogger, AuditConfig, AuditEvent, AuditActor, AuditCategory, AuditOutcome};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

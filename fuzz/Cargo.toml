@@ -1,0 +1,45 @@
+[package]
+name = "clawdesk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+clawdesk-types = { path = "../crates/clawdesk-types" }
+clawdesk-security = { path = "../crates/clawdesk-security" }
+clawdesk-simd = { path = "../crates/clawdesk-simd" }
+serde_json = "1"
+toml = "0.8"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_toml_agent_config"
+path = "fuzz_targets/toml_agent_config.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_token_estimator"
+path = "fuzz_targets/token_estimator.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_json_rpc"
+path = "fuzz_targets/json_rpc.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_injection_scanner"
+path = "fuzz_targets/injection_scanner.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_cosine_similarity"
+path = "fuzz_targets/cosine_similarity.rs"
+doc = false

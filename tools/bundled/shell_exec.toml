@@ -1,0 +1,28 @@
+[tool]
+name = "shell_exec"
+description = "Execute a shell command and return stdout/stderr"
+type = "native"
+tags = ["system", "shell", "core"]
+
+[tool.parameters.command]
+type = "string"
+description = "The shell command to execute"
+required = true
+
+[tool.parameters.working_dir]
+type = "string"
+description = "Working directory for command execution"
+
+[tool.parameters.timeout_secs]
+type = "integer"
+description = "Command timeout in seconds"
+default = 30
+
+[execution]
+timeout_secs = 60
+
+[security]
+requires = ["filesystem"]
+isolation = "process"
+risk_level = "high"
+requires_approval = true

@@ -1,0 +1,19 @@
+[pack]
+name = "core-tools"
+description = "Essential tools bundled with every ClawDesk installation"
+version = "1.0.0"
+author = "ClawDesk Team"
+tags = ["core", "essential"]
+
+tools = [
+    "shell_exec",
+    "file_read",
+    "file_write",
+    "memory_store",
+    "memory_recall",
+    "web_search",
+    "web_fetch",
+    "code_interpreter",
+    "rag_search",
+    "browser_navigate",
+]

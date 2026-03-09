@@ -43,6 +43,8 @@ members = [
     "crates/clawdesk-test",
     "crates/clawdesk-local-models",
     "crates/clawdesk-rag",
+    "crates/clawdesk-agent-config",
+    "xtask",
 ]
 resolver = "2"
 
@@ -126,6 +128,7 @@ clawdesk-daemon = { path = "crates/clawdesk-daemon" }
 clawdesk-test = { path = "crates/clawdesk-test" }
 clawdesk-local-models = { path = "crates/clawdesk-local-models" }
 clawdesk-rag = { path = "crates/clawdesk-rag" }
+clawdesk-agent-config = { path = "crates/clawdesk-agent-config" }
 
 # --- SochDB (embedded ACID vector database) ---
 sochdb = { version = "0.5.0", features = ["embedded"] }
@@ -220,3 +223,13 @@ panic = "abort"
 [profile.dev]
 opt-level = 0
 debug = true
+
+# ───────────────────────────────────────────────────────────────
+# Workspace-level lints
+# ───────────────────────────────────────────────────────────────
+[workspace.lints.clippy]
+# Correctness: forbid panicking in production code (tests are exempt via cfg_attr)
+unwrap_used = "warn"
+expect_used = "warn"
+# Safety
+undocumented_unsafe_blocks = "warn"

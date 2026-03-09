@@ -12,8 +12,16 @@ name = "clawdesk"
 path = "src/main.rs"
 
 [features]
-default = ["tui"]
+default = ["tui", "browser", "mcp", "rag", "local-models"]
 tui = ["dep:clawdesk-tui"]
+browser = ["dep:clawdesk-browser"]
+mcp = ["dep:clawdesk-mcp"]
+rag = ["dep:clawdesk-rag"]
+local-models = ["dep:clawdesk-local-models"]
+# Build all optional features
+full = ["tui", "browser", "mcp", "rag", "local-models"]
+# Minimal build: core agent loop + providers only
+minimal = []
 
 [dependencies]
 clawdesk-types = { workspace = true }
@@ -32,6 +40,10 @@ clawdesk-daemon = { workspace = true }
 clawdesk-runtime = { workspace = true }
 clawdesk-bus = { workspace = true }
 clawdesk-tui = { workspace = true, optional = true }
+clawdesk-browser = { workspace = true, optional = true }
+clawdesk-mcp = { workspace = true, optional = true }
+clawdesk-rag = { workspace = true, optional = true }
+clawdesk-local-models = { workspace = true, optional = true }
 async-trait = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"

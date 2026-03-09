@@ -20,3 +20,6 @@ default = []
 ## Enable lightweight lock-ordering telemetry in release builds.
 ## Adds ~2 AtomicU64 increments per lock acquisition (negligible overhead).
 lock-telemetry = []
+
+[dev-dependencies]
+proptest = "1"

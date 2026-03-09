@@ -1,0 +1,23 @@
+[tool]
+name = "file_read"
+description = "Read the contents of a file from the filesystem"
+type = "native"
+tags = ["filesystem", "core"]
+
+[tool.parameters.path]
+type = "string"
+description = "Absolute or relative path to the file"
+required = true
+
+[tool.parameters.encoding]
+type = "string"
+description = "File encoding"
+default = "utf-8"
+
+[execution]
+timeout_secs = 10
+
+[security]
+requires = ["filesystem"]
+isolation = "path_scope"
+risk_level = "low"

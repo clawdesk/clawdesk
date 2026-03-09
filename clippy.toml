@@ -1,0 +1,11 @@
+# Clippy configuration for ClawDesk workspace
+# See: https://doc.rust-lang.org/clippy/configuration.html
+
+# MSRV — enables version-aware lints
+msrv = "1.75"
+
+# Cognitive complexity threshold for clippy::cognitive_complexity
+cognitive-complexity-threshold = 30
+
+# Max lines in a single function body for clippy::too_many_lines
+too-many-lines-threshold = 200

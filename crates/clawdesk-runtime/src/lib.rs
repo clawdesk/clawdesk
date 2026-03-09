@@ -59,7 +59,10 @@ pub mod kill_tree;
 pub mod pty;
 pub mod session_mux;
 pub mod writer;
+pub mod backpressure;
 pub mod sandbox;
+pub mod scope;
+pub mod shutdown;
 
 // Re-exports for ergonomic use.
 pub use checkpoint::CheckpointStore;
@@ -76,6 +79,9 @@ pub use session_mux::{
     SessionPriority, SessionSnapshot, SessionSpawnRequest, SessionStatus,
 };
 pub use recovery::RecoveryManager;
+pub use scope::{CancellationToken, FailureStrategy, ScopeConfig, ScopeResult, TaskOutcome, TaskScope};
+pub use shutdown::{ShutdownCoordinator, ShutdownConfig, ShutdownToken, ShutdownResult, SubsystemResult};
+pub use backpressure::{BackpressureController, BackpressureConfig, Admission, BackpressureMetrics, TokenBucket};
 pub use types::*;
 pub use supervisor::{ProcessSupervisor, ProcessInfo, SpawnConfig, ProcessState};
 pub use writer::DurableMessageWriter;

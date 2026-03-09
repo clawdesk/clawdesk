@@ -1,0 +1,39 @@
+[target.'cfg(all())']
+rustflags = [
+    # ── Safety lints (deny in CI, warn locally for development velocity) ──
+    "-Wclippy::unwrap_used",
+    "-Wclippy::expect_used",
+    "-Wclippy::panic",
+    "-Wclippy::todo",
+    "-Wclippy::unimplemented",
+    "-Wclippy::dbg_macro",
+    "-Wclippy::print_stdout",
+    "-Wclippy::print_stderr",
+
+    # ── Correctness lints ──
+    "-Wclippy::large_enum_variant",
+    "-Wclippy::large_stack_arrays",
+    "-Wclippy::cast_possible_truncation",
+    "-Wclippy::cast_sign_loss",
+    "-Wclippy::cast_possible_wrap",
+    "-Wclippy::float_cmp",
+
+    # ── Performance lints ──
+    "-Wclippy::needless_collect",
+    "-Wclippy::inefficient_to_string",
+    "-Wclippy::redundant_clone",
+
+    # ── Style / Cognitive complexity ──
+    "-Wclippy::cognitive_complexity",
+    "-Wclippy::too_many_arguments",
+    "-Wclippy::too_many_lines",
+    "-Wclippy::fn_params_excessive_bools",
+    "-Wclippy::implicit_clone",
+
+    # ── Security ──
+    "-Wclippy::undocumented_unsafe_blocks",
+]
+
+[build]
+# Use sparse registry protocol for faster index updates
+rustc-wrapper = ""

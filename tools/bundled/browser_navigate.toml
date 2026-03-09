@@ -1,0 +1,27 @@
+[tool]
+name = "browser_navigate"
+description = "Navigate to a URL in the headless browser and capture the page"
+type = "native"
+tags = ["browser", "web", "automation"]
+
+[tool.parameters.url]
+type = "string"
+description = "URL to navigate to"
+required = true
+
+[tool.parameters.wait_for]
+type = "string"
+description = "CSS selector to wait for before capturing"
+
+[tool.parameters.screenshot]
+type = "boolean"
+description = "Take a screenshot of the page"
+default = false
+
+[execution]
+timeout_secs = 30
+
+[security]
+requires = ["network"]
+isolation = "process"
+risk_level = "medium"

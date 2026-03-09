@@ -313,6 +313,226 @@ impl std::fmt::Debug for SseTransport {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Streamable HTTP Transport (MCP 2025-03-26 spec)
+// ---------------------------------------------------------------------------
+
+/// Configuration for the Streamable HTTP transport.
+#[derive(Debug, Clone)]
+pub struct StreamableHttpConfig {
+    /// Base URL of the MCP server (must end in `/mcp`).
+    pub url: String,
+    /// Optional bearer token or custom headers for authentication.
+    pub auth_headers: HashMap<String, String>,
+    /// Request timeout.
+    pub timeout: std::time::Duration,
+    /// Maximum number of retries on transient errors.
+    pub max_retries: u32,
+    /// Whether to accept SSE streaming responses.
+    pub accept_sse: bool,
+}
+
+impl Default for StreamableHttpConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            auth_headers: HashMap::new(),
+            timeout: std::time::Duration::from_secs(60),
+            max_retries: 2,
+            accept_sse: true,
+        }
+    }
+}
+
+/// Streamable HTTP transport — the modern MCP transport (spec 2025-03-26).
+///
+/// Uses HTTP POST for both requests and notifications. Supports:
+/// - JSON response bodies for simple request-response
+/// - SSE response bodies for streaming (tool progress, partial results)
+/// - Session management via `Mcp-Session-Id` header
+///
+/// This replaces the older SSE transport pattern.
+pub struct StreamableHttpTransport {
+    config: StreamableHttpConfig,
+    http: reqwest::Client,
+    next_id: AtomicU64,
+    /// Session ID returned by server after initialize.
+    session_id: Mutex<Option<String>>,
+}
+
+impl StreamableHttpTransport {
+    pub fn new(config: StreamableHttpConfig) -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(config.timeout)
+                .build()
+                .unwrap_or_default(),
+            config,
+            next_id: AtomicU64::new(1),
+            session_id: Mutex::new(None),
+        }
+    }
+
+    fn next_request_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Build the request with common headers.
+    fn build_request(&self, body: &JsonRpcRequest) -> Result<reqwest::RequestBuilder, McpError> {
+        let mut builder = self
+            .http
+            .post(&self.config.url)
+            .header("Content-Type", "application/json");
+
+        // Accept header: prefer JSON, optionally accept SSE
+        if self.config.accept_sse {
+            builder = builder.header("Accept", "application/json, text/event-stream");
+        } else {
+            builder = builder.header("Accept", "application/json");
+        }
+
+        // Auth headers
+        for (k, v) in &self.config.auth_headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        // Session header if we have one
+        // Safe: we only read session_id in async context
+        // We use try_lock to avoid blocking — if locked, skip the header
+        if let Ok(guard) = self.session_id.try_lock() {
+            if let Some(ref sid) = *guard {
+                builder = builder.header("Mcp-Session-Id", sid.as_str());
+            }
+        }
+
+        Ok(builder.json(body))
+    }
+
+    /// Extract and store session ID from response headers.
+    async fn capture_session_id(&self, headers: &reqwest::header::HeaderMap) {
+        if let Some(val) = headers.get("mcp-session-id") {
+            if let Ok(sid) = val.to_str() {
+                let mut guard = self.session_id.lock().await;
+                *guard = Some(sid.to_string());
+                debug!(session_id = sid, "MCP session established");
+            }
+        }
+    }
+
+    /// Send with retry on transient failures.
+    async fn send_with_retry(
+        &self,
+        request: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, McpError> {
+        let mut last_err = McpError::Transport("no attempts made".into());
+
+        for attempt in 0..=self.config.max_retries {
+            if attempt > 0 {
+                let backoff = std::time::Duration::from_millis(100 * 2u64.pow(attempt - 1));
+                tokio::time::sleep(backoff).await;
+            }
+
+            let builder = self.build_request(request)?;
+            match builder.send().await {
+                Ok(resp) => {
+                    self.capture_session_id(resp.headers()).await;
+
+                    let status = resp.status();
+                    if status.is_success() {
+                        let body = resp.text().await.map_err(|e| {
+                            McpError::Transport(format!("read response body: {}", e))
+                        })?;
+                        return serde_json::from_str(&body).map_err(|e| {
+                            McpError::Protocol(format!("parse response: {}", e))
+                        });
+                    }
+
+                    // Non-retryable client errors
+                    if status.is_client_error() {
+                        return Err(McpError::Transport(format!(
+                            "HTTP {} from MCP server",
+                            status
+                        )));
+                    }
+
+                    // Server error — retryable
+                    last_err =
+                        McpError::Transport(format!("HTTP {} (attempt {})", status, attempt + 1));
+                }
+                Err(e) if e.is_timeout() => {
+                    last_err = McpError::Timeout(self.config.timeout);
+                }
+                Err(e) if e.is_connect() => {
+                    last_err =
+                        McpError::Transport(format!("connection failed (attempt {}): {}", attempt + 1, e));
+                }
+                Err(e) => {
+                    return Err(McpError::Transport(format!("HTTP error: {}", e)));
+                }
+            }
+        }
+
+        Err(last_err)
+    }
+}
+
+#[async_trait]
+impl McpTransport for StreamableHttpTransport {
+    async fn send_request(&self, mut request: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+        let id = self.next_request_id();
+        request.id = Some(serde_json::Value::Number(id.into()));
+        self.send_with_retry(&request).await
+    }
+
+    async fn send_notification(&self, notification: JsonRpcRequest) -> Result<(), McpError> {
+        let builder = self.build_request(&notification)?;
+        let resp = builder.send().await.map_err(|e| {
+            McpError::Transport(format!("notification POST failed: {}", e))
+        })?;
+        self.capture_session_id(resp.headers()).await;
+
+        // Server may return 202 Accepted or 200 for notifications
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(McpError::Transport(format!(
+                "notification HTTP {}",
+                resp.status()
+            )))
+        }
+    }
+
+    async fn close(&self) -> Result<(), McpError> {
+        // Send DELETE to terminate session if we have a session ID
+        let session_id = {
+            let guard = self.session_id.lock().await;
+            guard.clone()
+        };
+
+        if let Some(ref sid) = session_id {
+            let mut builder = self.http.delete(&self.config.url);
+            builder = builder.header("Mcp-Session-Id", sid.as_str());
+            for (k, v) in &self.config.auth_headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            // Best-effort; don't fail on close errors
+            let _ = builder.send().await;
+            debug!(session_id = %sid, "MCP session terminated");
+        }
+
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for StreamableHttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamableHttpTransport")
+            .field("url", &self.config.url)
+            .field("accept_sse", &self.config.accept_sse)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +550,26 @@ mod tests {
         let notif = JsonRpcRequest::notification("notifications/initialized", None);
         let json = serde_json::to_string(&notif).unwrap();
         assert!(json.contains("\"id\":null"));
+    }
+
+    #[test]
+    fn streamable_http_config_defaults() {
+        let config = StreamableHttpConfig::default();
+        assert_eq!(config.timeout, std::time::Duration::from_secs(60));
+        assert_eq!(config.max_retries, 2);
+        assert!(config.accept_sse);
+        assert!(config.auth_headers.is_empty());
+    }
+
+    #[test]
+    fn streamable_http_transport_debug() {
+        let config = StreamableHttpConfig {
+            url: "http://localhost:3000/mcp".into(),
+            ..Default::default()
+        };
+        let transport = StreamableHttpTransport::new(config);
+        let dbg = format!("{:?}", transport);
+        assert!(dbg.contains("localhost:3000/mcp"));
+        assert!(dbg.contains("accept_sse: true"));
     }
 }

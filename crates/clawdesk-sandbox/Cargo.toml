@@ -9,6 +9,7 @@ description = "Multi-modal sandbox isolation for ClawDesk agent tool execution"
 [features]
 default = ["subprocess", "workspace"]
 sandbox-docker = []
+sandbox-wasm = []
 subprocess = []
 workspace = []
 

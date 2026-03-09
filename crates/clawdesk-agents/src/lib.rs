@@ -39,6 +39,7 @@ pub mod harness;
 pub mod isolated_agent;
 pub mod loop_guard;
 pub mod loop_stages;
+pub mod marketplace;
 pub mod pipeline;
 pub mod pipeline_executor;
 pub mod pipeline_router;

@@ -44,6 +44,13 @@
 pub mod runner;
 pub mod suite;
 pub mod assertions;
+pub mod bench;
+pub mod chaos;
+pub mod loadtest;
+
+pub use bench::{BenchConfig, BenchResult, RegressionReport, bench_sync, bench_async, check_regression};
+pub use chaos::{FaultInjector, FaultConfig, ChaosScenario, FaultType};
+pub use loadtest::{LoadTestConfig, LoadTestResult, RequestOutcome, run_load_test};
 
 pub use assertions::{Assertion, AssertionResult};
 pub use runner::{MockResponder, TestRunner, RunResult};

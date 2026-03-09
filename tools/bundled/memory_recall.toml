@@ -1,0 +1,21 @@
+[tool]
+name = "memory_recall"
+description = "Recall a value from the agent's persistent memory"
+type = "native"
+tags = ["memory", "storage", "core"]
+
+[tool.parameters.key]
+type = "string"
+description = "Memory key to recall"
+required = true
+
+[tool.parameters.namespace]
+type = "string"
+description = "Memory namespace"
+default = "default"
+
+[execution]
+timeout_secs = 5
+
+[security]
+risk_level = "low"

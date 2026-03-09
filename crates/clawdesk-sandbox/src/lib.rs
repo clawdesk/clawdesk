@@ -22,6 +22,8 @@ pub mod dispatch;
 #[cfg(feature = "sandbox-docker")]
 pub mod docker;
 pub mod subprocess;
+#[cfg(feature = "sandbox-wasm")]
+pub mod wasm;
 pub mod workspace;
 
 use async_trait::async_trait;
@@ -33,6 +35,8 @@ use std::time::Duration;
 // Re-exports
 pub use dispatch::SandboxDispatcher;
 pub use subprocess::SubprocessSandbox;
+#[cfg(feature = "sandbox-wasm")]
+pub use wasm::{WasmConfig, WasmModuleInfo, WasmModuleRegistry, WasmSandbox};
 pub use workspace::WorkspaceSandbox;
 
 #[cfg(feature = "sandbox-docker")]
