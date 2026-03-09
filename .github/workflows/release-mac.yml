@@ -1,0 +1,211 @@
+name: Release Build - macOS
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g., 0.1.0)'
+        required: true
+        default: '0.1.0'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-tauri-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            name: macOS (Apple Silicon)
+          - target: x86_64-apple-darwin
+            name: macOS (Intel)
+
+    name: Build ${{ matrix.name }}
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'crates/clawdesk-tauri -> target'
+          cache-targets: true
+
+      - name: Cache Cargo bin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-bin-tauri-2.0
+
+      - name: Install frontend dependencies
+        working-directory: crates/ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: crates/ui
+        run: pnpm run build
+
+      - name: Download llama-server sidecar
+        run: bash scripts/download-llama-server.sh
+
+      - name: Install Tauri CLI
+        run: |
+          if ! command -v cargo-tauri &> /dev/null; then
+            cargo install tauri-cli --version "^2.0"
+          fi
+
+      # ── Apple Code Signing ──────────────────────────────────
+      - name: Import Apple certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+
+          # Decode certificate
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+
+          # Create temporary keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate
+          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          echo "Certificate imported"
+          security find-identity -v -p codesigning $KEYCHAIN_PATH
+
+      - name: Build Tauri App
+        working-directory: crates/clawdesk-tauri
+        run: cargo tauri build --target ${{ matrix.target }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+
+      # Sign the .app with Developer ID certificate
+      - name: Code sign app bundle
+        run: |
+          APP_PATH=$(find crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app" -maxdepth 1 | head -1)
+          echo "Signing: $APP_PATH"
+          codesign --force --options runtime --deep \
+            --sign "Developer ID Application" \
+            --timestamp \
+            "$APP_PATH"
+          echo "Signed with Developer ID"
+          codesign --verify --verbose "$APP_PATH"
+
+      # Re-create DMG with signed app and sign the DMG itself
+      - name: Create signed DMG
+        run: |
+          DMG_PATH=$(find crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" | head -1)
+          APP_PATH=$(find crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app" -maxdepth 1 | head -1)
+          rm -f "$DMG_PATH"
+          hdiutil create -volname "ClawDesk" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
+          codesign --force --sign "Developer ID Application" --timestamp "$DMG_PATH"
+          echo "DMG signed: $DMG_PATH"
+
+      # Notarize with Apple so Gatekeeper trusts it
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG_PATH=$(find crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" | head -1)
+          echo "Submitting for notarization: $DMG_PATH"
+
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --timeout 600
+
+          xcrun stapler staple "$DMG_PATH"
+          echo "Notarized and stapled"
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
+          rm -f $RUNNER_TEMP/certificate.p12
+
+      # ── Normalize artifact names ────────────────────────────
+      - name: Normalize macOS artifact names
+        run: |
+          DMG_DIR="crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/dmg"
+          BUNDLE_DIR="crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          if [[ "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
+            ARCH_SUFFIX="aarch64"
+          else
+            ARCH_SUFFIX="x64"
+          fi
+
+          DMG_FILE=$(ls -1 "$DMG_DIR"/*.dmg 2>/dev/null | head -1 || true)
+          if [[ -n "$DMG_FILE" ]]; then
+            mv "$DMG_FILE" "$DMG_DIR/ClawDesk_${ARCH_SUFFIX}.dmg"
+          fi
+
+          FILE=$(ls -1 "$BUNDLE_DIR"/*.app.tar.gz 2>/dev/null | head -1 || true)
+          if [[ -n "$FILE" ]]; then
+            NEW_FILE="$BUNDLE_DIR/ClawDesk_${ARCH_SUFFIX}.app.tar.gz"
+            mv "$FILE" "$NEW_FILE"
+            if [[ -f "${FILE}.sig" ]]; then
+              mv "${FILE}.sig" "${NEW_FILE}.sig"
+            fi
+          fi
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClawDesk-${{ matrix.target }}
+          path: |
+            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/dmg/ClawDesk_*.dmg
+            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz
+            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz.sig
+          if-no-files-found: error
+
+      - name: Create Release & Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version) || github.ref_name }}
+          name: ClawDesk ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version) || github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name || github.event.inputs.version, 'alpha') || contains(github.ref_name || github.event.inputs.version, 'beta') }}
+          overwrite_files: true
+          generate_release_notes: true
+          files: |
+            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/dmg/ClawDesk_*.dmg
+            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz
+            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz.sig
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

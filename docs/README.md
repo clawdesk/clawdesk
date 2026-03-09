@@ -8,6 +8,7 @@ Welcome to the ClawDesk documentation. ClawDesk is a privacy-first, security-har
 |----------|-------------|
 | [Architecture Overview](architecture.md) | System architecture, crate structure, data flow |
 | [Getting Started](getting-started.md) | Installation, first run, creating your first agent |
+| [tmux Desktop Guide](tmux-workspace.md) | tmux 10-screen desktop experience mirroring Tauri, onboarding, presets |
 | [Agent System](agent-system.md) | Agent runner, pipelines, failover, tools, context management |
 | [Memory System](memory-system.md) | Embeddings, hybrid search, memory lifecycle |
 | [Skills & Plugins](skills-and-plugins.md) | Skill authoring, registry, triggers, plugin hooks |
@@ -25,6 +26,11 @@ Welcome to the ClawDesk documentation. ClawDesk is a privacy-first, security-har
 
 # Or run the gateway server standalone
 cargo run -p clawdesk-cli -- gateway run
+
+# Launch a tmux desktop (10-screen Tauri-like experience)
+clawdesk tmux setup          # First-time onboarding + launch
+clawdesk tmux launch         # Quick launch (desktop layout)
+clawdesk tmux launch -l chat # Chat-focused layout
 
 # Run tests
 cargo test --workspace

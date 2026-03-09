@@ -1,25 +1,30 @@
-#!/bin/sh
-# ClawDesk — Universal Install Script
-#
-# Usage:
-#   curl -fsSL https://get.clawdesk.dev | sh
+#!/bin/bash
+set -euo pipefail
+
+# ClawDesk Installer for macOS and Linux
+# Usage: curl -fsSL https://clawdesk.dev/install.sh | bash
 #
 # This script:
 #   1. Detects platform (OS + architecture)
-#   2. Downloads the pre-built binary from GitHub Releases
+#   2. Downloads the pre-built Rust binary from GitHub Releases
 #   3. Verifies SHA-256 checksum
 #   4. Installs to /usr/local/bin (or ~/.local/bin if no permission)
-#   5. Registers the background daemon (launchd/systemd)
-#   6. Starts the daemon
-#   7. Runs diagnostics
+#   5. Installs shell completions (zsh, bash, fish)
+#   6. Registers the background daemon (launchd / systemd)
+#   7. Optionally installs tmux & sets up the Desktop layout
+#   8. Runs diagnostics (clawdesk doctor)
 #
 # Environment variables:
-#   CLAWDESK_VERSION   — Pin a specific version (default: latest)
-#   CLAWDESK_INSTALL   — Custom install directory
-#   CLAWDESK_NO_DAEMON — Skip daemon installation (set to 1)
+#   CLAWDESK_VERSION      — Pin a specific version (default: latest)
+#   CLAWDESK_INSTALL      — Custom install directory
+#   CLAWDESK_INSTALL_METHOD — binary (default) or source
+#   CLAWDESK_CHANNEL      — stable (default), beta, dev
+#   CLAWDESK_NO_DAEMON    — Skip daemon installation (set to 1)
 #   CLAWDESK_NO_MODIFY_PATH — Skip PATH modification (set to 1)
-
-set -e
+#   CLAWDESK_NO_PROMPT    — Non-interactive / CI mode (set to 1)
+#   CLAWDESK_NO_ONBOARD   — Skip onboarding wizard (set to 1)
+#   CLAWDESK_DRY_RUN      — Print plan, make no changes (set to 1)
+#   CLAWDESK_VERBOSE      — Enable debug output (set to 1)
 
 # ---- Constants ---------------------------------------------------------------
 

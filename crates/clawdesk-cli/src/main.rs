@@ -34,6 +34,8 @@ mod self_update;
 mod skill_author;
 mod skill_cli;
 mod skill_registry;
+mod tmux;
+mod tmux_onboard;
 
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
@@ -137,6 +139,11 @@ enum Commands {
         #[command(subcommand)]
         action: UpdateAction,
     },
+    /// tmux workspace manager — launch multi-pane terminal layouts
+    Tmux {
+        #[command(subcommand)]
+        action: TmuxAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -151,6 +158,56 @@ enum UpdateAction {
     },
     /// Rollback to the previous binary version
     Rollback,
+}
+
+#[derive(Subcommand)]
+enum TmuxAction {
+    /// Launch a tmux workspace with a preset layout
+    Launch {
+        /// Layout preset: desktop, workspace, monitor, chat
+        #[arg(long, short = 'l', default_value = "desktop")]
+        layout: String,
+        /// Session name
+        #[arg(long, short = 's', default_value = "clawdesk")]
+        session: String,
+        /// Workspace / project directory
+        #[arg(long, short = 'w')]
+        workspace: Option<String>,
+        /// Model to use in agent panes
+        #[arg(long, short = 'm')]
+        model: Option<String>,
+        /// Do not auto-attach to the session
+        #[arg(long)]
+        no_attach: bool,
+    },
+    /// Run interactive tmux onboarding (first-time setup + layout launch)
+    Setup {
+        /// Session name for the workspace
+        #[arg(long, short = 's', default_value = "clawdesk")]
+        session: String,
+        /// Workspace / project directory
+        #[arg(long, short = 'w')]
+        workspace: Option<String>,
+    },
+    /// List active ClawDesk tmux sessions
+    #[command(alias = "ls")]
+    List,
+    /// Attach to an existing ClawDesk tmux session
+    Attach {
+        /// Session name to attach to
+        #[arg(default_value = "clawdesk")]
+        session: String,
+    },
+    /// Kill a ClawDesk tmux session
+    Kill {
+        /// Session name to kill
+        #[arg(default_value = "clawdesk")]
+        session: String,
+    },
+    /// Show available layouts and descriptions
+    Layouts,
+    /// Show tmux key bindings cheat sheet
+    Keys,
 }
 
 #[derive(Subcommand)]
@@ -697,6 +754,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Update { action } => {
             cmd_update(action).await?;
         }
+        Commands::Tmux { action } => {
+            cmd_tmux(action).await?;
+        }
     }
 
     Ok(())
@@ -1051,6 +1111,79 @@ async fn cmd_update(
                 Ok(()) => println!("✅ Rolled back to previous version"),
                 Err(e) => eprintln!("❌ Rollback failed: {e}"),
             }
+        }
+    }
+    Ok(())
+}
+
+// ── Tmux commands ────────────────────────────────────────────
+
+/// Handle all `clawdesk tmux *` subcommands.
+async fn cmd_tmux(
+    action: TmuxAction,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match action {
+        TmuxAction::Launch {
+            layout,
+            session,
+            workspace,
+            model,
+            no_attach,
+        } => {
+            let config = tmux::TmuxConfig {
+                session_name: session,
+                layout: tmux::Layout::from_str(&layout),
+                gateway_url: "http://127.0.0.1:18789".to_string(),
+                model,
+                workspace_dir: workspace,
+                attach: !no_attach,
+            };
+            tmux::launch(&config).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                e.into()
+            })?;
+        }
+        TmuxAction::Setup { session, workspace } => {
+            tmux_onboard::run_tmux_onboarding(Some(session), workspace).await?;
+        }
+        TmuxAction::List => {
+            let sessions = tmux::list_sessions();
+            if sessions.is_empty() {
+                println!("No active ClawDesk tmux sessions.");
+                println!("  Start one with: clawdesk tmux launch");
+            } else {
+                println!("Active ClawDesk tmux sessions:");
+                for s in &sessions {
+                    println!("  • {s}");
+                }
+                println!();
+                println!("  Attach: clawdesk tmux attach <session>");
+                println!("  Kill:   clawdesk tmux kill <session>");
+            }
+        }
+        TmuxAction::Attach { session } => {
+            if !tmux::session_exists(&session) {
+                eprintln!("Session '{session}' does not exist.");
+                let sessions = tmux::list_sessions();
+                if !sessions.is_empty() {
+                    eprintln!("Available sessions: {}", sessions.join(", "));
+                }
+                std::process::exit(1);
+            }
+            tmux::attach_session(&session).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                e.into()
+            })?;
+        }
+        TmuxAction::Kill { session } => {
+            match tmux::kill_session(&session) {
+                Ok(()) => println!("Killed session '{session}'"),
+                Err(e) => eprintln!("Failed to kill session: {e}"),
+            }
+        }
+        TmuxAction::Layouts => {
+            tmux::print_layouts();
+        }
+        TmuxAction::Keys => {
+            tmux::print_keybindings();
         }
     }
     Ok(())

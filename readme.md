@@ -14,6 +14,7 @@
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
   <a href="#architecture">Architecture</a> ·
+  <a href="#tmux-desktop">tmux Desktop</a> ·
   <a href="#security-model">Security</a> ·
   <a href="#crate-structure">Crates</a> ·
   <a href="#development">Development</a> ·
@@ -22,7 +23,7 @@
 
 ---
 
-ClawDesk is a Tauri 2.0 desktop application that runs AI agents locally with full audit trails, identity verification, and zero-trust networking. Built as a **27-crate Rust workspace**, it provides a production-grade agent runtime with a React + TypeScript frontend.
+ClawDesk is a Tauri 2.0 desktop application that runs AI agents locally with full audit trails, identity verification, and zero-trust networking. Built as a **40+-crate Rust workspace**, it provides a production-grade agent runtime with a React + TypeScript frontend, a full CLI with 40+ commands, tmux desktop workspace that mirrors the Tauri experience with 10 screens, and a ratatui-based TUI.
 
 Inspired by [OpenClaw](https://github.com/openclaw/openclaw) — the TypeScript AI agent gateway — ClawDesk reimagines the same powerful concepts (multi-channel messaging, skill orchestration, agent sessions) as a **native desktop app** with a pure Rust backend. Less moving parts, fewer dependencies, one binary.
 
@@ -49,12 +50,24 @@ OpenClaw is incredibly capable — but running a Node.js gateway, wiring up chan
 | | |
 |---|---|
 | **Local-First Runtime** | Agents execute on your machine. No cloud dependency required. |
-| **Security Hardened** | CascadeScanner (Aho-Corasick + Regex), SHA-256 audit chain, scoped tokens, identity contracts. |
-| **Multi-Model Support** | Claude (Haiku/Sonnet/Opus), OpenAI, Gemini, Bedrock, and local models via Ollama. |
-| **Skill Registry** | 15 built-in skills ported from [OpenClaw's skill system](https://github.com/openclaw/openclaw), with hot-loading, activation/deactivation, and per-skill ACLs. |
-| **WireGuard Tunnel** | Peer-to-peer encrypted networking with invite-based device pairing. |
-| **Full Observability** | Real-time tracing, cost tracking, token budgeting, and tamper-evident audit logs. |
-| **Desktop UI** | Tauri 2.0 + React frontend with intuitive navigation — Chat, Overview, Automations, Skills, Settings, and more. |
+| **Security Hardened** | CascadeScanner (Aho-Corasick + Regex), SHA-256 audit chain, scoped tokens, identity contracts, plugin sandbox. |
+| **Multi-Model Support** | Claude (Haiku/Sonnet/Opus), OpenAI, Gemini, Ollama, Azure, Bedrock, Cohere, Vertex — 8 providers via a single trait. |
+| **25+ Channel Adapters** | Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, IRC, Teams, iMessage, Mastodon, Nostr, Twitch, and more. |
+| **Skill Registry** | 15+ built-in skills with hot-loading, trigger evaluation, token-budgeted knapsack selection, and per-skill ACLs. |
+| **tmux Desktop** | Full 10-window terminal layout mirroring the Tauri desktop app — Dashboard, Chat, Agents, Skills, Security, and more. Navigate with `Ctrl-B + 0..9`. |
+| **Terminal UI (TUI)** | Ratatui-based interactive dashboard with Vim keybindings, 10 screens, 4 themes, model picker, and 30fps event loop. |
+| **Agent Pipelines** | Declarative TOML pipelines with DAG execution, gates, parallel branches, checkpointing, and dead-letter queue. |
+| **Memory System** | Hybrid search (Vector + BM25 + RRF) with temporal decay, MMR deduplication, and batch ingestion pipeline. |
+| **Browser Automation** | Chrome DevTools Protocol integration — navigate, click, type, screenshot, DOM intelligence. |
+| **RAG Pipeline** | Document ingestion (PDF, text), semantic chunking, vector search retrieval. |
+| **MCP Support** | Model Context Protocol client/server over JSON-RPC 2.0 with stdio and SSE transports. |
+| **Local Models** | Hardware detection (CUDA/Metal/CPU), model database, llama-server lifecycle management. |
+| **A2A Protocol** | Agent-to-Agent communication with capability discovery, task FSM, and bipartite routing. |
+| **WireGuard Tunnel** | Peer-to-peer encrypted networking with invite-based device pairing. NAT traversal via STUN. |
+| **Full Observability** | OpenTelemetry tracing + metrics, cost tracking, token budgeting, and tamper-evident audit logs. |
+| **Self-Update** | Atomic binary self-update from GitHub with SHA-256 verification and rollback support. |
+| **Encrypted Backups** | AES-256-GCM encrypted config backups with Argon2 key derivation. |
+| **Desktop UI** | Tauri 2.0 + React frontend with 138+ IPC commands, system tray, markdown rendering, drag-drop. |
 
 ## Powered by SochDB
 
@@ -67,19 +80,31 @@ All persistent storage — agent state, sessions, audit logs, skill configs, and
 
 ## Channels
 
-Channels are messaging platform integrations that let your agent send and receive messages across different surfaces. ClawDesk implements the channel abstraction from OpenClaw as Rust traits:
+Channels are messaging platform integrations that let your agent send and receive messages across different surfaces. ClawDesk implements 25+ channel adapters as Rust traits:
 
 | Channel | Status | Description |
 |---------|--------|-------------|
-| **Telegram** | Supported | Bot API via grammY-equivalent Rust client |
+| **Telegram** | Supported | Bot API with group/DM routing |
 | **Discord** | Supported | Bot with slash commands, DM pairing, guild routing |
 | **Slack** | Supported | Bolt-equivalent with app/bot token auth |
-| **WebChat** | Supported | Built-in browser UI served from the gateway |
+| **WhatsApp** | Supported | Baileys-equivalent bridge |
+| **Signal** | Supported | signal-cli bridge |
+| **Matrix** | Supported | Matrix SDK client |
+| **Email** | Supported | IMAP/SMTP with MIME parsing |
+| **IRC** | Supported | Standard IRC client with SASL auth |
+| **Microsoft Teams** | Supported | Bot Framework adapter |
+| **iMessage** | Supported | AppleScript bridge (macOS) |
+| **Mastodon** | Supported | ActivityPub-compatible API |
+| **Nostr** | Supported | NIP-01 relay client |
+| **Twitch** | Supported | IRC-based chat integration |
+| **Line** | Supported | Messaging API |
+| **Lark** | Supported | Open API |
+| **Mattermost** | Supported | WebSocket + REST API |
+| **Nextcloud Talk** | Supported | Signaling API |
+| **Zalo** | Supported | Official API |
+| **WebChat** | Built-in | Browser UI served from the gateway |
+| **Internal** | Built-in | In-process test channel |
 | **Google Chat** | Planned | Chat API integration |
-| **Signal** | Planned | signal-cli bridge |
-| **Microsoft Teams** | Planned | Bot Framework adapter |
-| **Matrix** | Planned | Matrix SDK client |
-| **WhatsApp** | Planned | Baileys-equivalent bridge |
 
 Each channel implements the `Channel` trait (`clawdesk-channel` crate), providing a uniform interface for message routing, group handling, allowlists, and DM pairing — regardless of the underlying platform.
 
@@ -100,7 +125,7 @@ Skills are modular capabilities that extend what an agent can do. ClawDesk's ski
 │                    ClawDesk Desktop App                       │
 ├──────────────┬───────────────────────────────────────────────┤
 │  React UI    │              Tauri IPC Bridge                 │
-│  (TypeScript)│  21 commands · typed invoke() wrappers        │
+│  (TypeScript)│  138+ commands · typed invoke() wrappers      │
 ├──────────────┴───────────────────────────────────────────────┤
 │                      Rust Backend                            │
 │  ┌─────────────┬──────────────┬──────────────┬────────────┐  │
@@ -116,37 +141,100 @@ Skills are modular capabilities that extend what an agent can do. ClawDesk's ski
 
 ### How it works
 
-The React frontend communicates with the Rust backend through **21 typed IPC commands** over the Tauri bridge. The backend manages agent lifecycle, security scanning, skill orchestration, and model routing — all in-process, no sidecar daemons.
+The React frontend communicates with the Rust backend through **138+ typed IPC commands** over the Tauri bridge. The backend manages agent lifecycle, security scanning, skill orchestration, and model routing — all in-process, no sidecar daemons.
 
 ## Crate Structure
 
 <details>
-<summary><strong>All 27 crates</strong> (click to expand)</summary>
+<summary><strong>All 40+ crates</strong> (click to expand)</summary>
 
+### Core Layer
 | Crate | Purpose |
 |-------|---------|
-| `clawdesk-tauri` | Tauri 2.0 app shell, IPC commands, application state |
-| `clawdesk-agents` | Agent runner, tool registry, context assembly |
-| `clawdesk-providers` | LLM provider trait + implementations (Anthropic, OpenAI, Gemini, Bedrock, Ollama) |
-| `clawdesk-skills` | Skill definition, registry, bundled skills, hot-loading |
-| `clawdesk-security` | CascadeScanner, AuditLogger, IdentityContract, rate limiting, allowlists |
-| `clawdesk-tunnel` | WireGuard-based P2P tunnel, invite management, metrics |
-| `clawdesk-gateway` | HTTP gateway, Responses API, SSE streaming |
-| `clawdesk-channel` | Channel trait for messaging platform integration |
-| `clawdesk-channels` | Channel implementations (Telegram, Discord, Slack, etc.) |
-| `clawdesk-domain` | Domain models, session state machines |
-| `clawdesk-types` | Shared type definitions (messages, envelopes, security types) |
-| `clawdesk-storage` | Storage abstraction layer |
-| `clawdesk-sochdb` | SochDB embedded database integration |
-| `clawdesk-memory` | Memory and vector search integration |
-| `clawdesk-media` | Media processing (images, audio, video) |
-| `clawdesk-cron` | Scheduled task execution |
-| `clawdesk-plugin` | Plugin system and lifecycle management |
-| `clawdesk-infra` | Infrastructure utilities (config, error handling, observability) |
-| `clawdesk-cli` | Command-line interface |
-| `clawdesk-autoreply` | Auto-reply rule engine |
-| `clawdesk-acp` | Agent Communication Protocol |
-| `ui` | React + TypeScript + Vite frontend |
+| `clawdesk-types` | Shared types: errors, messages, sessions, config, tokenizer |
+| `clawdesk-storage` | Storage trait ports: SessionStore, ConversationStore, VectorStore, GraphStore |
+| `clawdesk-domain` | Pure business logic — context guard, compaction, routing, prompt building |
+| `clawdesk-sochdb` | SochDB embedded ACID database: WAL, MVCC, HNSW vector search, checkpointing |
+
+### Agent Engine
+| Crate | Purpose |
+|-------|---------|
+| `clawdesk-agents` | Agent execution engine: AgentRunner, pipelines, failover, tool orchestration |
+| `clawdesk-providers` | 8 LLM providers: Anthropic, OpenAI, Gemini, Ollama, Azure, Bedrock, Cohere, Vertex |
+| `clawdesk-runtime` | Durable execution: checkpoints, activity journal, dead-letter queue, lease management |
+| `clawdesk-skills` | Skill system: registry, trigger evaluation, token-budgeted knapsack, env injection |
+| `clawdesk-plugin` | Plugin lifecycle: hooks, sandbox, dependency resolution, capability enforcement |
+
+### Memory & Knowledge
+| Crate | Purpose |
+|-------|---------|
+| `clawdesk-memory` | Embeddings, BM25, hybrid search (RRF), batch pipeline, temporal decay, MMR |
+| `clawdesk-rag` | Document ingestion, PDF/text extraction, semantic chunking, vector retrieval |
+
+### Communication
+| Crate | Purpose |
+|-------|---------|
+| `clawdesk-channel` | Channel trait hierarchy: Channel → Threaded + Streaming + Reactions |
+| `clawdesk-channels` | 25+ implementations: Slack, Discord, Telegram, WhatsApp, Signal, Matrix, IRC, etc. |
+| `clawdesk-bus` | Event-sourced reactive bus with weighted fair queuing |
+| `clawdesk-autoreply` | Auto-reply pipeline: classify → route → enrich → execute → format → deliver |
+| `clawdesk-threads` | Namespaced chat-thread persistence on SochDB |
+| `clawdesk-acp` | Agent-to-Agent protocol: agent cards, task FSM, capability discovery |
+
+### Security
+| Crate | Purpose |
+|-------|---------|
+| `clawdesk-security` | Audit logging (hash-chained), CascadeScanner, ACL, OAuth2 + PKCE, credential vault |
+| `clawdesk-sandbox` | Multi-modal isolation: Docker, subprocess, workspace confinement |
+
+### Networking & Discovery
+| Crate | Purpose |
+|-------|---------|
+| `clawdesk-gateway` | Axum HTTP/WS: REST + OpenAI-compatible + admin + A2A routes |
+| `clawdesk-tunnel` | WireGuard P2P encrypted networking, NAT traversal via STUN |
+| `clawdesk-discovery` | mDNS service advertisement + SPAKE2 password-authenticated pairing |
+| `clawdesk-mcp` | Model Context Protocol: JSON-RPC 2.0 client/server, stdio & SSE |
+
+### Advanced Engine
+| Crate | Purpose |
+|-------|---------|
+| `clawdesk-consensus` | Byzantine PBFT for multi-agent voting |
+| `clawdesk-planner` | Dynamic task graph (DTGG) with HEFT scheduling |
+| `clawdesk-canvas` | Canvas host + A2UI protocol for agent-generated UI |
+| `clawdesk-browser` | Browser automation via Chrome DevTools Protocol |
+| `clawdesk-media` | Audio transcription, image analysis, TTS, link previews |
+| `clawdesk-local-models` | Local LLM management: hardware detection, llama-server lifecycle |
+| `clawdesk-simd` | SIMD kernels: cosine similarity (AVX2/NEON), dot product |
+
+### Infrastructure
+| Crate | Purpose |
+|-------|---------|
+| `clawdesk-infra` | Backup (AES-256), clipboard, daemon, dispatch queue, git-sync, TLS |
+| `clawdesk-cron` | Cron scheduling with overlap prevention and heartbeat monitoring |
+| `clawdesk-daemon` | Platform-native service management (launchd/systemd/Windows) |
+| `clawdesk-adapters` | External service adapter: OAuth lifecycle, rate limiting, circuit breaker |
+| `clawdesk-extensions` | Integration registry, credential vault, health monitoring |
+| `clawdesk-migrate` | Migration from OpenClaw (YAML agents, SQLite sessions) |
+
+### Observability
+| Crate | Purpose |
+|-------|---------|
+| `clawdesk-observability` | OpenTelemetry tracing + metrics, GenAI semantic conventions |
+| `clawdesk-telemetry` | TracerProvider, MeterProvider, structured logging, OTLP export |
+
+### Frontends
+| Crate | Purpose |
+|-------|---------|
+| `clawdesk-tauri` | Tauri 2.0 desktop: 138+ IPC commands, AppState, system tray |
+| `clawdesk-cli` | CLI: 40+ commands, tmux desktop (10-window), onboarding, agent REPL |
+| `clawdesk-tui` | Ratatui TUI: 10 screens, Vim keys, 4 themes, session multiplexing |
+| `ui` | React + TypeScript + Vite frontend, Tailwind CSS |
+
+### Testing
+| Crate | Purpose |
+|-------|---------|
+| `clawdesk-bench` | Benchmark harness: provider latency, throughput, cost tracking |
+| `clawdesk-test` | YAML test cases with deterministic replay |
 
 </details>
 
@@ -202,9 +290,156 @@ cargo tauri dev
 cargo tauri build
 ```
 
+### CLI Quick Start
+
+```bash
+# Build the CLI
+cargo build -p clawdesk-cli
+
+# Interactive first-time setup
+clawdesk init
+
+# tmux workspace (multi-pane terminal experience)
+clawdesk tmux setup              # Guided onboarding + auto-launch
+clawdesk tmux launch             # 4-pane workspace layout
+clawdesk tmux launch -l chat     # Focused chat layout
+clawdesk tmux launch -l monitor  # Ops monitoring layout
+
+# Start the gateway
+clawdesk gateway run
+
+# Chat with an agent
+clawdesk agent run
+clawdesk agent msg "hello"
+
+# Run diagnostics
+clawdesk doctor
+```
+
 `cargo tauri dev` and `cargo tauri build` automatically prepare the bundled `llama-server` sidecar used by Local Models. A machine-level `llama-server` install is not required.
 
 If you need to skip the auto-download in offline CI, set `CLAWDESK_SKIP_LLAMA_SERVER_DOWNLOAD=1` and provide the sidecar files under [crates/clawdesk-tauri/binaries](/Users/sushanth/llamabot/clawdesk/crates/clawdesk-tauri/binaries) yourself.
+
+## CLI
+
+ClawDesk ships a full-featured CLI with over 40 commands. Build it with `cargo build -p clawdesk-cli`.
+
+<details>
+<summary><strong>Full command tree</strong> (click to expand)</summary>
+
+```
+clawdesk
+├── gateway run              Start the HTTP gateway server
+├── message send <text>      Send a message to the agent
+├── channels status          Show channel connectivity
+├── plugins {list, reload, info}
+├── cron {list, create, trigger, delete}
+├── config {set, get, backup, restore}
+├── agent
+│   ├── message <text>       Send a one-shot message
+│   ├── run                  Interactive REPL session (Claude Code equivalent)
+│   ├── add <id>             Add agent from TOML or wizard
+│   ├── validate             Validate all agent definitions
+│   ├── list                 List agents with routing table
+│   ├── apply                Hot-reload agent definitions
+│   └── export <id>          Export agent to TOML
+├── skill
+│   ├── list / info          Browse installed skills
+│   ├── search <query>       Search the skill registry
+│   ├── install <name>       Install a skill pack
+│   ├── uninstall <name>     Remove a skill
+│   ├── create <name>        Scaffold a new skill
+│   ├── lint / test          Validate skill definitions
+│   ├── audit / check        Security audit for skills
+│   └── publish              Publish to registry
+├── tmux
+│   ├── setup                Guided onboarding + tmux launch
+│   ├── launch               Launch tmux session (default: desktop — 10 screens)
+│   ├── list                 List active ClawDesk sessions
+│   ├── attach <session>     Attach to a session
+│   ├── kill <session>       Kill a session
+│   ├── layouts              Show available layout presets
+│   └── keys                 Show tmux key bindings cheat sheet
+├── tui                      Launch the ratatui terminal UI
+├── login                    Authenticate with provider APIs
+├── doctor                   Run diagnostics
+├── init                     Interactive first-time setup wizard
+├── completions <shell>      Generate shell completions
+├── security audit           Run security audit (8 checks)
+├── daemon
+│   ├── run / install / uninstall
+│   ├── start / stop / restart
+│   ├── status               PID, uptime, health
+│   └── logs                 Tail daemon logs
+└── update
+    ├── check                Check for newer version
+    ├── apply                Download and install update
+    └── rollback             Rollback to previous version
+```
+
+</details>
+
+## tmux Desktop
+
+ClawDesk includes a built-in tmux session manager that mirrors the **Tauri desktop app** in the terminal. The default **desktop** layout creates 10 tmux windows — one for each screen in the Tauri app.
+
+```bash
+# First-time: guided onboarding → provider setup → layout selection → auto-launch
+clawdesk tmux setup
+
+# Quick launch the full desktop experience (10 screens)
+clawdesk tmux launch
+
+# Quick-start presets
+clawdesk tmux launch --layout workspace    # 4-pane dev layout
+clawdesk tmux launch --layout monitor      # 3-pane ops dashboard
+clawdesk tmux launch --layout chat         # 2-pane focused chat
+```
+
+### Desktop Layout — 10 Screens
+
+Navigate with `Ctrl-B + 0..9`, just like clicking sidebar items in the Tauri app:
+
+| Key | Screen | Content |
+|-----|--------|---------|
+| `Ctrl-B + 0` | Dashboard | System health, providers, agent list, daemon status |
+| `Ctrl-B + 1` | Chat | Agent REPL (interactive conversation) |
+| `Ctrl-B + 2` | Sessions | Session list and detail/export |
+| `Ctrl-B + 3` | Agents | Agent registry, management, team mode |
+| `Ctrl-B + 4` | Channels | 25+ channel status and configuration |
+| `Ctrl-B + 5` | Memory | Hybrid search stats (HNSW, BM25, RRF) |
+| `Ctrl-B + 6` | Skills | 15+ skill registry, install, lint, audit |
+| `Ctrl-B + 7` | Settings | Config viewer, 8-provider setup guide |
+| `Ctrl-B + 8` | Logs | Live gateway output + daemon logs |
+| `Ctrl-B + 9` | Security | Security audit report + 7-layer overview |
+
+### Session Management
+
+```bash
+clawdesk tmux list                 # List active sessions
+clawdesk tmux attach clawdesk      # Re-attach to a detached session
+clawdesk tmux kill clawdesk        # Clean up
+clawdesk tmux keys                 # Show key bindings cheat sheet
+clawdesk tmux layouts              # Show all layout options
+```
+
+Mouse support is enabled by default. `Ctrl-B + z` zooms any pane to full screen.
+
+See the full [tmux Desktop Guide](docs/tmux-workspace.md) for details.
+
+## Terminal UI (TUI)
+
+The ratatui-based TUI provides a full interactive dashboard in the terminal with Vim keybindings:
+
+```bash
+clawdesk tui                       # Launch with dark theme
+clawdesk tui --theme light         # Light theme
+clawdesk tui --theme high-contrast # High contrast
+```
+
+**Screens:** Dashboard, Chat, Sessions, Agents, Channels, Memory, Skills, Settings, Logs, Security
+
+**Controls:** `j`/`k` scroll, `i` insert mode, `Tab` cycle screens, `Ctrl+1-9` switch sessions, `q` quit
 
 ## Security Model
 
@@ -271,33 +506,33 @@ clawdesk/
 ```
 
 <details>
-<summary><strong>Tauri IPC Commands</strong> (21 commands)</summary>
+<summary><strong>Tauri IPC Commands</strong> (138+ commands)</summary>
 
-The frontend communicates with the Rust backend through typed IPC commands:
+The frontend communicates with the Rust backend through typed IPC commands across these categories:
 
-| Command | Description |
-|---------|-------------|
-| `get_health` | Engine health check (version, uptime, skills, tunnel) |
-| `create_agent` | Create agent with IdentityContract and security scan |
-| `list_agents` | List all registered agents |
-| `delete_agent` | Delete agent and clean up identity/sessions |
-| `import_openclaw_config` | Import OpenClaw JSON config with security scanning |
-| `send_message` | Send message with CascadeScanner + audit logging |
-| `get_session_messages` | Retrieve message history for an agent |
-| `list_skills` | List all skills from the real SkillRegistry |
-| `activate_skill` | Activate a skill in the registry |
-| `deactivate_skill` | Deactivate a skill in the registry |
-| `list_pipelines` | List agent pipelines |
-| `create_pipeline` | Create a multi-agent pipeline |
-| `run_pipeline` | Execute a pipeline |
-| `get_metrics` | Get cost/token metrics |
-| `get_security_status` | Query CascadeScanner + AuditLogger status |
-| `get_agent_trace` | Get execution trace for an agent |
-| `get_tunnel_status` | WireGuard tunnel metrics |
-| `create_invite` | Create device pairing invite |
-| `get_config` | Get runtime configuration |
-| `list_models` | List available LLM models |
-| `list_channels` | List messaging channels |
+| Category | Commands | Examples |
+|----------|----------|----------|
+| **Agent Management** | 7 | `create_agent`, `list_agents`, `update_agent`, `delete_agent`, `clone_agent` |
+| **Chat & Sessions** | 9 | `send_message`, `get_session_messages`, `list_sessions`, `create_chat`, `export_session_markdown` |
+| **Skills** | 6 | `list_skills`, `activate_skill`, `deactivate_skill`, `register_skill`, `validate_skill` |
+| **Memory** | 5 | `remember_memory`, `recall_memories`, `forget_memory`, `get_memory_stats`, `remember_batch` |
+| **Security & Auth** | 10 | `get_security_status`, `start_oauth_flow`, `generate_scoped_token`, `add_acl_rule`, `approve_request` |
+| **Configuration** | 6 | `get_config`, `set_config`, `list_models`, `test_llm_connection`, `list_providers` |
+| **Browser** | 11 | `browser_navigate`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_scroll` |
+| **Canvas & A2UI** | 8 | `canvas_present`, `canvas_hide`, `a2ui_push`, `a2ui_reset`, `device_info` |
+| **MCP** | 4 | `mcp_connect`, `mcp_call`, `mcp_discover`, `mcp_list_tools` |
+| **Threads** | 7 | `create_thread`, `get_thread`, `append_message`, `get_messages`, `thread_stats` |
+| **Discovery & Tunnel** | 7 | `discovery_mdns_start`, `discovery_pair`, `tunnel_create_invite`, `tunnel_metrics` |
+| **Media** | 5 | `media_transcribe_audio`, `media_analyze_image`, `media_tts` |
+| **RAG** | 4 | `rag_ingest_file`, `rag_search`, `rag_list_documents`, `rag_remove_document` |
+| **Local Models** | 5 | `local_models_status`, `local_models_recommend`, `local_models_download`, `local_models_start` |
+| **Observability** | 6 | `get_metrics`, `get_agent_trace`, `list_traces`, `get_observability_dashboard` |
+| **Cron** | 4 | `cron_list`, `cron_create`, `cron_remove`, `cron_trigger` |
+| **Plugins** | 4 | `list_plugins`, `reload_plugin`, `enable_plugin`, `disable_plugin` |
+| **Channels** | 3 | `list_channels`, `update_channel_config`, `test_channel_connection` |
+| **System** | 6 | `daemon_status`, `clipboard_get`, `terminal_execute`, `file_read`, `file_write` |
+| **Orchestration** | 5 | `orchestration_create_team`, `orchestration_add_agent`, `orchestration_spawn` |
+| **Migration** | 3 | `migrate_import`, `migrate_preview`, `migrate_run` |
 
 </details>
 

@@ -44,6 +44,24 @@ cargo run -p clawdesk-cli -- gateway run
 cargo run -p clawdesk-cli -- --help
 ```
 
+### tmux Desktop
+
+For the full Tauri-like experience in the terminal with 10 screens (Dashboard, Chat, Agents, Skills, etc.):
+
+```bash
+# First-time: guided onboarding + auto-launch
+clawdesk tmux setup
+
+# Quick launch the desktop layout (10 windows)
+clawdesk tmux launch
+
+# Or a simpler preset
+clawdesk tmux launch --layout workspace   # 4-pane dev layout
+clawdesk tmux launch --layout chat         # Focused chat
+```
+
+Navigate between screens with `Ctrl-B + 0..9`. See the full [tmux Desktop Guide](tmux-workspace.md) for details.
+
 ### Tests
 
 ```bash
@@ -105,6 +123,10 @@ Click on your agent to open a chat. Type a message and press Enter. You'll see:
 - **Automations** — Set up cron-triggered agent tasks
 - **Canvas** — Create structured documents with AI assistance
 - **Memory** — The agent remembers past conversations via the memory system
+- **tmux Workspace** — Launch `clawdesk tmux setup` for a multi-pane terminal development environment
+- **Terminal UI** — Run `clawdesk tui` for a ratatui-based dashboard with Vim keybindings
+- **Security Audit** — Run `clawdesk security audit --deep` to scan for security issues
+- **Shell Completions** — Generate with `clawdesk completions bash` (or zsh, fish, powershell)
 
 ## Directory Structure
 

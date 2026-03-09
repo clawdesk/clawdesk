@@ -1,6 +1,6 @@
 # Architecture Overview
 
-ClawDesk is a 27-crate Rust workspace following hexagonal (ports-and-adapters) architecture. Every component communicates through trait-defined ports, enabling independent testing and swappable implementations.
+ClawDesk is a **40+-crate Rust workspace** following hexagonal (ports-and-adapters) architecture. Every component communicates through trait-defined ports, enabling independent testing and swappable implementations.
 
 ## Design Principles
 
@@ -128,9 +128,26 @@ The crate DAG has a critical path depth of 6. Dependencies flow strictly upward 
 | Crate | Purpose |
 |-------|---------|
 | `clawdesk-tauri` | Tauri 2.0 desktop application shell: ~138 IPC commands, AppState, system tray |
-| `clawdesk-cli` | Command-line interface: `gateway run`, `message send`, `config`, `doctor` |
-| `clawdesk-tui` | Terminal UI for interactive chat with streaming and model picking |
-| `ui` | React + TypeScript + Vite frontend: 7 pages, Tailwind CSS, Tauri IPC bindings |
+| `clawdesk-cli` | Full CLI: 40+ commands, tmux desktop workspace (10-window Tauri mirror), onboarding wizard, security audit, self-update, agent REPL |
+| `clawdesk-tui` | Ratatui terminal UI: 10 screens, Vim keybindings, 4 themes, 30fps event loop, session multiplexing |
+| `ui` | React + TypeScript + Vite frontend: 7+ pages, Tailwind CSS, Tauri IPC bindings |
+
+### Advanced Engine
+
+| Crate | Purpose |
+|-------|----------|
+| `clawdesk-rag` | Document ingestion, PDF/text extraction, semantic chunking, vector search retrieval |
+| `clawdesk-canvas` | Canvas host + A2UI protocol for agent-generated interactive UI in WebView |
+| `clawdesk-consensus` | Byzantine PBFT consensus for multi-agent voting and agreement |
+| `clawdesk-planner` | Dynamic task graph (DTGG) with HEFT scheduling and graph rewriting |
+| `clawdesk-local-models` | Local LLM management: hardware detection (CUDA/Metal/CPU), model DB, llama-server lifecycle |
+| `clawdesk-mcp` | Model Context Protocol: JSON-RPC 2.0 client/server, stdio & SSE transports |
+| `clawdesk-sandbox` | Multi-modal isolation: Docker, subprocess, workspace confinement |
+| `clawdesk-simd` | SIMD compute kernels: cosine similarity (AVX2/NEON), dot product, Euclidean distance |
+| `clawdesk-extensions` | Integration registry with credential vault, OAuth2 flows, external service health monitoring |
+| `clawdesk-migrate` | Migration from OpenClaw (YAML agents, SQLite sessions, skill definitions) |
+| `clawdesk-bench` | Benchmark harness for provider latency, throughput, and cost tracking |
+| `clawdesk-test` | YAML-based test cases with deterministic replay and assertion system |
 
 ## Data Flow: Message Processing
 
