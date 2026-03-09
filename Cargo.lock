@@ -1575,6 +1575,7 @@ dependencies = [
  "clawdesk-storage",
  "clawdesk-types",
  "dashmap",
+ "dirs 6.0.0",
  "futures",
  "hex",
  "hmac",
@@ -1831,8 +1832,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "clawdesk-types",
  "hex",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

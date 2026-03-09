@@ -16,6 +16,7 @@ pub mod cohere;
 pub mod compatible;
 pub mod copilot;
 pub mod cost_router;
+pub mod credential_reload;
 pub mod gemini;
 pub mod glm;
 pub mod health;

@@ -55,6 +55,7 @@ clawdesk-security = { workspace = true }
 clawdesk-runtime = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
+dirs = "6.0.0"
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

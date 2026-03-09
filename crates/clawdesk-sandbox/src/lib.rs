@@ -18,12 +18,17 @@
 //!
 //! The `SandboxDispatcher` selects the appropriate runtime via O(1) enum dispatch.
 
+pub mod attestation;
+pub mod capability_gate;
+pub mod confinement;
 pub mod dispatch;
 #[cfg(feature = "sandbox-docker")]
 pub mod docker;
+pub mod seccomp;
 pub mod subprocess;
 #[cfg(feature = "sandbox-wasm")]
 pub mod wasm;
+pub mod wasm_runtime;
 pub mod workspace;
 
 use async_trait::async_trait;
@@ -84,6 +89,8 @@ impl Default for ResourceLimits {
 pub struct SandboxRequest {
     /// Unique execution ID
     pub execution_id: String,
+    /// Name of the tool being executed (used for capability gate checks)
+    pub tool_name: String,
     /// The command or code to execute
     pub command: SandboxCommand,
     /// Resource limits

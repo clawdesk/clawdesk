@@ -3,6 +3,7 @@
 //! Selects sandbox via `IsolationLevel` enum index with fallback cascade:
 //! if the requested level is unavailable, falls back to the next lower level.
 
+use crate::capability_gate::{CapabilityGate, CapabilitySet, GateVerdict};
 use crate::{IsolationLevel, Sandbox, SandboxError, SandboxRequest, SandboxResult};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -21,6 +22,10 @@ pub struct SandboxDispatcher {
     /// Sandboxes indexed by IsolationLevel
     /// [None, PathScope, ProcessIsolation, FullSandbox]
     sandboxes: [Option<Arc<dyn Sandbox>>; NUM_LEVELS],
+    /// Optional capability gate for pre-execution permission checks.
+    capability_gate: Option<CapabilityGate>,
+    /// Default agent capability grant when no per-agent grant is provided.
+    default_grant: CapabilitySet,
 }
 
 impl SandboxDispatcher {
@@ -28,6 +33,46 @@ impl SandboxDispatcher {
     pub fn new() -> Self {
         Self {
             sandboxes: Default::default(),
+            capability_gate: None,
+            default_grant: CapabilitySet::FULL,
+        }
+    }
+
+    /// Attach a capability gate for pre-execution permission checks.
+    pub fn with_capability_gate(mut self, gate: CapabilityGate, default_grant: CapabilitySet) -> Self {
+        self.capability_gate = Some(gate);
+        self.default_grant = default_grant;
+        self
+    }
+
+    /// Check capabilities for a tool before execution.
+    ///
+    /// Returns `Ok(())` when permitted, or a `SandboxError::PermissionDenied` when denied.
+    pub fn check_capabilities(
+        &self,
+        agent_grant: Option<CapabilitySet>,
+        tool_name: &str,
+    ) -> Result<(), SandboxError> {
+        if let Some(ref gate) = self.capability_gate {
+            let grant = agent_grant.unwrap_or(self.default_grant);
+            match gate.check(grant, tool_name) {
+                GateVerdict::Permit => Ok(()),
+                GateVerdict::Deny { required, granted, missing } => {
+                    warn!(
+                        tool = tool_name,
+                        ?required,
+                        ?granted,
+                        ?missing,
+                        "capability gate denied tool execution"
+                    );
+                    Err(SandboxError::ExecutionFailed(format!(
+                        "capability denied for '{}': missing {}",
+                        tool_name, missing
+                    )))
+                }
+            }
+        } else {
+            Ok(())
         }
     }
 
@@ -37,6 +82,12 @@ impl SandboxDispatcher {
     /// Optionally registers: DockerSandbox (if feature enabled).
     pub fn with_defaults() -> Self {
         let mut dispatcher = Self::new();
+        // Capability gate wired but with default-full grant (permissive by default).
+        // Callers can narrow the grant via `with_capability_gate()`.
+        use crate::capability_gate::ToolCapabilityMap;
+        let tool_map = ToolCapabilityMap::new(CapabilitySet::EMPTY);
+        dispatcher.capability_gate = Some(CapabilityGate::new(tool_map));
+        dispatcher.default_grant = CapabilitySet::FULL;
 
         // Always available
         dispatcher.register(Arc::new(crate::WorkspaceSandbox::new()));
@@ -125,11 +176,17 @@ impl SandboxDispatcher {
     }
 
     /// Execute a request at the specified isolation level (with fallback).
+    ///
+    /// If a capability gate is attached, checks permission for the tool
+    /// before dispatching. Uses `tool_name` from the request for the check.
     pub async fn execute(
         &self,
         level: IsolationLevel,
         request: SandboxRequest,
     ) -> Result<SandboxResult, SandboxError> {
+        // Capability gate check
+        self.check_capabilities(None, &request.tool_name)?;
+
         let sandbox = self.get(level).ok_or_else(|| {
             SandboxError::NotAvailable(format!(
                 "no sandbox available for {:?} (available: {:?})",

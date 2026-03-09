@@ -1,7 +1,7 @@
-<h1 align="center">ClawDesk</h1>
+<h1 align="center">ClawDesk - Agent2OS</h1>
 
 <p align="center">
-  <strong>Privacy-first, security-hardened AI agent runtime — 100% Rust backend, zero cloud dependency. Desktop, terminal, server, cloud VM, Raspberry Pi & beyond.</strong>
+  <strong>The private Agent2OS for real work. Chat with any AI model, connect your favorite messaging apps, and run agents across your desktop, terminal, cloud VM, Raspberry Pi, or anywhere Rust runs.</strong>
 </p>
 
 <p align="center">
@@ -23,7 +23,7 @@
 
 ---
 
-ClawDesk is a **multi-interface AI agent runtime** that runs locally with full audit trails, identity verification, and zero-trust networking. Built as a **45-crate Rust workspace**, it provides a production-grade agent runtime with:
+ClawDesk - Agent2OS is a **multi-interface AI agent runtime** that runs locally with full audit trails, identity verification, and zero-trust networking. Built as a **45-crate Rust workspace**, it provides a production-grade agent runtime with:
 
 - **Tauri 2.0 Desktop App** — React + TypeScript GUI with 138+ IPC commands and system tray
 - **tmux Desktop Workspace** — 10-screen terminal layout mirroring the Tauri app, perfect for SSH and cloud VMs
@@ -35,7 +35,11 @@ ClawDesk is a **multi-interface AI agent runtime** that runs locally with full a
 
 Runs on **macOS, Linux, Windows, cloud VMs (AWS/GCP/Azure/DO), Raspberry Pi, and any machine with Rust**.
 
+In short: **ClawDesk is Agent2OS** — a private operating layer for AI agents that can live on your laptop, terminal, server, or edge device instead of being locked into a browser tab or a hosted SaaS product.
+
 Inspired by [OpenClaw](https://github.com/openclaw/openclaw) — the TypeScript AI agent gateway — ClawDesk reimagines the same powerful concepts (multi-channel messaging, skill orchestration, agent sessions) as a **native, multi-interface runtime** with a pure Rust backend. Less moving parts, fewer dependencies, one binary.
+
+> **Project status:** ClawDesk is in active development. Expect rapid changes, rough edges, incomplete documentation in some areas, and occasional regressions as major features land. If you hit bugs, missing docs, confusing behavior, or platform-specific issues, please report them. Contributors, testers, and feedback from real-world usage are actively wanted.
 
 ## Goal
 
@@ -590,6 +594,15 @@ Key files:
 - `src/types.ts` — TypeScript interfaces matching Rust Serialize structs
 
 ## Contributing
+
+ClawDesk is under active development, and help is welcome across the board:
+
+- **Bug reports** — if something breaks, behaves oddly, or is unclear, please open an issue.
+- **Testing** — especially on different operating systems, cloud VMs, Raspberry Pi, Docker, tmux, TUI, and headless deployments.
+- **Documentation improvements** — missing setup steps, unclear explanations, platform notes, examples.
+- **Code contributions** — features, fixes, refactors, tests, and performance work.
+
+If you are using ClawDesk in real work, on unusual hardware, or in production-like environments, that feedback is particularly valuable.
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)

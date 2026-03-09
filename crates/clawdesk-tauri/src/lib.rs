@@ -26,6 +26,7 @@ pub mod commands_terminal;
 pub mod commands_threads;
 pub mod commands_voice;
 pub mod commands_sandbox;
+pub mod commands_config_reload;
 pub mod commands_mcp;
 pub mod commands_extensions;
 pub mod commands_orchestration;
@@ -351,6 +352,11 @@ pub fn run() {
             commands_sandbox::execute_sandboxed,
             commands_sandbox::get_sandbox_resource_limits,
             commands_sandbox::cleanup_sandboxes,
+            // ── Config Reload: MVCC hot-reload + canary + rollback ────
+            commands_config_reload::config_get_reload_policy,
+            commands_config_reload::config_get_reload_status,
+            commands_config_reload::config_trigger_reload,
+            commands_config_reload::config_rollback,
             // ── MCP: Model Context Protocol ───────────────────────────
             commands_mcp::list_mcp_servers,
             commands_mcp::connect_mcp_server,

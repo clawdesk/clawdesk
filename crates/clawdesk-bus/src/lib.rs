@@ -18,6 +18,7 @@
 pub mod adaptive_priority;
 pub mod backpressure;
 pub mod bridge;
+pub mod config_events;
 pub mod dispatch;
 pub mod event;
 pub mod inbound;

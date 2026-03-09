@@ -21,6 +21,7 @@ use arc_swap::ArcSwap;
 use clawdesk_acp::server::A2AState;
 use clawdesk_acp::thread_agent::ThreadAgentRegistry;
 use clawdesk_agents::ToolRegistry;
+use clawdesk_bus::config_events::ConfigEventBus;
 use clawdesk_channel::inbound_adapter::InboundAdapterRegistry;
 use clawdesk_channel::registry::ChannelRegistry;
 use clawdesk_channels::factory::ChannelFactory;
@@ -30,6 +31,9 @@ use clawdesk_providers::registry::ProviderRegistry;
 use clawdesk_skills::loader::SkillLoader;
 use clawdesk_skills::registry::SkillRegistry;
 use clawdesk_sochdb::SochStore;
+use crate::config_rollback::RollbackBuffer;
+use crate::native_watcher::NativeWatcher;
+use crate::reload_policy::ReloadPolicy;
 use crate::thread_ownership::ThreadOwnershipManager;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -113,6 +117,16 @@ pub struct GatewayState {
     /// Central metrics collector with counters, gauges, histograms, and SSE broadcast.
     pub metrics: Arc<crate::observability::MetricsCollector>,
 
+    // --- Config reload subsystem ---
+    /// Broadcast channel for configuration lifecycle events (file changed, committed, rolled back).
+    pub config_event_bus: Arc<ConfigEventBus>,
+    /// Content-addressed filesystem watcher with adaptive debounce.
+    pub native_watcher: Arc<NativeWatcher>,
+    /// Ring buffer of previous config generations for rollback.
+    pub rollback_buffer: Arc<RollbackBuffer>,
+    /// Environment-specific reload policy (dev/staging/prod presets).
+    pub reload_policy: ReloadPolicy,
+
     // --- Cross-channel artifact pipeline (GAP-E) ---
     /// Content-addressed artifact store backed by MediaCache.
     pub artifact_pipeline: Arc<clawdesk_media::ArtifactPipeline>,
@@ -179,6 +193,16 @@ impl GatewayState {
             token_budgets: clawdesk_agents::TokenBudgetManager::unlimited(),
             webhook_queue,
             metrics: crate::observability::MetricsCollector::new(),
+            config_event_bus: Arc::new(ConfigEventBus::new(256)),
+            native_watcher: Arc::new(NativeWatcher::new(
+                crate::native_watcher::NativeWatcherConfig::default(),
+            )),
+            rollback_buffer: Arc::new(RollbackBuffer::new(
+                ReloadPolicy::default().rollback.buffer_capacity,
+            )),
+            reload_policy: ReloadPolicy::load_from_file(
+                &ReloadPolicy::default_path().unwrap_or_default(),
+            ).unwrap_or_default(),
             artifact_pipeline: {
                 let home = std::env::var("HOME")
                     .or_else(|_| std::env::var("USERPROFILE"))

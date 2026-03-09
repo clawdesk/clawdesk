@@ -332,6 +332,7 @@ mod tests {
         let sandbox = WasmSandbox::new(WasmConfig::default());
         let request = SandboxRequest {
             execution_id: "test".into(),
+            tool_name: "test_file_op".into(),
             command: SandboxCommand::FileOperation {
                 operation: crate::FileOp::Read,
                 path: PathBuf::from("/tmp/test"),

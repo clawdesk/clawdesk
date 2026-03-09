@@ -868,6 +868,16 @@ pub struct AppState {
 
     // ── RAG: document ingestion & retrieval ──
     pub rag_manager: RwLock<Option<clawdesk_rag::RagManager>>,
+
+    // ── Config Reload: MVCC hot-reload subsystem ──
+    // Event bus for config lifecycle events (reload requested, validated, applied, rolled back).
+    pub config_event_bus: Arc<clawdesk_bus::config_events::ConfigEventBus>,
+    // Ring buffer of previous config generations for rollback.
+    pub rollback_buffer: Arc<clawdesk_gateway::config_rollback::RollbackBuffer>,
+    // Content-addressed filesystem watcher for config file changes.
+    pub native_watcher: Arc<clawdesk_gateway::native_watcher::NativeWatcher>,
+    // Environment-specific reload policy (timing, canary, rollback settings).
+    pub reload_policy: clawdesk_gateway::reload_policy::ReloadPolicy,
 }
 
 // ── Cron executor glue ──
@@ -3556,6 +3566,27 @@ impl AppState {
                 let rag = clawdesk_rag::RagManager::new(Arc::clone(&soch_store));
                 info!("RAG manager initialized with SochDB backend");
                 RwLock::new(Some(rag))
+            },
+
+            // ── Config Reload: MVCC hot-reload subsystem ──
+            config_event_bus: Arc::new(clawdesk_bus::config_events::ConfigEventBus::new(256)),
+            rollback_buffer: {
+                let policy = clawdesk_gateway::reload_policy::ReloadPolicy::default();
+                Arc::new(clawdesk_gateway::config_rollback::RollbackBuffer::new(
+                    policy.rollback.buffer_capacity,
+                ))
+            },
+            native_watcher: Arc::new(clawdesk_gateway::native_watcher::NativeWatcher::new(
+                clawdesk_gateway::native_watcher::NativeWatcherConfig::default(),
+            )),
+            reload_policy: {
+                let policy = clawdesk_gateway::reload_policy::ReloadPolicy::load_from_file(
+                    &clawdesk_gateway::reload_policy::ReloadPolicy::default_path()
+                        .unwrap_or_default(),
+                )
+                .unwrap_or_default();
+                info!(preset = ?policy.global.preset, "reload policy loaded");
+                policy
             },
         }
     }

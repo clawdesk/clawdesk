@@ -138,6 +138,7 @@ pub async fn execute_sandboxed(
 
     let request = clawdesk_sandbox::SandboxRequest {
         execution_id: uuid::Uuid::new_v4().to_string(),
+        tool_name: "shell_exec".to_string(),
         command: clawdesk_sandbox::SandboxCommand::Shell { command, args: vec![] },
         limits: resource_limits,
         working_dir: Some(workspace.clone()),

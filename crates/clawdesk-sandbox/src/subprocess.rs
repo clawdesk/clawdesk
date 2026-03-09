@@ -279,6 +279,7 @@ mod tests {
         let sandbox = SubprocessSandbox::new();
         let request = SandboxRequest {
             execution_id: "test-1".to_string(),
+            tool_name: "shell_echo".to_string(),
             command: SandboxCommand::Shell {
                 command: "echo".to_string(),
                 args: vec!["hello sandbox".to_string()],
@@ -303,6 +304,7 @@ mod tests {
         let sandbox = SubprocessSandbox::new();
         let request = SandboxRequest {
             execution_id: "test-env".to_string(),
+            tool_name: "shell_env".to_string(),
             command: SandboxCommand::Shell {
                 command: "env".to_string(),
                 args: vec![],

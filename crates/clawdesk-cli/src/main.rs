@@ -282,6 +282,12 @@ enum ConfigAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Trigger a configuration hot-reload
+    Reload,
+    /// Validate the current configuration without applying it
+    Validate,
+    /// Show the current reload policy
+    Policy,
 }
 
 #[derive(Subcommand)]
@@ -606,6 +612,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     }
                     Err(e) => eprintln!("❌ Restore failed: {e}"),
                 }
+            }
+            ConfigAction::Reload => {
+                println!("Triggering configuration hot-reload...");
+                let policy = clawdesk_gateway::reload_policy::ReloadPolicy::load_from_file(
+                    &clawdesk_gateway::reload_policy::ReloadPolicy::default_path().unwrap_or_default(),
+                ).unwrap_or_default();
+                println!("  Policy preset: {:?}", policy.global.preset);
+                println!("  Debounce: {}ms", policy.watcher.debounce_ms);
+                // Send SIGHUP to running daemon if available
+                let pid_path = clawdesk_daemon::PidFile::default_path();
+                if pid_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&pid_path) {
+                        if let Ok(pid) = content.trim().parse::<u32>() {
+                            #[cfg(unix)]
+                            {
+                                use std::process::Command;
+                                let _ = Command::new("kill")
+                                    .args(["-HUP", &pid.to_string()])
+                                    .status();
+                                println!("✅ SIGHUP sent to daemon (PID {pid})");
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                let _ = pid;
+                                println!("⚠️  Reload signal not supported on this platform");
+                            }
+                        }
+                    }
+                } else {
+                    println!("⚠️  No running daemon found — reload applies on next start");
+                }
+            }
+            ConfigAction::Validate => {
+                let path = clawdesk_gateway::bootstrap::ClawDeskConfig::default_path();
+                if path.exists() {
+                    match clawdesk_gateway::bootstrap::ClawDeskConfig::load(&path) {
+                        Ok(config) => {
+                            println!("✅ Configuration valid: {}", path.display());
+                            println!("  Gateway: {}:{}", config.gateway.host, config.gateway.port);
+                            println!("  Channels: {}", config.channels.len());
+                            println!("  Skills dir: {}", config.skills.dir);
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Configuration invalid: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    println!("⚠️  No config file at {}", path.display());
+                    println!("  Using default configuration");
+                }
+            }
+            ConfigAction::Policy => {
+                let policy = clawdesk_gateway::reload_policy::ReloadPolicy::load_from_file(
+                    &clawdesk_gateway::reload_policy::ReloadPolicy::default_path().unwrap_or_default(),
+                ).unwrap_or_default();
+                println!("Reload Policy");
+                println!("  Preset:           {:?}", policy.global.preset);
+                println!("  Debounce:         {}ms", policy.watcher.debounce_ms);
+                println!("  Canary:           {}s window, threshold {}", policy.canary.window_secs, policy.canary.health_threshold);
+                println!("  Auto-rollback:    {}", policy.canary.auto_rollback);
+                println!("  Buffer capacity:  {}", policy.rollback.buffer_capacity);
             }
         },
         Commands::Plugins { action } => match action {
@@ -1337,6 +1405,17 @@ async fn cmd_daemon(
                     }
                     // Skills are auto-reloaded by ConfigWatcher; SIGHUP
                     // gives an explicit trigger for agents specifically.
+
+                    // Publish a config reload event on the bus for downstream
+                    // listeners (canary, rollback, validation pipeline).
+                    let bus = sighup_state.config_event_bus.clone();
+                    tokio::spawn(async move {
+                        bus.emit_file_changed(
+                            0,
+                            "sighup".to_string(),
+                            "manual".to_string(),
+                        );
+                    });
                 },
             );
 

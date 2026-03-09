@@ -39,6 +39,7 @@
 //! bot_token = "${TELEGRAM_BOT_TOKEN}"
 //! ```
 
+use crate::reload_policy::ReloadPolicy;
 use crate::GatewayConfig;
 use clawdesk_channel::inbound_adapter::InboundAdapterRegistry;
 use clawdesk_channel::registry::ChannelRegistry;
@@ -178,6 +179,8 @@ pub struct BootstrapResult {
     /// Inbound adapter registry — channels that implement `InboundAdapter`
     /// are registered here for unified message ingestion via the event bus.
     pub inbound_registry: InboundAdapterRegistry,
+    /// Reload policy — environment-specific reload behaviour.
+    pub reload_policy: ReloadPolicy,
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +316,13 @@ pub async fn bootstrap(config: &ClawDeskConfig) -> BootstrapResult {
         tracing::info!(channel = %_id, "bridge adapter registered for channel");
     }
 
+    // --- Reload policy: load from ~/.clawdesk/reload.toml or use defaults ---
+    let reload_policy = ReloadPolicy::load_from_file(
+        &ReloadPolicy::default_path().unwrap_or_default(),
+    )
+    .unwrap_or_default();
+    info!(preset = ?reload_policy.global.preset, "reload policy loaded");
+
     BootstrapResult {
         channels: registry,
         skills: load_result.registry,
@@ -321,6 +331,7 @@ pub async fn bootstrap(config: &ClawDeskConfig) -> BootstrapResult {
         gateway_config: config.gateway.clone().into(),
         skills_config: config.skills.clone(),
         inbound_registry,
+        reload_policy,
     }
 }
 
