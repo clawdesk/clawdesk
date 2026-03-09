@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "../api";
 import type {
   DesktopAgent,
@@ -14,6 +15,7 @@ import { Icon } from "../components/Icon";
 import { VoiceInput } from "../components/VoiceInput";
 import { XTerminal } from "../components/XTerminal";
 import { PreviewPanel } from "../components/PreviewPanel";
+import { AgentFlowSelector } from "../components/AgentFlowSelector";
 import { PROVIDER_MODELS } from "../onboarding/OnboardingWizard";
 import {
   ProviderConfig,
@@ -81,6 +83,64 @@ interface ThreadMessage {
 interface Suggestion {
   icon: string;
   text: string;
+}
+
+interface ParsedShellExecArgs {
+  command: string;
+  background: boolean;
+  port: number | null;
+}
+
+function inferPortFromCommand(command: string): number | null {
+  const explicitPatterns = [
+    /(?:--port|--listen|--http-port)\s+(\d{2,5})/i,
+    /(?:-p|-P)\s+(\d{2,5})\b/,
+    /localhost:(\d{2,5})/i,
+    /127\.0\.0\.1:(\d{2,5})/i,
+    /python\s+-m\s+http\.server\s+(\d{2,5})/i,
+  ];
+
+  for (const pattern of explicitPatterns) {
+    const match = command.match(pattern);
+    if (match) {
+      return Number.parseInt(match[1], 10);
+    }
+  }
+
+  const lower = command.toLowerCase();
+  if (lower.includes("next dev")) return 3000;
+  if (lower.includes("vite") || lower.includes("npm run dev") || lower.includes("pnpm dev") || lower.includes("yarn dev")) return 5173;
+  if (lower.includes("python -m http.server")) return 8000;
+  return null;
+}
+
+function parseShellExecArgs(rawArgs?: string): ParsedShellExecArgs | null {
+  if (!rawArgs) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawArgs);
+    const command = typeof parsed.command === "string" ? parsed.command : "";
+    if (!command) {
+      return null;
+    }
+    const background = Boolean(parsed.background);
+    return {
+      command,
+      background,
+      port: inferPortFromCommand(command),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function extractPreviewPorts(text: string): number[] {
+  const matches = [...text.matchAll(/(?:localhost|127\.0\.0\.1):(\d{2,5})/gi)];
+  return matches
+    .map((match) => Number.parseInt(match[1], 10))
+    .filter((port) => Number.isFinite(port) && port > 0 && port <= 65535);
 }
 
 // ── Time grouping helper (inspired by open-webui) ─────────────
@@ -768,6 +828,10 @@ export function ChatPage({
   const [showAgentPicker, setShowAgentPicker] = useState(false);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
 
+  // ── Agent Flow coordination state ──
+  const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null);
+  const [showFlowSelector, setShowFlowSelector] = useState(false);
+
   // ── Trace panel state ──
   const [traceEntries, setTraceEntries] = useState<TraceLogEntry[]>([]);
   const [traceOpen, setTraceOpen] = useState(false);
@@ -776,9 +840,13 @@ export function ChatPage({
   const [activeTasks, setActiveTasks] = useState<ActiveTask[]>([]);
   const [skillUsages, setSkillUsages] = useState<SkillUsage[]>([]);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const previewPollersRef = useRef<Map<string, number>>(new Map());
+  const previewRegisteredRef = useRef<Set<string>>(new Set());
   const toolIdCounterRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const [isUploadingFiles, setIsUploadingFiles] = useState(false);
+  const [uploadedContextFiles, setUploadedContextFiles] = useState<string[]>([]);
 
   const pushTrace = useCallback((type: string, summary: string, opts?: { detail?: string; level?: TraceLogEntry["level"]; toolName?: string }) => {
     setTraceEntries((prev) => [...prev, {
@@ -822,6 +890,69 @@ export function ChatPage({
   const effectiveApiKey = chatOverride?.apiKey || activeProvider?.apiKey || "";
   const effectiveBaseUrl = chatOverride?.baseUrl || activeProvider?.baseUrl || "";
 
+  const registerPreviewFromPort = useCallback(async (id: string, label: string, port: number) => {
+    const key = `${id}:${port}`;
+    if (previewRegisteredRef.current.has(key)) {
+      return;
+    }
+    previewRegisteredRef.current.add(key);
+    try {
+      await api.previewRegister(id, label, port);
+      setPreviewOpen(true);
+      pushToast(`Preview connected on localhost:${port}.`);
+    } catch {
+      previewRegisteredRef.current.delete(key);
+    }
+  }, [pushToast]);
+
+  const trackPreviewCandidate = useCallback((id: string, label: string, port: number) => {
+    const pollKey = `${id}:${port}`;
+    if (previewPollersRef.current.has(pollKey)) {
+      return;
+    }
+
+    let attempts = 0;
+    const timer = window.setInterval(async () => {
+      attempts += 1;
+      try {
+        const alive = await api.previewCheckPort(port);
+        if (alive) {
+          window.clearInterval(timer);
+          previewPollersRef.current.delete(pollKey);
+          await registerPreviewFromPort(id, label, port);
+          return;
+        }
+      } catch {
+        // Ignore transient probe errors while the server is still starting.
+      }
+
+      if (attempts >= 20) {
+        window.clearInterval(timer);
+        previewPollersRef.current.delete(pollKey);
+      }
+    }, 1500);
+
+    previewPollersRef.current.set(pollKey, timer);
+  }, [registerPreviewFromPort]);
+
+  useEffect(() => {
+    return () => {
+      previewPollersRef.current.forEach((timer) => window.clearInterval(timer));
+      previewPollersRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    const assistantTexts = messages
+      .filter((message) => message.role === "assistant" && message.text)
+      .map((message) => message.text);
+    for (const text of assistantTexts) {
+      for (const port of extractPreviewPorts(text)) {
+        trackPreviewCandidate(`chat_preview_${port}`, `Generated app :${port}`, port);
+      }
+    }
+  }, [messages, trackPreviewCandidate]);
+
   const setPerChatModel = useCallback((selection: ModelSelection) => {
     const chatId = activeChatIdRef.current;
     if (chatId) {
@@ -834,6 +965,57 @@ export function ChatPage({
       window.localStorage.setItem("clawdesk.base_url", selection.baseUrl);
     }
   }, []);
+
+  const openComposerFilePicker = useCallback(async () => {
+    if (isUploadingFiles) {
+      return;
+    }
+
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        filters: [
+          {
+            name: "Documents and code",
+            extensions: ["pdf", "txt", "md", "csv", "json", "html", "xml", "py", "js", "ts", "rs", "go", "java", "c", "cpp", "h", "rb", "sh"],
+          },
+        ],
+      });
+
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      if (!paths.length) {
+        return;
+      }
+
+      setIsUploadingFiles(true);
+      const uploadedNames: string[] = [];
+      for (const filePath of paths) {
+        try {
+          const doc = await api.ragIngestDocument(filePath);
+          uploadedNames.push(doc.filename);
+          pushToast(`Ingested \"${doc.filename}\" (${doc.chunk_count} chunks)`);
+        } catch (err: any) {
+          pushToast(`Upload failed: ${err}`);
+        }
+      }
+
+      if (uploadedNames.length) {
+        setUploadedContextFiles((prev) => {
+          const next = [...uploadedNames, ...prev.filter((name) => !uploadedNames.includes(name))];
+          return next.slice(0, 6);
+        });
+        setInput((prev) => {
+          const mentions = uploadedNames.map((name) => `[Uploaded: ${name}]`).join("\n");
+          return prev ? `${prev}\n${mentions}` : mentions;
+        });
+      }
+    } catch (err: any) {
+      pushToast(`Could not open file picker: ${err}`);
+    } finally {
+      setIsUploadingFiles(false);
+    }
+  }, [isUploadingFiles, pushToast]);
 
   const agent = agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? null;
   const isNew = messages.length === 0;
@@ -1216,6 +1398,15 @@ export function ChatPage({
       if (event.type === "ToolStart") {
         const toolName = typeof event.name === "string" ? event.name : "unknown";
         const argsPreview = typeof event.args === "string" ? event.args : undefined;
+        if (toolName === "shell_exec") {
+          const parsedArgs = parseShellExecArgs(argsPreview);
+          if (parsedArgs?.background && parsedArgs.port) {
+            const previewLabel = parsedArgs.command.length > 48
+              ? `${parsedArgs.command.slice(0, 48)}...`
+              : parsedArgs.command;
+            trackPreviewCandidate(`shell_exec_${parsedArgs.port}`, previewLabel, parsedArgs.port);
+          }
+        }
         const toolId = `tool-${++toolIdCounterRef.current}`;
         setMessages((prev) =>
           prev.map((m) => {
@@ -1800,10 +1991,14 @@ export function ChatPage({
                 <Icon name="eye" />
                 <span>Preview</span>
               </button>
+              <button className={`chat-stage-action ${showFlowSelector ? "is-active" : ""}`} onClick={() => setShowFlowSelector(!showFlowSelector)} title="Agent flow coordination">
+                <Icon name="network" />
+                <span>Flows</span>
+              </button>
             </div>
           </div>
 
-          <div className="chat-page-messages" ref={messagesContainerRef}>
+          <div className={`chat-page-messages ${isNew ? "is-empty-state" : ""}`} ref={messagesContainerRef}>
             {isNew ? (
               /* Hero empty state */
               <div className="chat-hero">
@@ -2016,7 +2211,21 @@ export function ChatPage({
                     <button className="chat-error-banner__dismiss" onClick={() => setLastError(null)}>×</button>
                   </div>
                 )}
-                {messages.map((m) => (
+                {messages.map((m) => {
+                  const hasAssistantContent =
+                    m.role !== "assistant"
+                    || Boolean(m.text.trim())
+                    || Boolean(m.thinkingText)
+                    || Boolean(m.retryStatus)
+                    || Boolean(m.askHuman)
+                    || Boolean(m.toolCalls && m.toolCalls.length > 0)
+                    || Boolean(m.tokens || m.cost || m.duration || (m.skills && m.skills.length > 0));
+
+                  if (!hasAssistantContent) {
+                    return null;
+                  }
+
+                  return (
                   <div key={m.id} className={`chat-msg-row ${m.role === "user" ? "is-user" : "is-assistant"} ${m.isStreaming ? "streaming" : ""}`}>
                     <div className="chat-msg-header">
                       {m.role === "user" ? (
@@ -2094,7 +2303,7 @@ export function ChatPage({
                       )}
                     </div>
                   </div>
-                ))}
+                );})}
                 {isSending && (() => {
                   const streamMsg = messages.find((m) => m.id === streamingMsgIdRef.current);
                   const showThinking = !streamMsg || (streamMsg.isStreaming && !streamMsg.text);
@@ -2130,7 +2339,7 @@ export function ChatPage({
           </div>
 
           {/* Composer */}
-          <div className="chat-composer-wrap">
+          <div className={`chat-composer-wrap ${isNew ? "is-empty-state" : ""}`}>
             <div className="chat-composer-inner-wrap">
               <div className="chat-composer">
                 <textarea
@@ -2156,6 +2365,16 @@ export function ChatPage({
                   rows={2}
                   disabled={!agent}
                 />
+                {uploadedContextFiles.length > 0 && (
+                  <div className="chat-composer-attachments" aria-label="Uploaded context files">
+                    {uploadedContextFiles.map((name) => (
+                      <span key={name} className="chat-composer-chip">
+                        <Icon name="paperclip" />
+                        {name}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="chat-composer-actions">
                   <div className="chat-composer-left">
                     <ModelSelector
@@ -2168,49 +2387,62 @@ export function ChatPage({
                     <div className="badge-safe" title="Safe Mode is on — your data stays on your device and is never sent to external servers without your permission.">
                       <Icon name="shield" /> Safe Mode
                     </div>
+                    {selectedFlowId && (
+                      <div className="badge-safe" style={{ background: 'var(--accent)', color: 'white', opacity: 0.85 }} title="Routing through selected agent flow">
+                        <Icon name="network" /> Flow
+                      </div>
+                    )}
                     {isSending && <span className="chat-composer-status">Streaming response</span>}
+                    {isUploadingFiles && <span className="chat-composer-status">Uploading files</span>}
                   </div>
-                  <VoiceInput
-                    onTranscription={(text) => {
-                      // Auto-send the transcribed text as a chat message
-                      if (text && agent && !isSending) {
-                        sendMessage(text);
-                      } else {
-                        // Fallback: put in input box if can't auto-send
-                        setInput((prev) => (prev ? prev + " " + text : text));
-                      }
-                    }}
-                    disabled={isSending || !agent}
-                  />
-                  {isSending ? (
+                  <div className="chat-composer-right">
                     <button
-                      className="chat-send-btn chat-stop-btn active"
-                      onClick={stopMessage}
-                      title="Stop response"
+                      className="chat-upload-btn"
+                      disabled={isUploadingFiles}
+                      onClick={() => void openComposerFilePicker()}
+                      title="Upload files for RAG context"
                     >
-                      <Icon name="pause" />
+                      <Icon name="paperclip" />
+                      <span>{isUploadingFiles ? "Uploading..." : "Upload files"}</span>
                     </button>
-                  ) : (
-                    <button
-                      className={`chat-send-btn ${input.trim() && agent ? "active" : ""}`}
-                      disabled={!agent || !input.trim()}
-                      onClick={() => {
-                        console.log("[UI] send button clicked. input:", input.trim()?.slice(0, 30), "isSending:", isSending, "sendingRef:", sendingRef.current);
-                        if (input.trim() && !isSending) {
-                          // Defensive: if sendingRef is stuck true but isSending is false,
-                          // force-clear the ref to recover from inconsistent state
-                          if (sendingRef.current) {
-                            console.warn("[UI] sendingRef stuck true while isSending=false — force-resetting");
-                            sendingRef.current = false;
-                          }
-                          sendMessage(input.trim());
-                          setInput("");
+                    <VoiceInput
+                      onTranscription={(text) => {
+                        if (text && agent && !isSending) {
+                          sendMessage(text);
+                        } else {
+                          setInput((prev) => (prev ? prev + " " + text : text));
                         }
                       }}
-                    >
-                      <Icon name="send" />
-                    </button>
-                  )}
+                      disabled={isSending || !agent}
+                    />
+                    {isSending ? (
+                      <button
+                        className="chat-send-btn chat-stop-btn active"
+                        onClick={stopMessage}
+                        title="Stop response"
+                      >
+                        <Icon name="pause" />
+                      </button>
+                    ) : (
+                      <button
+                        className={`chat-send-btn ${input.trim() && agent ? "active" : ""}`}
+                        disabled={!agent || !input.trim()}
+                        onClick={() => {
+                          console.log("[UI] send button clicked. input:", input.trim()?.slice(0, 30), "isSending:", isSending, "sendingRef:", sendingRef.current);
+                          if (input.trim() && !isSending) {
+                            if (sendingRef.current) {
+                              console.warn("[UI] sendingRef stuck true while isSending=false — force-resetting");
+                              sendingRef.current = false;
+                            }
+                            sendMessage(input.trim());
+                            setInput("");
+                          }
+                        }}
+                      >
+                        <Icon name="send" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -2237,8 +2469,29 @@ export function ChatPage({
 
         {/* Preview panel (live web app preview) */}
         {previewOpen && (
-          <div style={{ width: 480, minWidth: 360, flexShrink: 0, height: "100%" }}>
+          <div className="chat-preview-shell">
             <PreviewPanel onClose={() => setPreviewOpen(false)} />
+          </div>
+        )}
+
+        {/* Agent Flow Selector panel (Paperclip-style coordination) */}
+        {showFlowSelector && (
+          <div className="chat-preview-shell" style={{ maxWidth: 320, minWidth: 280 }}>
+            <div className="modal-head" style={{ padding: "8px 12px" }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>Agent Flows</span>
+              <button
+                className="btn ghost"
+                style={{ fontSize: 11, padding: "2px 6px" }}
+                onClick={() => setShowFlowSelector(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <AgentFlowSelector
+              selectedFlowId={selectedFlowId}
+              onSelectFlow={setSelectedFlowId}
+              pushToast={pushToast}
+            />
           </div>
         )}
       </div>{/* end chat-page-body */}

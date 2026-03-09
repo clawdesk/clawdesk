@@ -17,7 +17,13 @@ use crate::permission_modes::{PermissionConfig, PermissionDecision, PermissionEn
 use clawdesk_agents::runner::{AgentConfig, AgentEvent, AgentRunner, ApprovalDecision, ApprovalGate};
 use clawdesk_agents::tools::ToolPolicy;
 use clawdesk_agents::ToolRegistry;
-use clawdesk_providers::Provider;
+use clawdesk_providers::{ChatMessage, MessageRole, Provider};
+use clawdesk_runtime::{ActivityJournal, Checkpoint, CheckpointStore, DurableAgentRunner, GuardSnapshot, LeaseManager, RetryPolicy, RunId, RunnerFactory, WorkflowRun, WorkflowType};
+use clawdesk_sochdb::SochStore;
+use clawdesk_types::channel::ChannelId;
+use clawdesk_types::dirs;
+use clawdesk_types::error::ClawDeskError;
+use clawdesk_types::session::SessionKey;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -189,6 +195,167 @@ fn resolve_provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     )
 }
 
+fn register_spawn_subagent_tool(
+    registry: &mut ToolRegistry,
+    provider: Arc<dyn Provider>,
+    workspace: Option<PathBuf>,
+    cancel: CancellationToken,
+    agent_map: Arc<HashMap<String, AgentDefinition>>,
+) {
+    let spawn_fn: clawdesk_agents::port::AsyncPort<
+        clawdesk_agents::port::SpawnSubAgentRequest,
+        Result<String, String>,
+    > = Arc::new(move |req: clawdesk_agents::port::SpawnSubAgentRequest| {
+        let agent_id = req.agent_id;
+        let task = req.task;
+        let timeout_secs = req.timeout_secs;
+        let provider = Arc::clone(&provider);
+        let workspace = workspace.clone();
+        let cancel = cancel.clone();
+        let agents = Arc::clone(&agent_map);
+        Box::pin(async move {
+            let def = agents
+                .get(&agent_id)
+                .ok_or_else(|| format!("Sub-agent '{}' not found in team directory", agent_id))?;
+            let system_prompt = if def.agent.persona.soul.is_empty() {
+                format!(
+                    "You are {}. {}",
+                    def.agent.display_name, def.agent.persona.guidelines
+                )
+            } else {
+                def.agent.persona.soul.clone()
+            };
+
+            let mut sub_tools = ToolRegistry::new();
+            clawdesk_agents::builtin_tools::register_builtin_tools(&mut sub_tools, workspace);
+
+            let sub_config = AgentConfig {
+                model: def.agent.model.clone(),
+                system_prompt: String::new(),
+                max_tool_rounds: 15,
+                ..Default::default()
+            };
+            let runner = AgentRunner::new(provider, Arc::new(sub_tools), sub_config, cancel);
+            let history = vec![ChatMessage::new(MessageRole::User, task.as_str())];
+            let timeout = tokio::time::Duration::from_secs(timeout_secs);
+            match tokio::time::timeout(timeout, runner.run(history, system_prompt)).await {
+                Ok(Ok(response)) => Ok(response.content),
+                Ok(Err(error)) => Err(format!("Sub-agent error: {error}")),
+                Err(_) => Err(format!("Sub-agent timed out after {}s", timeout_secs)),
+            }
+        })
+    });
+
+    clawdesk_agents::builtin_tools::register_subagent_tool(registry, spawn_fn);
+}
+
+struct LocalRunnerFactory {
+    provider: Arc<dyn Provider>,
+    workspace: Option<PathBuf>,
+    approval_gate: Arc<dyn ApprovalGate>,
+    tool_policy: Arc<ToolPolicy>,
+    cancel: CancellationToken,
+    team_agents: Option<Arc<HashMap<String, AgentDefinition>>>,
+}
+
+impl RunnerFactory for LocalRunnerFactory {
+    fn create_runner(&self, config: &AgentConfig) -> Result<AgentRunner, ClawDeskError> {
+        let mut registry = ToolRegistry::new();
+        clawdesk_agents::builtin_tools::register_builtin_tools(&mut registry, self.workspace.clone());
+        if let Some(agent_map) = &self.team_agents {
+            register_spawn_subagent_tool(
+                &mut registry,
+                Arc::clone(&self.provider),
+                self.workspace.clone(),
+                self.cancel.child_token(),
+                Arc::clone(agent_map),
+            );
+        }
+
+        Ok(
+            AgentRunner::new(
+                Arc::clone(&self.provider),
+                Arc::new(registry),
+                config.clone(),
+                self.cancel.child_token(),
+            )
+            .with_approval_gate(Arc::clone(&self.approval_gate))
+            .with_tool_policy(Arc::clone(&self.tool_policy)),
+        )
+    }
+}
+
+fn durable_task_meta_key(run_id: &RunId) -> String {
+    format!("runtime:runs:{}:task_meta", run_id)
+}
+
+fn durable_task_checkpoint_note_key(run_id: &RunId) -> String {
+    format!("runtime:runs:{}:checkpoint_note", run_id)
+}
+
+fn build_task_inputs(
+    input: &serde_json::Value,
+    fallback_system_prompt: &str,
+) -> Result<(Vec<ChatMessage>, String, String), String> {
+    let prompt = input
+        .get("prompt")
+        .or_else(|| input.get("task"))
+        .or_else(|| input.get("instructions"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            if input.is_null() {
+                None
+            } else {
+                serde_json::to_string_pretty(input).ok()
+            }
+        })
+        .ok_or_else(|| "input.prompt, input.task, or input.instructions is required".to_string())?;
+
+    let system_prompt = input
+        .get("system_prompt")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{}\n\n{}", fallback_system_prompt, value))
+        .unwrap_or_else(|| fallback_system_prompt.to_string());
+
+    let summary: String = prompt.chars().take(120).collect();
+    Ok((
+        vec![ChatMessage::new(MessageRole::User, prompt.as_str())],
+        system_prompt,
+        summary,
+    ))
+}
+
+fn resolve_executor_prompt(
+    executor_agent: &str,
+    team_agents: Option<&Arc<HashMap<String, AgentDefinition>>>,
+    default_system_prompt: &str,
+) -> Result<(Option<String>, String), String> {
+    if executor_agent == "default" {
+        return Ok((None, default_system_prompt.to_string()));
+    }
+
+    let agents = team_agents.ok_or_else(|| {
+        format!("executor_agent '{}' requested, but no team agents are loaded", executor_agent)
+    })?;
+    let def = agents
+        .get(executor_agent)
+        .ok_or_else(|| format!("executor_agent '{}' not found", executor_agent))?;
+    let prompt = if def.agent.persona.soul.is_empty() {
+        format!(
+            "You are {}. {}",
+            def.agent.display_name, def.agent.persona.guidelines
+        )
+    } else {
+        def.agent.persona.soul.clone()
+    };
+    Ok((Some(def.agent.model.clone()), prompt))
+}
+
 /// Run the local agent REPL.
 ///
 /// This is the main entry point for `clawdesk agent run`. It:
@@ -215,18 +382,20 @@ pub async fn run_local_agent(
     // If --team-dir is set, load agent.toml files, build a team roster
     // system prompt, and register spawn_subagent so the LLM can delegate.
     let mut team_roster_prompt = String::new();
+    let mut team_agents: Option<Arc<HashMap<String, AgentDefinition>>> = None;
     if let Some(ref team_dir) = config.team_dir {
         match agent_compose::load_all_agents(team_dir) {
             Ok(agents) if !agents.is_empty() => {
-                let agent_map: HashMap<String, AgentDefinition> = agents
+                let agent_map = Arc::new(agents
                     .iter()
                     .map(|(_, def)| (def.agent.id.clone(), def.clone()))
-                    .collect();
+                    .collect::<HashMap<_, _>>());
                 info!(
                     team_dir = %team_dir.display(),
                     count = agent_map.len(),
                     "loaded team agents"
                 );
+                team_agents = Some(Arc::clone(&agent_map));
 
                 // Build the team roster system prompt section
                 team_roster_prompt.push_str(
@@ -245,7 +414,7 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
 - If you find yourself writing content that a specialist could produce, STOP and delegate instead\n\n\
 ### Team Members\n\n"
                 );
-                for (_, def) in &agent_map {
+                for (_, def) in agent_map.iter() {
                     let a = &def.agent;
                     team_roster_prompt.push_str(&format!(
                         "- **{}** — agent_id: `{}`\n",
@@ -258,53 +427,13 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
                 }
                 team_roster_prompt.push('\n');
 
-                // Register spawn_subagent tool with closure that spawns sub-agent runners
-                let provider_ref = Arc::clone(&provider);
-                let sub_workspace = config.workspace.clone();
-                let cancel_ref = cancel.clone();
-                let agent_map = Arc::new(agent_map);
-
-                let spawn_fn: clawdesk_agents::port::AsyncPort<clawdesk_agents::port::SpawnSubAgentRequest, Result<String, String>> = Arc::new(move |req: clawdesk_agents::port::SpawnSubAgentRequest| {
-                    let agent_id = req.agent_id;
-                    let task = req.task;
-                    let timeout_secs = req.timeout_secs;
-                    let provider = Arc::clone(&provider_ref);
-                    let ws = sub_workspace.clone();
-                    let cancel = cancel_ref.clone();
-                    let agents = Arc::clone(&agent_map);
-                    Box::pin(async move {
-                        let def = agents.get(&agent_id)
-                            .ok_or_else(|| format!("Sub-agent '{}' not found in team directory", agent_id))?;
-                        let system_prompt = if def.agent.persona.soul.is_empty() {
-                            format!("You are {}. {}", def.agent.display_name, def.agent.persona.guidelines)
-                        } else {
-                            def.agent.persona.soul.clone()
-                        };
-                        // Create a fresh tool registry for the sub-agent
-                        let mut sub_tools = ToolRegistry::new();
-                        clawdesk_agents::builtin_tools::register_builtin_tools(&mut sub_tools, ws);
-                        let sub_config = AgentConfig {
-                            model: def.agent.model.clone(),
-                            system_prompt: String::new(),
-                            max_tool_rounds: 15,
-                            ..Default::default()
-                        };
-                        let runner = AgentRunner::new(provider, Arc::new(sub_tools), sub_config, cancel);
-                        let history = vec![
-                            clawdesk_providers::ChatMessage::new(
-                                clawdesk_providers::MessageRole::User,
-                                task.as_str(),
-                            ),
-                        ];
-                        let timeout = tokio::time::Duration::from_secs(timeout_secs);
-                        match tokio::time::timeout(timeout, runner.run(history, system_prompt)).await {
-                            Ok(Ok(response)) => Ok(response.content),
-                            Ok(Err(e)) => Err(format!("Sub-agent error: {e}")),
-                            Err(_) => Err(format!("Sub-agent timed out after {}s", timeout_secs)),
-                        }
-                    })
-                });
-                clawdesk_agents::builtin_tools::register_subagent_tool(&mut tool_registry, spawn_fn);
+                register_spawn_subagent_tool(
+                    &mut tool_registry,
+                    Arc::clone(&provider),
+                    config.workspace.clone(),
+                    cancel.clone(),
+                    Arc::clone(&agent_map),
+                );
                 info!("registered spawn_subagent tool for team delegation");
             }
             Ok(_) => {
@@ -315,8 +444,6 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
             }
         }
     }
-
-    let tool_registry = Arc::new(tool_registry);
 
     // Build agent config
     let base_system_prompt = config.system_prompt.clone().unwrap_or_else(|| {
@@ -332,7 +459,10 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
              You have access to tools for file reading/writing, shell command execution, \
              HTTP requests, and web search. Use tools proactively to accomplish tasks. \
              When the user asks you to do something, DO it — don't just describe what \
-             you would do. Execute commands, write files, and take concrete actions."
+             you would do. Execute commands, write files, and take concrete actions. \
+             Use `durable_task` for long-running agent work that should remain resumable \
+             across turns or process restarts. Use `process_start` only for raw subprocesses \
+             that do not need durable agent state."
                 .to_string()
         }
     });
@@ -355,14 +485,278 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
     let gate = build_approval_gate(&config);
 
     // Build tool policy
-    let policy = build_tool_policy(config.allow_all_tools);
+    let policy = Arc::new(build_tool_policy(config.allow_all_tools));
+
+    let sochdb_dir = dirs::sochdb();
+    std::fs::create_dir_all(&sochdb_dir)?;
+    let durable_store = Arc::new(SochStore::open(
+        sochdb_dir
+            .to_str()
+            .ok_or("SochDB path contains invalid UTF-8")?,
+    )?);
+    let checkpoint_store = Arc::new(CheckpointStore::new(Arc::clone(&durable_store)));
+    let journal = Arc::new(ActivityJournal::new(Arc::clone(&durable_store)));
+    let lease_manager = Arc::new(LeaseManager::new(Arc::clone(&durable_store), 300));
+
+    let durable_runner = Arc::new(DurableAgentRunner::new(
+        Arc::clone(&checkpoint_store),
+        Arc::clone(&journal),
+        Arc::clone(&lease_manager),
+        Arc::new(LocalRunnerFactory {
+            provider: Arc::clone(&provider),
+            workspace: config.workspace.clone(),
+            approval_gate: Arc::clone(&gate),
+            tool_policy: Arc::clone(&policy),
+            cancel: cancel.clone(),
+            team_agents: team_agents.clone(),
+        }),
+        "cli-local".to_string(),
+    ));
+
+    {
+        let checkpoint_store = Arc::clone(&checkpoint_store);
+        let journal = Arc::clone(&journal);
+        let durable_runner = Arc::clone(&durable_runner);
+        let durable_store = Arc::clone(&durable_store);
+        let default_model = model.clone();
+        let default_system_prompt = agent_config.system_prompt.clone();
+        let default_max_tool_rounds = agent_config.max_tool_rounds;
+        let default_context_limit = agent_config.context_limit;
+        let workspace = config.workspace.clone();
+        let team_agents = team_agents.clone();
+
+        clawdesk_agents::builtin_tools::register_durable_task_tool(
+            &mut tool_registry,
+            Arc::new(move |operation: String, args: serde_json::Value| {
+                let checkpoint_store = Arc::clone(&checkpoint_store);
+                let journal = Arc::clone(&journal);
+                let durable_runner = Arc::clone(&durable_runner);
+                let durable_store = Arc::clone(&durable_store);
+                let default_model = default_model.clone();
+                let default_system_prompt = default_system_prompt.clone();
+                let workspace = workspace.clone();
+                let team_agents = team_agents.clone();
+                Box::pin(async move {
+                    match operation.as_str() {
+                        "create" => {
+                            let executor_agent = args
+                                .get("executor_agent")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("default");
+                            let (override_model, executor_prompt) = resolve_executor_prompt(
+                                executor_agent,
+                                team_agents.as_ref(),
+                                &default_system_prompt,
+                            )?;
+                            let input = args.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                            let (history, system_prompt, summary) =
+                                build_task_inputs(&input, &executor_prompt)?;
+
+                            let run_config = AgentConfig {
+                                model: override_model.unwrap_or_else(|| default_model.clone()),
+                                system_prompt: system_prompt.clone(),
+                                max_tool_rounds: default_max_tool_rounds,
+                                context_limit: default_context_limit,
+                                workspace_path: workspace.as_ref().map(|path| path.display().to_string()),
+                                ..Default::default()
+                            };
+                            let session_key = SessionKey::new(
+                                ChannelId::Internal,
+                                format!("durable-task:{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()).as_str(),
+                            );
+                            let mut run = WorkflowRun::new(
+                                WorkflowType::AgentLoop {
+                                    config: run_config,
+                                    session_key,
+                                },
+                                RetryPolicy::default_agent(),
+                            );
+                            run.updated_at = chrono::Utc::now();
+                            checkpoint_store
+                                .save_run(&run)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            checkpoint_store
+                                .save_checkpoint(
+                                    &run.id,
+                                    &Checkpoint::AgentLoop {
+                                        round: 0,
+                                        messages: history,
+                                        system_prompt,
+                                        total_input_tokens: 0,
+                                        total_output_tokens: 0,
+                                        guard_state: GuardSnapshot {
+                                            estimated_tokens: 0,
+                                            compaction_count: 0,
+                                            circuit_breaker_failures: 0,
+                                        },
+                                    },
+                                )
+                                .await
+                                .map_err(|error| error.to_string())?;
+
+                            let meta = serde_json::json!({
+                                "name": args.get("name").and_then(|value| value.as_str()).unwrap_or("Durable task"),
+                                "executor_agent": executor_agent,
+                                "summary": summary,
+                                "created_at": chrono::Utc::now(),
+                            });
+                            let meta_bytes = serde_json::to_vec(&meta).map_err(|error| error.to_string())?;
+                            durable_store
+                                .put(&durable_task_meta_key(&run.id), &meta_bytes)
+                                .map_err(|error| error.to_string())?;
+
+                            let run_id = run.id.clone();
+                            let runner = Arc::clone(&durable_runner);
+                            tokio::spawn(async move {
+                                if let Err(error) = runner.resume(&run_id).await {
+                                    warn!(run_id = %run_id, error = %error, "durable task failed");
+                                }
+                            });
+
+                            Ok(serde_json::json!({
+                                "task_id": run.id,
+                                "status": "pending",
+                                "durable": true,
+                            })
+                            .to_string())
+                        }
+                        "status" => {
+                            let task_id = args
+                                .get("task_id")
+                                .and_then(|value| value.as_str())
+                                .ok_or_else(|| "task_id is required for status".to_string())?;
+                            let run_id = RunId::from_str(task_id);
+                            let run = checkpoint_store
+                                .load_run(&run_id)
+                                .await
+                                .map_err(|error| error.to_string())?
+                                .ok_or_else(|| format!("task '{}' not found", task_id))?;
+                            let checkpoint = checkpoint_store
+                                .load_checkpoint(&run_id)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            let meta = durable_store
+                                .get(&durable_task_meta_key(&run_id))
+                                .map_err(|error| error.to_string())?
+                                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                                .unwrap_or(serde_json::Value::Null);
+                            let note = durable_store
+                                .get(&durable_task_checkpoint_note_key(&run_id))
+                                .map_err(|error| error.to_string())?
+                                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+
+                            Ok(serde_json::json!({
+                                "task_id": task_id,
+                                "state": run.state.label(),
+                                "attempt": run.attempt,
+                                "total_input_tokens": run.total_input_tokens,
+                                "total_output_tokens": run.total_output_tokens,
+                                "journal_entries": journal.count(&run_id).await.map_err(|error| error.to_string())?,
+                                "has_checkpoint": checkpoint.is_some(),
+                                "meta": meta,
+                                "checkpoint_note": note,
+                            })
+                            .to_string())
+                        }
+                        "resume" => {
+                            let task_id = args
+                                .get("task_id")
+                                .and_then(|value| value.as_str())
+                                .ok_or_else(|| "task_id is required for resume".to_string())?;
+                            let run_id = RunId::from_str(task_id);
+                            let runner = Arc::clone(&durable_runner);
+                            tokio::spawn(async move {
+                                if let Err(error) = runner.resume(&run_id).await {
+                                    warn!(run_id = %run_id, error = %error, "durable task resume failed");
+                                }
+                            });
+                            Ok(serde_json::json!({"task_id": task_id, "status": "resuming"}).to_string())
+                        }
+                        "cancel" => {
+                            let task_id = args
+                                .get("task_id")
+                                .and_then(|value| value.as_str())
+                                .ok_or_else(|| "task_id is required for cancel".to_string())?;
+                            durable_runner
+                                .cancel(&RunId::from_str(task_id), "Cancelled by durable_task tool".to_string())
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            Ok(serde_json::json!({"task_id": task_id, "status": "cancelled"}).to_string())
+                        }
+                        "checkpoint" => {
+                            let task_id = args
+                                .get("task_id")
+                                .and_then(|value| value.as_str())
+                                .ok_or_else(|| "task_id is required for checkpoint".to_string())?;
+                            let run_id = RunId::from_str(task_id);
+                            let checkpoint = checkpoint_store
+                                .load_checkpoint(&run_id)
+                                .await
+                                .map_err(|error| error.to_string())?
+                                .ok_or_else(|| format!("task '{}' has no checkpoint yet", task_id))?;
+                            let note = serde_json::json!({
+                                "label": args.get("label").and_then(|value| value.as_str()),
+                                "completed_steps": args.get("completed_steps").and_then(|value| value.as_u64()),
+                                "step_outputs": args.get("step_outputs").cloned(),
+                                "saved_at": chrono::Utc::now(),
+                            });
+                            let note_bytes = serde_json::to_vec(&note).map_err(|error| error.to_string())?;
+                            durable_store
+                                .put(&durable_task_checkpoint_note_key(&run_id), &note_bytes)
+                                .map_err(|error| error.to_string())?;
+                            let round = match checkpoint {
+                                Checkpoint::AgentLoop { round, .. } => round,
+                                Checkpoint::PipelineStep { .. } => 0,
+                            };
+                            Ok(serde_json::json!({
+                                "task_id": task_id,
+                                "status": "checkpointed",
+                                "round": round,
+                            })
+                            .to_string())
+                        }
+                        "list" => {
+                            let mut tasks = Vec::new();
+                            let mut seen = HashSet::new();
+                            for state in ["pending", "running", "suspended", "completed", "failed", "cancelled"] {
+                                for run_id in checkpoint_store
+                                    .load_runs_by_state(state)
+                                    .await
+                                    .map_err(|error| error.to_string())?
+                                {
+                                    if !seen.insert(run_id.0.clone()) {
+                                        continue;
+                                    }
+                                    let meta = durable_store
+                                        .get(&durable_task_meta_key(&run_id))
+                                        .map_err(|error| error.to_string())?
+                                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                                        .unwrap_or(serde_json::Value::Null);
+                                    tasks.push(serde_json::json!({
+                                        "task_id": run_id,
+                                        "state": state,
+                                        "meta": meta,
+                                    }));
+                                }
+                            }
+                            serde_json::to_string_pretty(&tasks).map_err(|error| error.to_string())
+                        }
+                        _ => Err(format!("unsupported durable task operation: {}", operation)),
+                    }
+                })
+            }),
+        );
+    }
 
     // Event channel for streaming output
     let (event_tx, _) = broadcast::channel::<AgentEvent>(256);
 
     // Conversation history
-    let mut history: Vec<clawdesk_providers::ChatMessage> = Vec::new();
+    let mut history: Vec<ChatMessage> = Vec::new();
     let system_prompt = agent_config.system_prompt.clone();
+
+    let tool_registry = Arc::new(tool_registry);
 
     // Print header
     println!("ClawDesk Agent (local mode)");
@@ -416,10 +810,7 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
         }
 
         // Add user message to history
-        history.push(clawdesk_providers::ChatMessage::new(
-            clawdesk_providers::MessageRole::User,
-            input.as_str(),
-        ));
+        history.push(ChatMessage::new(MessageRole::User, input.as_str()));
 
         // Build runner for this turn
         let runner = AgentRunner::new(
@@ -429,7 +820,7 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
             cancel.child_token(),
         )
         .with_approval_gate(Arc::clone(&gate))
-        .with_tool_policy(Arc::new(policy.clone()))
+        .with_tool_policy(Arc::clone(&policy))
         .with_events(event_tx.clone());
 
         // Subscribe to events for streaming output
@@ -485,10 +876,7 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
                 }
 
                 // Add assistant message to history
-                history.push(clawdesk_providers::ChatMessage::new(
-                    clawdesk_providers::MessageRole::Assistant,
-                    response.content.as_str(),
-                ));
+                history.push(ChatMessage::new(MessageRole::Assistant, response.content.as_str()));
 
                 // Add tool messages to history (preserves multi-turn context)
                 for msg in response.tool_messages {

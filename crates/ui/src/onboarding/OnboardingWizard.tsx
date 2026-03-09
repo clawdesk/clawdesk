@@ -54,6 +54,12 @@ export interface OnboardingResult {
   provider: string;
   model: string;
   apiKey: string;
+  /** Base URL / endpoint (Azure, OpenAI, Ollama, Custom) */
+  baseUrl: string;
+  /** GCP project id (Vertex AI only) */
+  projectId: string;
+  /** GCP location (Vertex AI only) */
+  location: string;
   templateName: string;
   /** Whether the key was stored in the OS vault. */
   storedInVault: boolean;
@@ -117,6 +123,9 @@ export function OnboardingWizard({
   const [model, setModel] = useState(PROVIDER_MODELS["Ollama (Local)"][0].id);
   const [apiKey, setApiKey] = useState("");
   const [templateName, setTemplateName] = useState(AGENT_TEMPLATES[0].name);
+  const [baseUrl, setBaseUrl] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [location, setLocation] = useState("");
   const [storeInVault, setStoreInVault] = useState(true);
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -144,6 +153,8 @@ export function OnboardingWizard({
   }, [externalSkills]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const localProvider = provider.toLowerCase().includes("ollama");
+  const needsEndpoint = provider === "Azure OpenAI" || provider === "OpenAI" || provider === "Ollama (Local)" || provider === "Local (OpenAI Compatible)";
+  const needsVertexFields = provider === "Vertex AI";
 
   const keyValidation = useMemo(() => {
     if (localProvider || !apiKey.trim()) return null;
@@ -247,7 +258,13 @@ export function OnboardingWizard({
 
   if (!open) return null;
 
-  const canAdvanceFromProvider = localProvider || apiKey.trim().length > 0;
+  const canAdvanceFromProvider = (() => {
+    if (localProvider) return true;
+    if (!apiKey.trim()) return false;
+    if (provider === "Azure OpenAI" && !baseUrl.trim()) return false;
+    if (provider === "Vertex AI" && (!projectId.trim() || !location.trim())) return false;
+    return true;
+  })();
   const configuredChannelCount = channelSetups.size;
   const spec = configuringChannel ? specFor(configuringChannel) : null;
 
@@ -288,6 +305,9 @@ export function OnboardingWizard({
                 const models = PROVIDER_MODELS[p] || [];
                 if (models.length > 0) setModel(models[0].id);
                 setApiKey("");
+                setBaseUrl("");
+                setProjectId("");
+                setLocation("");
                 setValidationResult(null);
               }}>
                 <option>Anthropic</option>
@@ -297,6 +317,7 @@ export function OnboardingWizard({
                 <option>Cohere</option>
                 <option>Vertex AI</option>
                 <option>Ollama (Local)</option>
+                <option>Local (OpenAI Compatible)</option>
               </select>
             </label>
 
@@ -326,6 +347,51 @@ export function OnboardingWizard({
                 disabled={localProvider}
               />
             </label>
+
+            {needsEndpoint && (
+              <label className="field-label">
+                {provider === "Azure OpenAI" ? "Azure Endpoint" : "Base URL"}
+                <input
+                  type="url"
+                  value={baseUrl}
+                  placeholder={
+                    provider === "Azure OpenAI" ? "https://your-resource.openai.azure.com" :
+                    provider === "Local (OpenAI Compatible)" ? "http://localhost:8080/v1" :
+                    provider === "OpenAI" ? "https://api.openai.com (leave empty for default)" :
+                    "http://localhost:11434"
+                  }
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                />
+                {provider === "Azure OpenAI" && (
+                  <span className="row-sub" style={{ display: "block", marginTop: "0.25rem" }}>
+                    Required — find this in the Azure Portal under your OpenAI resource
+                  </span>
+                )}
+              </label>
+            )}
+
+            {needsVertexFields && (
+              <div style={{ display: "flex", gap: 12 }}>
+                <label className="field-label" style={{ flex: 1 }}>
+                  Project ID
+                  <input
+                    type="text"
+                    value={projectId}
+                    placeholder="my-gcp-project"
+                    onChange={(event) => setProjectId(event.target.value)}
+                  />
+                </label>
+                <label className="field-label" style={{ flex: 1 }}>
+                  Location
+                  <input
+                    type="text"
+                    value={location}
+                    placeholder="us-central1"
+                    onChange={(event) => setLocation(event.target.value)}
+                  />
+                </label>
+              </div>
+            )}
 
             {localProvider ? (
               <p className="onboarding-hint">
@@ -580,6 +646,9 @@ export function OnboardingWizard({
                   provider,
                   model,
                   apiKey,
+                  baseUrl,
+                  projectId,
+                  location,
                   templateName,
                   storedInVault: storeInVault && !localProvider,
                   enabledSkills: Array.from(enabledSkills),

@@ -64,6 +64,7 @@ use tracing::{error, info, warn};
 /// Panics if the Tauri application fails to build.
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -203,6 +204,7 @@ pub fn run() {
             commands_domain::get_skill_trust_level,
             commands_domain::evaluate_skill_triggers,
             commands_domain::get_audit_logs,
+            commands_domain::get_execution_logs,
             // ── Canvas workspace ──────────────────────────
             commands_canvas::create_canvas,
             commands_canvas::get_canvas,
@@ -427,6 +429,14 @@ pub fn run() {
             // ── Orchestration: task DAG, dispatch, capabilities ─────
             commands_orchestration::list_capabilities,
             commands_orchestration::get_orchestration_status,
+            commands_orchestration::list_agent_flows,
+            commands_orchestration::create_agent_flow,
+            commands_orchestration::update_agent_flow,
+            commands_orchestration::delete_agent_flow,
+            commands_orchestration::list_flow_templates,
+            commands_orchestration::run_orchestration,
+            commands_orchestration::list_orchestration_tasks,
+            commands_orchestration::send_orchestrated,
             // ── Files: workspace file browser ─────────────────────────
             commands_files::get_workspace_root,
             commands_files::list_workspace_files,

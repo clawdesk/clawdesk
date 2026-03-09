@@ -102,7 +102,12 @@ impl ServerManager {
 
     /// Check if llama-server is available.
     pub async fn is_llama_server_available(&self) -> bool {
-        self.llama_server_path.read().await.is_some()
+        self.llama_server_path
+            .read()
+            .await
+            .as_ref()
+            .map(|path| is_valid_llama_server_path(path))
+            .unwrap_or(false)
     }
 
     /// List all GGUF model files in the models directory.
@@ -130,13 +135,15 @@ impl ServerManager {
     }
 
     /// Start a model server for a given GGUF file.
-    pub async fn start_model(&self, model_path: &Path, model_name: &str) -> Result<u16, String> {
+    pub async fn start_model(&self, model_path: &Path, model_name: &str, context_length: u32) -> Result<u16, String> {
         let server_path = self
             .llama_server_path
             .read()
             .await
             .clone()
             .ok_or("llama-server not found. Install llama.cpp or set the path manually.")?;
+
+        ensure_llama_server_path(&server_path)?;
 
         // Allocate port
         let port = {
@@ -153,7 +160,7 @@ impl ServerManager {
             model_path: model_path.to_path_buf(),
             model_name: model_name.to_string(),
             port,
-            context_length: 8192,
+            context_length,
             gpu_layers,
             threads: Some(std::cmp::min(self.system.total_cpu_cores as u32, 8)),
             ttl_secs: *self.default_ttl_secs.read().await,
@@ -196,14 +203,14 @@ impl ServerManager {
 
         // Enable flash attention if GPU
         if self.system.has_gpu {
-            cmd.arg("-fa");
+            cmd.arg("--flash-attn").arg("auto");
         }
 
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         cmd.kill_on_drop(true);
 
-        info!(model = model_name, port, "starting llama-server");
+        info!(model = model_name, port, context_length = config.context_length, "starting llama-server");
 
         let child = cmd.spawn().map_err(|e| format!("Failed to start llama-server: {}", e))?;
         let pid = child.id();
@@ -221,21 +228,35 @@ impl ServerManager {
             .await
             .insert(model_name.to_string(), managed);
 
-        // Wait for health check
+        // Promote the process to Ready/Failed asynchronously so the UI can
+        // show "Starting" immediately instead of blocking on startup.
         let health_url = format!("http://127.0.0.1:{}/health", port);
-        match wait_for_health(&health_url, 120).await {
-            Ok(()) => {
-                if let Some(proc) = self.processes.write().await.get_mut(model_name) {
-                    proc.state = ProcessState::Ready;
+        let processes = Arc::clone(&self.processes);
+        let model_name = model_name.to_string();
+        tokio::spawn(async move {
+            match wait_for_health(&health_url, 120).await {
+                Ok(()) => {
+                    if let Some(proc) = processes.write().await.get_mut(&model_name) {
+                        proc.state = ProcessState::Ready;
+                    }
+                    info!(model = model_name.as_str(), port, "llama-server ready");
                 }
-                info!(model = model_name, port, "llama-server ready");
-                Ok(port)
+                Err(error) => {
+                    let mut processes = processes.write().await;
+                    if let Some(proc) = processes.get_mut(&model_name) {
+                        proc.state = ProcessState::Failed;
+                        proc.pid = None;
+                        if let Some(child) = proc.process.as_mut() {
+                            let _ = child.kill().await;
+                        }
+                        proc.process = None;
+                    }
+                    warn!(model = model_name.as_str(), port, error = %error, "llama-server failed to become ready");
+                }
             }
-            Err(e) => {
-                self.stop_model(model_name).await.ok();
-                Err(format!("llama-server failed to start: {}", e))
-            }
-        }
+        });
+
+        Ok(port)
     }
 
     /// Stop a running model server.
@@ -267,7 +288,30 @@ impl ServerManager {
 
     /// Get the status of all managed processes.
     pub async fn status(&self) -> Vec<RunningModel> {
-        let processes = self.processes.read().await;
+        let mut processes = self.processes.write().await;
+
+        for (name, proc) in processes.iter_mut() {
+            if let Some(child) = proc.process.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if proc.state != ProcessState::Stopping {
+                            proc.state = ProcessState::Failed;
+                            proc.pid = None;
+                            proc.process = None;
+                            warn!(model = name.as_str(), exit_status = %status, "llama-server exited unexpectedly");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        proc.state = ProcessState::Failed;
+                        proc.pid = None;
+                        proc.process = None;
+                        warn!(model = name.as_str(), error = %error, "failed to inspect llama-server process state");
+                    }
+                }
+            }
+        }
+
         processes
             .iter()
             .map(|(name, proc)| RunningModel {
@@ -468,7 +512,6 @@ fn detect_llama_server() -> Option<PathBuf> {
     // Check common locations
     let candidates = [
         "llama-server",
-        "llama-cli",
         "/usr/local/bin/llama-server",
         "/opt/homebrew/bin/llama-server",
     ];
@@ -498,6 +541,30 @@ fn detect_llama_server() -> Option<PathBuf> {
     }
 
     None
+}
+
+fn is_valid_llama_server_path(path: &Path) -> bool {
+    ensure_llama_server_path(path).is_ok()
+}
+
+fn ensure_llama_server_path(path: &Path) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if file_name.contains("llama-cli") {
+        return Err(
+            "Configured binary points to llama-cli, but Local Models requires llama-server. Install llama.cpp with llama-server or set the path manually.".to_string(),
+        );
+    }
+
+    if path.components().count() > 1 && !path.exists() {
+        return Err(format!("llama-server not found at {}", path.display()));
+    }
+
+    Ok(())
 }
 
 /// Wait for llama-server health endpoint to respond.

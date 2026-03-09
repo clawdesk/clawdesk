@@ -321,3 +321,75 @@ pub async fn get_audit_logs(
         })
         .collect())
 }
+
+/// Get execution logs: merges agent execution traces with audit log entries.
+///
+/// Returns a unified view of what agents did: tool calls, rounds, delegations,
+/// compaction, fallbacks, errors — alongside security/config events.
+#[tauri::command]
+pub async fn get_execution_logs(
+    limit: usize,
+    state: State<'_, AppState>,
+) -> Result<Vec<FrontendLogEntry>, String> {
+    // 1. Get audit log entries (includes persisted tool calls from send_message)
+    let audit_entries = state.audit_logger.recent(limit).await;
+    let mut result: Vec<FrontendLogEntry> = audit_entries
+        .into_iter()
+        .map(|e| {
+            let level = match e.outcome {
+                clawdesk_types::security::AuditOutcome::Success => "info",
+                clawdesk_types::security::AuditOutcome::Denied => "warn",
+                clawdesk_types::security::AuditOutcome::Failed => "error",
+                clawdesk_types::security::AuditOutcome::Blocked => "warn",
+            };
+            let subsystem = format!("{:?}", e.category).to_lowercase();
+            let actor = match &e.actor {
+                clawdesk_types::security::AuditActor::Agent { id, .. } => format!("agent:{}", id),
+                clawdesk_types::security::AuditActor::User { sender_id, channel } => {
+                    format!("user:{}@{}", sender_id, channel)
+                }
+                clawdesk_types::security::AuditActor::System => "system".into(),
+                clawdesk_types::security::AuditActor::Plugin { name, .. } => format!("plugin:{}", name),
+                clawdesk_types::security::AuditActor::Cron { task_id } => format!("cron:{}", task_id),
+            };
+            FrontendLogEntry {
+                id: e.id,
+                timestamp: e.timestamp.to_rfc3339(),
+                level: level.into(),
+                subsystem,
+                message: format!("{} — {}", e.action, e.detail),
+                category: format!("{:?}", e.category),
+                actor,
+                outcome: format!("{:?}", e.outcome),
+            }
+        })
+        .collect();
+
+    // 2. Merge in-memory execution traces (current session data not yet in audit log)
+    if let Ok(all_traces) = state.traces.read() {
+        for (agent_id, entries) in all_traces.iter() {
+            for entry in entries {
+                result.push(FrontendLogEntry {
+                    id: format!("trace-{}-{}", agent_id, entry.timestamp),
+                    timestamp: chrono::Utc::now().to_rfc3339(), // use current time for ordering
+                    level: match entry.event.as_str() {
+                        "Error" => "error".into(),
+                        "Fallback" | "Compaction" | "ContextGuard" | "ContentScan" => "warn".into(),
+                        _ => "info".into(),
+                    },
+                    subsystem: "execution".into(),
+                    message: format!("[{}] {}", entry.event, entry.detail),
+                    category: "Execution".into(),
+                    actor: format!("agent:{}", agent_id),
+                    outcome: if entry.event == "Error" { "Failed".into() } else { "Success".into() },
+                });
+            }
+        }
+    }
+
+    // 3. Sort by timestamp descending (newest first)
+    result.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    result.truncate(limit);
+
+    Ok(result)
+}

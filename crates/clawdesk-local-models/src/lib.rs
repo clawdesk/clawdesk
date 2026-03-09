@@ -33,7 +33,7 @@ pub mod server;
 
 pub use download::{delete_model, download_model, DownloadEvent};
 pub use hardware::{GpuBackend, GpuInfo, SystemSpecs};
-pub use models::{builtin_models, FitLevel, LocalModel, ModelFit, RunMode, UseCase};
+pub use models::{builtin_models, fallback_runtime_context, recommended_runtime_context, FitLevel, LocalModel, ModelFit, RunMode, UseCase};
 pub use server::{DownloadedModel, ProcessState, RunningModel, ScannedModel, ServerManager};
 
 use serde::{Deserialize, Serialize};
@@ -156,7 +156,22 @@ impl LocalModelManager {
                 )
             })?;
 
-        self.server.start_model(&model_file.path, model_name).await
+        let requested_name = model_name.to_lowercase();
+        let downloaded_name = model_file.name.to_lowercase();
+        let context_length = builtin_models()
+            .iter()
+            .find(|candidate| {
+                let candidate_name = candidate.name.to_lowercase();
+                candidate_name == requested_name
+                    || requested_name.contains(&candidate_name)
+                    || downloaded_name.contains(&candidate_name)
+            })
+            .map(|candidate| recommended_runtime_context(candidate, &self.system))
+            .unwrap_or_else(|| fallback_runtime_context(&self.system));
+
+        self.server
+            .start_model(&model_file.path, model_name, context_length)
+            .await
     }
 
     /// Stop a running model.

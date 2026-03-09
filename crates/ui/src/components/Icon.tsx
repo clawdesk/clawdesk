@@ -190,6 +190,9 @@ export function Icon({ name, className }: { name: string; className?: string }) 
     send: (
       <svg {...common}><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
     ),
+    upload: (
+      <svg {...common}><path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M20 16.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-1.5" /></svg>
+    ),
     activity: (
       <svg {...common}><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></svg>
     ),
@@ -207,6 +210,9 @@ export function Icon({ name, className }: { name: string; className?: string }) 
     ),
     link: (
       <svg {...common}><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+    ),
+    paperclip: (
+      <svg {...common}><path d="m21.44 11.05-8.49 8.49a6 6 0 0 1-8.49-8.49l9.19-9.2a4 4 0 0 1 5.66 5.66l-9.2 9.2a2 2 0 0 1-2.82-2.83l8.49-8.48" /></svg>
     ),
     pause: (
       <svg {...common}><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>

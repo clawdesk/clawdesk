@@ -33,13 +33,13 @@
 //! ```
 
 use crate::bootstrap::{self, BootstrapConfig};
+use crate::prompt_isolation::PromptIsolator;
 use crate::runner::{
     AgentEvent, ChannelContext, MemoryRecallFn, SkillProvider,
 };
 use clawdesk_domain::context_guard::estimate_tokens;
 use clawdesk_providers::{ChatMessage, MessageRole};
 use std::path::Path;
-use std::sync::Arc;
 use tracing::{debug, info};
 
 /// Input to the prompt assembly pipeline.
@@ -257,13 +257,30 @@ impl PromptAssembler {
         }
 
         let active_skills = injection.selected_skill_ids.clone();
-        let skills_section = injection.prompt_fragments.join("\n\n");
+        let mut isolator = PromptIsolator::new();
+        let allowed_tools = injection.tool_names.clone();
+        let namespaces = injection
+            .prompt_fragments
+            .into_iter()
+            .enumerate()
+            .map(|(index, fragment)| {
+                let skill_id = active_skills
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("selected-skill-{}", index + 1));
+                if !allowed_tools.is_empty() {
+                    isolator.grant_tools(&skill_id, allowed_tools.clone());
+                }
+                (skill_id, "selected".to_string(), fragment, Vec::new())
+            })
+            .collect();
+        let skills_section = isolator.build(&system_prompt, namespaces).render();
         info!(
             skills = injection.selected_skill_ids.len(),
             tokens = injection.total_tokens,
             "injected skill prompts into system prompt"
         );
-        (format!("{}\n\n{}", system_prompt, skills_section), active_skills)
+        (skills_section, active_skills)
     }
 
     /// Stage 4: Append output discipline rules.

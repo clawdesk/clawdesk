@@ -50,6 +50,8 @@ const PIE_COLORS = [CHART_ACCENT, CHART_BLUE, CHART_GREEN, CHART_YELLOW, "#7C3AE
 // ── Tab definition ────────────────────────────────────────────
 type SettingsTab = "preferences" | "providers" | "security" | "observe" | "infra" | "backup";
 
+type RunningLocalModel = Awaited<ReturnType<typeof api.localModelsStatus>>["running_models"][number];
+
 const TABS: { id: SettingsTab; label: string; icon: string }[] = [
   { id: "preferences", label: "Preferences", icon: "settings" },
   { id: "providers", label: "Providers", icon: "brand" },
@@ -58,6 +60,34 @@ const TABS: { id: SettingsTab; label: string; icon: string }[] = [
   { id: "infra", label: "Infrastructure", icon: "cpu" },
   { id: "backup", label: "Backup", icon: "archive" },
 ];
+
+const BUILT_IN_LOCAL_PROVIDER_LABEL_PREFIX = "Built-in Local · ";
+
+function getBuiltInLocalProviderLabel(modelName: string): string {
+  return `${BUILT_IN_LOCAL_PROVIDER_LABEL_PREFIX}${modelName}`;
+}
+
+function isBuiltInLocalProviderLabel(label: string, modelName?: string): boolean {
+  if (modelName) {
+    return label === getBuiltInLocalProviderLabel(modelName);
+  }
+  return label.startsWith(BUILT_IN_LOCAL_PROVIDER_LABEL_PREFIX);
+}
+
+function getBuiltInLocalProviderBaseUrl(model: RunningLocalModel): string {
+  return `http://127.0.0.1:${model.port}/v1`;
+}
+
+function createBuiltInLocalProviderConfig(model: RunningLocalModel): ProviderConfig {
+  const config = createProviderConfig("Local (OpenAI Compatible)");
+  config.label = getBuiltInLocalProviderLabel(model.name);
+  config.model = model.name;
+  config.baseUrl = getBuiltInLocalProviderBaseUrl(model);
+  config.apiKey = "";
+  config.projectId = "";
+  config.location = "";
+  return config;
+}
 
 interface BackupEntry {
   id: string;
@@ -87,6 +117,7 @@ export interface SettingsPageProps {
   onRefreshPlugins: () => void;
   onRefreshPeers: () => void;
   onResetOnboarding: () => void;
+  onFullReset: () => Promise<void>;
   pushToast: (text: string) => void;
   onNavigate: (nav: string, options?: { threadId?: string }) => void;
 }
@@ -109,6 +140,7 @@ export function SettingsPage({
   onRefreshPlugins,
   onRefreshPeers,
   onResetOnboarding,
+  onFullReset,
   pushToast,
   onNavigate,
 }: SettingsPageProps) {
@@ -140,6 +172,8 @@ export function SettingsPage({
   // Clear history confirmation
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
+  const [showFullResetConfirm, setShowFullResetConfirm] = useState(false);
+  const [isFullResetting, setIsFullResetting] = useState(false);
   // Draft state for the provider being edited
   const [editDraft, setEditDraft] = useState<ProviderConfig | null>(null);
   const [showApiKeyFor, setShowApiKeyFor] = useState<string | null>(null);
@@ -163,6 +197,7 @@ export function SettingsPage({
 
   // ── Lazy-loaded data ──────────────────────────────────────
   const [providers, setProviders] = useState<ProviderCapabilityInfo[]>([]);
+  const [localModelsStatus, setLocalModelsStatus] = useState<Awaited<ReturnType<typeof api.localModelsStatus>> | null>(null);
   const [traceRun, setTraceRun] = useState<TraceRunInfo | null>(null);
   const [traceSpans, setTraceSpans] = useState<TraceSpanInfo[]>([]);
   const [mediaPipeline, setMediaPipeline] = useState<MediaPipelineStatus | null>(null);
@@ -189,6 +224,16 @@ export function SettingsPage({
   const [storageSnapshot, setStorageSnapshot] = useState<StorageSnapshot | null>(null);
   const [isSnapshotLoading, setIsSnapshotLoading] = useState(false);
   const debugLogRef = useRef<HTMLDivElement>(null);
+  const runningLocalModels = (localModelsStatus?.running_models ?? []).filter((model) => model.state !== "stopped");
+
+  const loadLocalModelProviders = useCallback(async () => {
+    try {
+      const status = await api.localModelsStatus();
+      setLocalModelsStatus(status);
+    } catch {
+      setLocalModelsStatus(null);
+    }
+  }, []);
 
   // Load debug mode state on mount
   useEffect(() => {
@@ -268,6 +313,7 @@ export function SettingsPage({
   useEffect(() => {
     if (tab === "providers" && providers.length === 0) {
       api.listProviderCapabilities().then(setProviders).catch(() => { });
+      loadLocalModelProviders().catch(() => { });
     }
     if (tab === "security" && auditLog.length === 0) {
       api.policyGetAuditLog(20).then((entries) => {
@@ -287,7 +333,55 @@ export function SettingsPage({
       if (!tunnelMetrics) api.getTunnelStatus().then(setTunnelMetrics).catch(() => { });
       if (!contextGuard) api.getContextGuardStatus().then(setContextGuard).catch(() => { });
     }
-  }, [tab]);
+  }, [tab, providers.length, auditLog.length, metrics, costHistory.length, mediaPipeline, tunnelMetrics, contextGuard, loadLocalModelProviders]);
+
+  useEffect(() => {
+    if (tab !== "providers") {
+      return;
+    }
+
+    loadLocalModelProviders().catch(() => { });
+    const timer = window.setInterval(() => {
+      loadLocalModelProviders().catch(() => { });
+    }, 4000);
+
+    return () => window.clearInterval(timer);
+  }, [tab, loadLocalModelProviders]);
+
+  useEffect(() => {
+    const activeId = activeProviderId || providerConfigs[0]?.id;
+    if (!activeId || !localModelsStatus) {
+      return;
+    }
+
+    const active = providerConfigs.find((cfg) => cfg.id === activeId);
+    if (!active || !isBuiltInLocalProviderLabel(active.label)) {
+      return;
+    }
+
+    const runningModel = localModelsStatus.running_models.find(
+      (model) => model.name === active.model && model.state === "ready"
+    );
+    if (!runningModel) {
+      return;
+    }
+
+    const nextBaseUrl = getBuiltInLocalProviderBaseUrl(runningModel);
+    if (active.baseUrl === nextBaseUrl) {
+      return;
+    }
+
+    const updatedConfigs = providerConfigs.map((cfg) =>
+      cfg.id === active.id ? { ...cfg, baseUrl: nextBaseUrl } : cfg
+    );
+    const updatedActive = updatedConfigs.find((cfg) => cfg.id === active.id);
+
+    setProviderConfigs(updatedConfigs);
+    saveProviders(updatedConfigs);
+    if (updatedActive) {
+      syncLegacyKeys(updatedActive);
+    }
+  }, [activeProviderId, localModelsStatus, providerConfigs]);
 
   const enableObservability = useCallback(async () => {
     try {
@@ -327,6 +421,32 @@ export function SettingsPage({
       setTestingProviderId(null);
     }
   }, [activeConfig, pushToast]);
+
+  const handleSetBuiltInLocalDefault = useCallback((model: RunningLocalModel) => {
+    const nextConfig = createBuiltInLocalProviderConfig(model);
+    const existing = providerConfigs.find((cfg) => isBuiltInLocalProviderLabel(cfg.label, model.name));
+    const resolvedConfig = existing
+      ? {
+        ...existing,
+        provider: nextConfig.provider,
+        model: nextConfig.model,
+        apiKey: "",
+        baseUrl: nextConfig.baseUrl,
+        projectId: "",
+        location: "",
+        label: nextConfig.label,
+      }
+      : nextConfig;
+    const updatedConfigs = existing
+      ? providerConfigs.map((cfg) => (cfg.id === existing.id ? resolvedConfig : cfg))
+      : [...providerConfigs, resolvedConfig];
+
+    setProviderConfigs(updatedConfigs);
+    saveProviders(updatedConfigs);
+    setActiveProvId(resolvedConfig.id);
+    setActiveProviderId(resolvedConfig.id);
+    pushToast(`"${model.name}" is now the default provider.`);
+  }, [providerConfigs, pushToast]);
 
   return (
     <PageLayout
@@ -464,6 +584,21 @@ export function SettingsPage({
                   >
                     🗑️ Clear All Chat History
                   </button>
+                  <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
+                    <p className="settings-desc" style={{ marginBottom: 4 }}>
+                      <strong>Full Factory Reset</strong> — Delete everything: agents, chats, providers, settings, and all local data. Returns ClawDesk to a fresh-install state.
+                    </p>
+                    <p className="settings-desc" style={{ marginBottom: 12, color: "var(--text-soft)", fontSize: 12 }}>
+                      This cannot be undone. You will need to re-run the setup wizard.
+                    </p>
+                    <button
+                      className="btn"
+                      style={{ background: "var(--error)", color: "#fff", borderColor: "var(--error)" }}
+                      onClick={() => setShowFullResetConfirm(true)}
+                    >
+                      💣 Full Factory Reset
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -514,6 +649,60 @@ export function SettingsPage({
                         }}
                       >
                         {isClearing ? "Clearing..." : "Yes, clear all history"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Full factory reset confirmation modal */}
+              {showFullResetConfirm && (
+                <div className="modal-backdrop" onClick={() => !isFullResetting && setShowFullResetConfirm(false)}>
+                  <div className="modal" style={{ maxWidth: 480, padding: 0 }} onClick={(e) => e.stopPropagation()}>
+                    <div style={{ padding: "20px 24px 0" }}>
+                      <h3 style={{ fontSize: 17, fontWeight: 600, marginBottom: 12, color: "var(--error)" }}>Full Factory Reset?</h3>
+                      <div style={{ fontSize: 14, lineHeight: 1.6, color: "var(--text)" }}>
+                        <p style={{ marginBottom: 12 }}>This will permanently delete <strong>everything</strong>:</p>
+                        <ul style={{ paddingLeft: 20, marginBottom: 16 }}>
+                          <li>All agents and their configurations</li>
+                          <li>All chat conversations and message history</li>
+                          <li>All provider configurations and API keys</li>
+                          <li>All local settings, themes, and preferences</li>
+                          <li>All extension configurations</li>
+                        </ul>
+                        <div style={{ padding: "10px 12px", background: "var(--panel-strong)", borderRadius: 8, marginBottom: 16, fontSize: 13 }}>
+                          🔄 After reset, ClawDesk will restart the setup wizard so you can configure everything fresh.
+                        </div>
+                        <p style={{ color: "var(--error)", fontWeight: 500, fontSize: 13 }}>
+                          This action cannot be undone.
+                        </p>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "16px 24px", borderTop: "1px solid var(--line)", marginTop: 8 }}>
+                      <button
+                        className="btn ghost"
+                        onClick={() => setShowFullResetConfirm(false)}
+                        disabled={isFullResetting}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="btn"
+                        style={{ background: "var(--error)", color: "#fff", borderColor: "var(--error)" }}
+                        disabled={isFullResetting}
+                        onClick={async () => {
+                          setIsFullResetting(true);
+                          try {
+                            await onFullReset();
+                            setShowFullResetConfirm(false);
+                          } catch (e: any) {
+                            pushToast(`Reset failed: ${e?.message || e}`);
+                          } finally {
+                            setIsFullResetting(false);
+                          }
+                        }}
+                      >
+                        {isFullResetting ? "Resetting..." : "Yes, reset everything"}
                       </button>
                     </div>
                   </div>
@@ -782,6 +971,79 @@ export function SettingsPage({
                     </div>
                   );
                 })}
+              </div>
+
+              <div className="settings-group" style={{ marginTop: 20 }}>
+                <div className="settings-group-label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span>Built-in Local Models</span>
+                  <button
+                    className="btn subtle"
+                    style={{ fontSize: 12, padding: "4px 10px" }}
+                    onClick={() => {
+                      loadLocalModelProviders().catch(() => { });
+                    }}
+                  >
+                    Refresh
+                  </button>
+                </div>
+
+                {runningLocalModels.length === 0 ? (
+                  <div className="section-card empty-providers">
+                    Start a model from Local Models and it will appear here with a one-click default action.
+                  </div>
+                ) : (
+                  <div className="provider-list">
+                    {runningLocalModels.map((model) => {
+                      const endpoint = getBuiltInLocalProviderBaseUrl(model);
+                      const isDefault =
+                        activeConfig?.provider === "Local (OpenAI Compatible)"
+                        && activeConfig.model === model.name
+                        && activeConfig.baseUrl === endpoint;
+                      const canSetDefault = model.state === "ready";
+
+                      return (
+                        <div
+                          key={`${model.name}-${model.port}`}
+                          className={`provider-card ${isDefault ? "provider-active" : ""}`}
+                          style={{ opacity: canSetDefault ? 1 : 0.82 }}
+                        >
+                          <div className="provider-card-info">
+                            <div className="provider-card-name">
+                              {model.name}
+                              <span className="chip">Built-in</span>
+                              <span className="chip">{model.state}</span>
+                              {isDefault && <span className="provider-active-badge">Default</span>}
+                            </div>
+                            <div className="provider-card-models">Endpoint: {endpoint}</div>
+                            <div className="provider-card-models">Model: {model.name}</div>
+                            <div className="provider-card-caps">
+                              <span className="chip">chat</span>
+                              <span className="chip">streaming</span>
+                              <span className="chip">private</span>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: 12 }}>
+                            {!isDefault && (
+                              <button
+                                className="btn subtle"
+                                disabled={!canSetDefault}
+                                onClick={() => handleSetBuiltInLocalDefault(model)}
+                              >
+                                {canSetDefault ? "Set Default" : "Waiting"}
+                              </button>
+                            )}
+                            <button
+                              className="btn subtle"
+                              onClick={() => onNavigate("local-models")}
+                            >
+                              Manage
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {providers.length > 0 && (
@@ -1492,15 +1754,10 @@ export function SettingsPage({
               <div className="settings-group">
                 <div className="settings-group-label" style={{ color: "var(--danger)" }}>Danger Zone</div>
                 <div className="backup-danger">
-                  <button className="btn danger" onClick={() => {
-                    if (confirm("Reset all local settings and cache? This cannot be undone.")) {
-                      window.localStorage.clear();
-                      pushToast("Local settings and cache cleared. Reload to apply.");
-                    }
-                  }}>
-                    🗑 Reset All Local Data
+                  <button className="btn danger" onClick={() => setShowFullResetConfirm(true)}>
+                    💣 Full Factory Reset
                   </button>
-                  <p className="settings-desc">Clears localStorage, cached preferences, and session data. Agent data on disk is unaffected.</p>
+                  <p className="settings-desc">Deletes all agents, chats, providers, settings, and local data. Returns ClawDesk to a fresh-install state with the setup wizard.</p>
                 </div>
               </div>
             </div>

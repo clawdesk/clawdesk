@@ -27,3 +27,7 @@ fix_providers.py
 move_providers.py
 senarios/
 sochdb.md
+
+jj.svg
+rust_coding_agent_implementation_spec_sochdb_final.md
+rust_coding_agent_sochdb_architecture_final.svg

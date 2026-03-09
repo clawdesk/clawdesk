@@ -33,7 +33,7 @@ import { classifyError } from "./lib/error-recovery";
 import { subscribeAppEvents } from "./stores/event-bus";
 import { translateRisk } from "./lib/risk-translator";
 import { AppShell, type ShellNavGroup, type TopBarStatus, type GatewayStatus } from "./shell/AppShell";
-import { getActiveProvider } from "./providerConfig";
+import { getActiveProvider, createProviderConfig, saveProviders, setActiveProviderId } from "./providerConfig";
 import { ChatPage } from "./pages/ChatPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { SkillsPage } from "./pages/SkillsPage";
@@ -690,6 +690,24 @@ export default function App() {
     }
   });
 
+  // Backend-aware fresh-start detection: if backend returns zero agents,
+  // the user deleted ~/.clawdesk but localStorage still has the completion flag.
+  // Re-trigger onboarding in that case.
+  useEffect(() => {
+    if (onboardingOpen) return; // already showing
+    // Wait until the initial agent list has been fetched
+    const timer = setTimeout(() => {
+      api.listAgents().then((agents) => {
+        if (agents.length === 0) {
+          // Backend is empty — treat as fresh install
+          window.localStorage.removeItem("clawdesk.onboarding.complete");
+          setOnboardingOpen(true);
+        }
+      }).catch(() => { /* backend not ready yet — skip */ });
+    }, 800);
+    return () => clearTimeout(timer);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const activeThread = useMemo<ThreadItem | null>(
     () => threads.find((thread) => thread.id === activeThreadId) ?? threads[0] ?? null,
     [threads, activeThreadId]
@@ -862,22 +880,27 @@ export default function App() {
     provider: string;
     model: string;
     apiKey: string;
+    baseUrl: string;
+    projectId: string;
+    location: string;
     templateName: string;
     storedInVault: boolean;
     enabledSkills: string[];
     channelSetups: { channelId: string; config: Record<string, string> }[];
   }) {
-    // Always save settings first — even if agent creation fails
-    if (result.provider) {
-      window.localStorage.setItem("clawdesk.provider", result.provider);
-    }
-    if (result.model) {
-      window.localStorage.setItem("clawdesk.model", result.model);
-    }
-    if (result.apiKey) {
-      window.localStorage.setItem("clawdesk.api_key", result.apiKey);
-      window.localStorage.setItem("clawdesk.api_key.configured", "1");
-    }
+    // Create a proper ProviderConfig entry so Settings and chat use the same data
+    const providerEntry = createProviderConfig(result.provider);
+    providerEntry.model = result.model;
+    providerEntry.apiKey = result.apiKey;
+    providerEntry.baseUrl = result.baseUrl;
+    providerEntry.projectId = result.projectId;
+    providerEntry.location = result.location;
+    providerEntry.label = result.provider;
+
+    // Save as the sole provider config and make it active
+    saveProviders([providerEntry]);
+    setActiveProviderId(providerEntry.id);
+
     window.localStorage.setItem("clawdesk.onboarding.complete", "1");
     setOnboardingOpen(false);
 
@@ -916,6 +939,31 @@ export default function App() {
   function resetOnboarding() {
     window.localStorage.removeItem("clawdesk.onboarding.complete");
     setOnboardingOpen(true);
+  }
+
+  async function fullFactoryReset() {
+    // 1. Clear all backend state
+    try {
+      // Delete all agents
+      const agents = await api.listAgents().catch(() => []);
+      for (const agent of agents) {
+        await api.deleteAgent(agent.id).catch(() => {});
+      }
+      // Clear all chats
+      await api.clearAllChats().catch(() => {});
+    } catch {
+      // Best-effort: continue even if some calls fail
+    }
+
+    // 2. Clear all localStorage
+    try { window.localStorage.clear(); } catch { /* ignore */ }
+
+    // 3. Re-trigger onboarding
+    setOnboardingOpen(true);
+    setBackendAgents([]);
+    setSelectedAgentId(null);
+    navigate("chat");
+    pushToast("Full reset complete. Let's set up ClawDesk fresh.");
   }
 
   const runQuickCheck = useCallback(async (opts?: { showModal?: boolean }) => {
@@ -4338,6 +4386,7 @@ export default function App() {
             onRefreshPlugins={() => api.listPlugins().then((p) => setBackendPlugins(p)).catch(() => { })}
             onRefreshPeers={() => api.listDiscoveredPeers().then((p) => setBackendPeers(p)).catch(() => { })}
             onResetOnboarding={resetOnboarding}
+            onFullReset={fullFactoryReset}
             pushToast={pushToast}
             onNavigate={navigateLoose}
           />

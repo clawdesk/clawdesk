@@ -202,6 +202,10 @@ cargo tauri dev
 cargo tauri build
 ```
 
+`cargo tauri dev` and `cargo tauri build` automatically prepare the bundled `llama-server` sidecar used by Local Models. A machine-level `llama-server` install is not required.
+
+If you need to skip the auto-download in offline CI, set `CLAWDESK_SKIP_LLAMA_SERVER_DOWNLOAD=1` and provide the sidecar files under [crates/clawdesk-tauri/binaries](/Users/sushanth/llamabot/clawdesk/crates/clawdesk-tauri/binaries) yourself.
+
 ## Security Model
 
 ClawDesk implements defense-in-depth. Every layer enforces its own boundaries.

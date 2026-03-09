@@ -855,6 +855,12 @@ pub struct AppState {
     pub orchestration_event_tx: tokio::sync::mpsc::UnboundedSender<clawdesk_gateway::orchestrator::OrchestrationEvent>,
     pub orchestration_event_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<clawdesk_gateway::orchestrator::OrchestrationEvent>>>,
 
+    // ── Agent Flow Coordination ──
+    // Paperclip-inspired adapter-based agent flows for coordinating
+    // different agent types (Claude, Codex, Cursor, etc.)
+    pub agent_flows: RwLock<Vec<crate::commands_orchestration::AgentFlowConfig>>,
+    pub orchestration_tasks: RwLock<Vec<crate::commands_orchestration::OrchestrationTaskInfo>>,
+
     // ── Local Models: built-in llama.cpp model management ──
     // Hardware detection, model recommendations, GGUF downloads, and
     // llama-server process lifecycle — replaces need for Ollama/LM Studio.
@@ -2907,6 +2913,39 @@ impl AppState {
             info!("A2A sessions_send tool registered — LLM can delegate tasks to other agents");
         }
 
+        // ── Register browser automation tools ──────────
+        // Wires CDP-based browser tools (navigate, click, type, screenshot,
+        // extract_text, get_title, eval_js) into the agent tool registry.
+        // Uses a lazy-initialized BrowserManager shared across all agent calls.
+        {
+            let browser_mgr: Arc<tokio::sync::OnceCell<Arc<clawdesk_browser::BrowserManager>>> =
+                Arc::new(tokio::sync::OnceCell::new());
+            let browser_exec_fn: std::sync::Arc<
+                dyn Fn(String, serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync
+            > = std::sync::Arc::new(move |action_name: String, args: serde_json::Value| {
+                let mgr_cell = Arc::clone(&browser_mgr);
+                Box::pin(async move {
+                    // Lazy-init the browser manager on first use
+                    let mgr = mgr_cell.get_or_init(|| async {
+                        clawdesk_browser::BrowserManager::new(
+                            clawdesk_browser::manager::BrowserConfig::default()
+                        )
+                    }).await;
+
+                    // Get or create a session for the "agent" context
+                    let managed = mgr.get_or_create("agent_tool")
+                        .await
+                        .map_err(|e| format!("Browser session failed: {}", e))?;
+
+                    // Lock the managed session and access the CDP session
+                    let guard = managed.lock().await;
+                    clawdesk_browser::execute_tool_call(&guard.cdp, &action_name, &args).await
+                })
+            });
+            clawdesk_agents::builtin_tools::register_browser_tools(&mut tool_registry, browser_exec_fn);
+            info!("Browser automation tools registered (navigate, click, type, screenshot, extract_text, eval_js)");
+        }
+
         // Wrap in Arc now — all mutable registration is complete.
         let tool_registry = Arc::new(tool_registry);
 
@@ -3447,6 +3486,10 @@ impl AppState {
             // ── Orchestration: Event channel ──
             orchestration_event_tx: orch_tx,
             orchestration_event_rx: std::sync::Mutex::new(Some(orch_rx)),
+
+            // ── Agent Flow Coordination ──
+            agent_flows: RwLock::new(Vec::new()),
+            orchestration_tasks: RwLock::new(Vec::new()),
 
             // ── Local Models: built-in LLM management ──
             local_model_manager: {

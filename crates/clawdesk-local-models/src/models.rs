@@ -92,6 +92,34 @@ impl LocalModel {
     }
 }
 
+/// Choose a practical runtime context window for a model on the current machine.
+///
+/// We do not want to force every model down to 8K, but we also should not
+/// eagerly launch every runtime at its full advertised maximum when that would
+/// waste memory on the KV cache. This picks a conservative tier based on the
+/// current inference memory budget and then caps by the model's declared limit.
+pub fn recommended_runtime_context(model: &LocalModel, system: &SystemSpecs) -> u32 {
+    let memory_budget_gb = system.inference_memory_gb();
+    let system_cap = if memory_budget_gb >= 24.0 {
+        32_768
+    } else if memory_budget_gb >= 12.0 {
+        16_384
+    } else {
+        8_192
+    };
+
+    model.context_length.min(system_cap).max(8_192)
+}
+
+/// Fallback runtime context for models that are not in the built-in catalog.
+pub fn fallback_runtime_context(system: &SystemSpecs) -> u32 {
+    if system.inference_memory_gb() >= 12.0 {
+        16_384
+    } else {
+        8_192
+    }
+}
+
 /// Result of fitting a model to the system hardware.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelFit {
@@ -113,7 +141,7 @@ impl ModelFit {
     /// Analyze how well a model fits on the given system.
     pub fn analyze(model: &LocalModel, system: &SystemSpecs, installed: bool) -> Self {
         let memory_available = system.inference_memory_gb();
-        let context = std::cmp::min(model.context_length, 8192);
+        let context = recommended_runtime_context(model, system);
 
         // Find best quantization that fits
         let (quant, mem_required) = model

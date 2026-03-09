@@ -109,7 +109,7 @@ pub async fn local_models_start(
     state: State<'_, AppState>,
 ) -> Result<u16, String> {
     // Extract what we need before any await
-    let (models_dir, _system, server) = get_manager_info(&state)?;
+    let (models_dir, system, server) = get_manager_info(&state)?;
 
     // Find the model file
     let downloaded = server.list_downloaded_models();
@@ -125,11 +125,26 @@ pub async fn local_models_start(
         })?;
 
     let model_path = model_file.path.clone();
-    let port = server.start_model(&model_path, &request.model_name).await?;
+    let requested_name = request.model_name.to_lowercase();
+    let downloaded_name = model_file.name.to_lowercase();
+    let context_length = clawdesk_local_models::builtin_models()
+        .iter()
+        .find(|candidate| {
+            let candidate_name = candidate.name.to_lowercase();
+            candidate_name == requested_name
+                || requested_name.contains(&candidate_name)
+                || downloaded_name.contains(&candidate_name)
+        })
+        .map(|candidate| clawdesk_local_models::recommended_runtime_context(candidate, &system))
+        .unwrap_or_else(|| clawdesk_local_models::fallback_runtime_context(&system));
+    let port = server
+        .start_model(&model_path, &request.model_name, context_length)
+        .await?;
 
     info!(
         model = request.model_name.as_str(),
         port,
+        context_length,
         "model started and available as local provider"
     );
 
@@ -260,9 +275,20 @@ pub async fn local_models_set_server_path(
     request: SetServerPathRequest,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    if request.path.trim().is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+
+    if request.path.to_ascii_lowercase().contains("llama-cli") {
+        return Err(
+            "This path points to llama-cli. Please select the llama-server binary instead."
+                .to_string(),
+        );
+    }
+
     let server = get_server(&state)?;
     server
-        .set_llama_server_path(std::path::PathBuf::from(request.path))
+        .set_llama_server_path(std::path::PathBuf::from(request.path.trim()))
         .await;
     Ok(())
 }

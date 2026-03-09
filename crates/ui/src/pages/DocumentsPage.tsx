@@ -1,6 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "../api";
 import type { RagDocument, RagSearchResult } from "../api";
+import { PageLayout } from "../components/PageLayout";
+import { Icon } from "../components/Icon";
 
 interface Props {
   pushToast: (text: string) => void;
@@ -17,6 +20,24 @@ export function DocumentsPage({ pushToast }: Props) {
   const [searching, setSearching] = useState(false);
   const [expandedDoc, setExpandedDoc] = useState<string | null>(null);
   const [chunks, setChunks] = useState<string[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+
+  const ingestPaths = useCallback(async (paths: string[]) => {
+    if (!paths.length) return;
+    setUploading(true);
+    let successCount = 0;
+    for (const path of paths) {
+      try {
+        const doc = await api.ragIngestDocument(path);
+        pushToast(`Ingested "${doc.filename}" (${doc.chunk_count} chunks)`);
+        successCount++;
+      } catch (e: any) {
+        pushToast(`Failed "${path.split(/[\\/]/).pop() ?? path}": ${e}`);
+      }
+    }
+    if (successCount > 0) refresh();
+    setUploading(false);
+  }, [pushToast, refresh]);
 
   const refresh = useCallback(async () => {
     try {
@@ -45,6 +66,38 @@ export function DocumentsPage({ pushToast }: Props) {
       setUploading(false);
     }
   };
+
+  const handleFileInput = async (files: FileList | null) => {
+    if (!files?.length) return;
+    const paths = Array.from(files)
+      .map((file) => (file as File & { path?: string }).path)
+      .filter((value): value is string => Boolean(value));
+    if (!paths.length) {
+      pushToast("Dropped files did not include filesystem paths. Use Choose Files for the native picker.");
+      return;
+    }
+    await ingestPaths(paths);
+  };
+
+  const openDocumentPicker = useCallback(async () => {
+    if (uploading) return;
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        filters: [
+          {
+            name: "Documents and code",
+            extensions: ["pdf", "txt", "md", "csv", "json", "html", "xml", "py", "js", "ts", "rs", "go", "java", "c", "cpp", "h", "rb", "sh"],
+          },
+        ],
+      });
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      await ingestPaths(paths);
+    } catch (e: any) {
+      pushToast(`Could not open file picker: ${e}`);
+    }
+  }, [ingestPaths, pushToast, uploading]);
 
   const handleDelete = async (docId: string, filename: string) => {
     if (!confirm(`Delete "${filename}"? This cannot be undone.`)) return;
@@ -94,61 +147,64 @@ export function DocumentsPage({ pushToast }: Props) {
   }
 
   return (
-    <div style={{ height: "100%", overflow: "auto", padding: "24px 32px" }}>
-      {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, color: "var(--text-primary)" }}>
-            Documents
-          </h1>
-          <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--text-secondary)" }}>
-            Upload documents for RAG — PDF, Text, Markdown, CSV
-          </p>
-        </div>
-        <button onClick={refresh} style={btnStyle("secondary")}>Refresh</button>
-      </div>
+    <PageLayout
+      title="Documents"
+      subtitle={`${documents.length} documents ingested for RAG context`}
+      onRefresh={refresh}
+      loading={loading}
+    >
+      <div className="documents-page-shell">
 
-      {/* Upload Bar */}
-      <div style={{ ...cardStyle, marginBottom: 20, display: "flex", gap: 8, alignItems: "center" }}>
-        <input
-          type="text"
-          value={filePath}
-          onChange={(e) => setFilePath(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleUpload()}
-          placeholder="/path/to/document.pdf"
-          style={{ ...inputStyle, flex: 1 }}
-        />
-        <button
-          onClick={handleUpload}
-          disabled={uploading || !filePath.trim()}
-          style={btnStyle(uploading || !filePath.trim() ? "disabled" : "primary")}
-        >
-          {uploading ? "Ingesting..." : "Upload"}
-        </button>
-        <span style={{ fontSize: 11, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>
-          Supported: PDF, TXT, MD, CSV
-        </span>
-      </div>
+      {/* Upload Area — drag+drop + file picker + manual path */}
+      <section
+        className={`documents-upload-zone ${dragOver ? "drag-over" : ""}`}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          handleFileInput(e.dataTransfer.files);
+        }}
+      >
+        <div className="documents-upload-content">
+          <div style={{ fontSize: 28, marginBottom: 8 }}>📄</div>
+          <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "var(--text)" }}>
+            {uploading ? "Ingesting…" : "Drop files here or click to browse"}
+          </h3>
+          <p style={{ margin: "4px 0 12px", fontSize: 12, color: "var(--text-muted)" }}>
+            PDF, TXT, Markdown, CSV, and source code files
+          </p>
+          <button className="btn primary" onClick={() => void openDocumentPicker()} disabled={uploading}>
+            <Icon name="upload" /> Choose Files
+          </button>
+        </div>
+        {/* Manual path fallback */}
+        <div className="documents-upload-manual">
+          <input
+            type="text"
+            value={filePath}
+            onChange={(e) => setFilePath(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleUpload()}
+            placeholder="Or paste a file path: /path/to/document.pdf"
+            className="extensions-input"
+            style={{ flex: 1 }}
+          />
+          <button className="btn subtle" onClick={handleUpload} disabled={uploading || !filePath.trim()}>
+            Ingest
+          </button>
+        </div>
+      </section>
 
       {/* Tabs */}
-      <div style={{ display: "flex", gap: 0, marginBottom: 16, borderBottom: "1px solid var(--border)" }}>
+      <div className="extensions-tabs" style={{ marginBottom: 16 }}>
         {([
           ["documents", `Documents (${documents.length})`],
-          ["search", "Search"],
+          ["search", "Semantic Search"],
         ] as [string, string][]).map(([key, label]) => (
           <button
             key={key}
             onClick={() => setActiveTab(key as any)}
-            style={{
-              padding: "8px 16px",
-              fontSize: 13,
-              fontWeight: 500,
-              border: "none",
-              background: "none",
-              cursor: "pointer",
-              color: activeTab === key ? "var(--accent)" : "var(--text-secondary)",
-              borderBottom: activeTab === key ? "2px solid var(--accent)" : "2px solid transparent",
-            }}
+            className={`extensions-tab${activeTab === key ? " active" : ""}`}
           >
             {label}
           </button>
@@ -157,74 +213,56 @@ export function DocumentsPage({ pushToast }: Props) {
 
       {/* Documents Tab */}
       {activeTab === "documents" && (
-        <div>
+        <div className="list-rows">
           {documents.length === 0 ? (
-            <div style={{ textAlign: "center", padding: 40, color: "var(--text-secondary)" }}>
-              No documents uploaded yet. Use the upload bar above to ingest a file.
+            <div className="empty-state" style={{ padding: 40 }}>
+              <p>No documents uploaded yet.</p>
+              <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                Drop files above or use the file picker to ingest documents for RAG.
+              </p>
             </div>
           ) : (
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--border)", textAlign: "left" }}>
-                  <th style={thStyle}>File</th>
-                  <th style={thStyle}>Type</th>
-                  <th style={thStyle}>Size</th>
-                  <th style={thStyle}>Words</th>
-                  <th style={thStyle}>Chunks</th>
-                  <th style={thStyle}>Date</th>
-                  <th style={{ ...thStyle, textAlign: "right" }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {documents.map((doc) => (
-                  <>
-                    <tr key={doc.id} style={{ borderBottom: "1px solid var(--border)" }}>
-                      <td style={tdStyle}>
-                        <span style={{ fontWeight: 500 }}>{doc.filename}</span>
-                        <div style={{ fontSize: 11, color: "var(--text-tertiary)", maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {doc.file_path}
-                        </div>
-                      </td>
-                      <td style={tdStyle}>
-                        <span style={{ ...typeBadge, background: TYPE_COLORS[doc.doc_type] + "20", color: TYPE_COLORS[doc.doc_type] }}>
-                          {doc.doc_type.toUpperCase()}
-                        </span>
-                      </td>
-                      <td style={tdStyle}>{fmtSize(doc.size_bytes)}</td>
-                      <td style={tdStyle}>{doc.word_count.toLocaleString()}</td>
-                      <td style={tdStyle}>{doc.chunk_count}</td>
-                      <td style={tdStyle}>{new Date(doc.created_at).toLocaleDateString()}</td>
-                      <td style={{ ...tdStyle, textAlign: "right" }}>
-                        <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                          <button onClick={() => handleViewChunks(doc.id)} style={btnStyle("secondary")}>
-                            {expandedDoc === doc.id ? "Hide" : "Chunks"}
-                          </button>
-                          <button onClick={() => handleDelete(doc.id, doc.filename)} style={btnStyle("danger")}>
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                    {expandedDoc === doc.id && (
-                      <tr key={doc.id + "-chunks"}>
-                        <td colSpan={7} style={{ padding: "8px 12px", background: "var(--surface-alt, #f9fafb)" }}>
-                          <div style={{ maxHeight: 300, overflow: "auto", fontSize: 12 }}>
-                            {chunks.map((c, i) => (
-                              <div key={i} style={{ padding: "6px 0", borderBottom: "1px solid var(--border)" }}>
-                                <span style={{ color: "var(--text-tertiary)", fontWeight: 600, marginRight: 8 }}>
-                                  #{i}
-                                </span>
-                                {c.slice(0, 200)}{c.length > 200 ? "..." : ""}
-                              </div>
-                            ))}
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </>
-                ))}
-              </tbody>
-            </table>
+            documents.map((doc) => (
+              <div key={doc.id} className="section-card" style={{ padding: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 16px" }}>
+                  <span style={{ fontSize: 24, flexShrink: 0 }}>
+                    {doc.doc_type === "pdf" ? "📕" : doc.doc_type === "markdown" ? "📘" : doc.doc_type === "csv" ? "📊" : "📄"}
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <strong style={{ fontSize: 14 }}>{doc.filename}</strong>
+                      <span className="chip chip-sm" style={{ background: TYPE_COLORS[doc.doc_type] + "20", color: TYPE_COLORS[doc.doc_type] }}>
+                        {doc.doc_type.toUpperCase()}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+                      {fmtSize(doc.size_bytes)} · {doc.word_count.toLocaleString()} words · {doc.chunk_count} chunks · {new Date(doc.created_at).toLocaleDateString()}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-soft)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {doc.file_path}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    <button className="btn subtle" onClick={() => handleViewChunks(doc.id)}>
+                      {expandedDoc === doc.id ? "Hide Chunks" : `View Chunks (${doc.chunk_count})`}
+                    </button>
+                    <button className="btn danger" onClick={() => handleDelete(doc.id, doc.filename)} style={{ fontSize: 12, padding: "4px 10px" }}>
+                      Delete
+                    </button>
+                  </div>
+                </div>
+                {expandedDoc === doc.id && chunks.length > 0 && (
+                  <div style={{ borderTop: "1px solid var(--line)", padding: "12px 16px", maxHeight: 300, overflow: "auto", background: "var(--panel)" }}>
+                    {chunks.map((c, i) => (
+                      <div key={i} style={{ padding: "8px 0", borderBottom: i < chunks.length - 1 ? "1px solid var(--line)" : "none", fontSize: 12, lineHeight: 1.5, color: "var(--text-soft)" }}>
+                        <span style={{ fontWeight: 600, color: "var(--text)", marginRight: 8 }}>#{i}</span>
+                        {c.slice(0, 300)}{c.length > 300 ? "…" : ""}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))
           )}
         </div>
       )}
@@ -238,33 +276,34 @@ export function DocumentsPage({ pushToast }: Props) {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-              placeholder="Search your documents..."
-              style={{ ...inputStyle, flex: 1 }}
+              placeholder="Search your documents…"
+              className="extensions-input"
+              style={{ flex: 1 }}
             />
             <button
               onClick={handleSearch}
               disabled={searching || !searchQuery.trim()}
-              style={btnStyle(searching || !searchQuery.trim() ? "disabled" : "primary")}
+              className="btn primary"
             >
-              {searching ? "Searching..." : "Search"}
+              {searching ? "Searching…" : "Search"}
             </button>
           </div>
 
           {searchResults.length > 0 && (
-            <div>
-              <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }}>
+            <div className="list-rows">
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
                 {searchResults.length} results found
               </div>
               {searchResults.map((r, i) => (
-                <div key={i} style={{ ...cardStyle, marginBottom: 8 }}>
+                <div key={i} className="section-card" style={{ padding: 14 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                    <span style={{ fontWeight: 500, fontSize: 13 }}>{r.filename}</span>
-                    <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
-                      chunk #{r.chunk_index} • {(r.similarity * 100).toFixed(0)}% match
+                    <span style={{ fontWeight: 600, fontSize: 13, color: "var(--text)" }}>{r.filename}</span>
+                    <span className="chip chip-sm">
+                      chunk #{r.chunk_index} · {(r.similarity * 100).toFixed(0)}% match
                     </span>
                   </div>
-                  <div style={{ fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
-                    {r.chunk_text.slice(0, 300)}{r.chunk_text.length > 300 ? "..." : ""}
+                  <div style={{ fontSize: 12, color: "var(--text-soft)", lineHeight: 1.5 }}>
+                    {r.chunk_text.slice(0, 400)}{r.chunk_text.length > 400 ? "…" : ""}
                   </div>
                 </div>
               ))}
@@ -272,17 +311,19 @@ export function DocumentsPage({ pushToast }: Props) {
           )}
 
           {searchResults.length === 0 && searchQuery && !searching && (
-            <div style={{ textAlign: "center", padding: 40, color: "var(--text-secondary)" }}>
-              No results. Try different search terms.
+            <div className="empty-state" style={{ padding: 40 }}>
+              <p>No results. Try different search terms.</p>
             </div>
           )}
         </div>
       )}
-    </div>
+
+      </div>
+    </PageLayout>
   );
 }
 
-/* ── helpers & styles ─────────────────────────────────────────── */
+/* ── helpers ─────────────────────────────────────────── */
 
 const TYPE_COLORS: Record<string, string> = {
   pdf: "#ef4444",
@@ -295,63 +336,4 @@ function fmtSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-const cardStyle: React.CSSProperties = {
-  background: "var(--surface)",
-  border: "1px solid var(--border)",
-  borderRadius: 8,
-  padding: 16,
-};
-
-const thStyle: React.CSSProperties = {
-  padding: "10px 12px",
-  fontSize: 12,
-  fontWeight: 600,
-  color: "var(--text-secondary)",
-  textTransform: "uppercase",
-  letterSpacing: 0.5,
-};
-
-const tdStyle: React.CSSProperties = {
-  padding: "10px 12px",
-};
-
-const inputStyle: React.CSSProperties = {
-  padding: "8px 12px",
-  fontSize: 13,
-  border: "1px solid var(--border)",
-  borderRadius: 6,
-  background: "var(--surface)",
-  color: "var(--text-primary)",
-  outline: "none",
-};
-
-const typeBadge: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  padding: "2px 6px",
-  borderRadius: 4,
-};
-
-function btnStyle(variant: "primary" | "secondary" | "danger" | "disabled"): React.CSSProperties {
-  const base: React.CSSProperties = {
-    padding: "6px 14px",
-    fontSize: 12,
-    fontWeight: 500,
-    border: "none",
-    borderRadius: 6,
-    cursor: variant === "disabled" ? "not-allowed" : "pointer",
-    transition: "opacity 0.15s",
-  };
-  switch (variant) {
-    case "primary":
-      return { ...base, background: "var(--accent)", color: "#fff" };
-    case "secondary":
-      return { ...base, background: "transparent", border: "1px solid var(--border)", color: "var(--text-secondary)" };
-    case "danger":
-      return { ...base, background: "#ef444420", color: "#ef4444" };
-    case "disabled":
-      return { ...base, background: "var(--border)", color: "var(--text-tertiary)", opacity: 0.6 };
-  }
 }

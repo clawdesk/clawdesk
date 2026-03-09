@@ -8,7 +8,7 @@
 //! - OAuth 2.0 PKCE flows for browser-based auth
 
 use crate::state::AppState;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::State;
 use std::collections::HashMap;
 
@@ -420,6 +420,7 @@ pub async fn check_extension_credentials(
     let integration = registry
         .get(&name)
         .ok_or_else(|| format!("Integration '{}' not found", name))?;
+    let user_config = registry.get_config(&name).unwrap_or_default();
 
     let mut result = HashMap::new();
     let vault = state.credential_vault.read().await;
@@ -427,10 +428,28 @@ pub async fn check_extension_credentials(
 
     for cred in &integration.credentials {
         let mut found = false;
-        // Check env var first
         if let Some(ref env_var) = cred.env_var {
+            if user_config
+                .get(env_var)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
+                found = true;
+            }
+        }
+        if !found && user_config
+            .get(&cred.name)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            found = true;
+        }
+        // Check env var first
+        if !found {
+            if let Some(ref env_var) = cred.env_var {
             if std::env::var(env_var).is_ok() {
                 found = true;
+            }
             }
         }
         // Check vault

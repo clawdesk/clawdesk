@@ -823,6 +823,292 @@ impl Tool for FileListTool {
 
 // ─── Web Search Tool (via DuckDuckGo HTML) ──────────────────────────────────
 
+// ─── File Edit Tool (search/replace) ────────────────────────────────────────
+
+/// Precise search/replace editing tool, inspired by pi-mono's edit protocol.
+/// Finds exact text in a file and replaces it. Much safer than full file_write
+/// for modifying existing files — prevents accidental overwrites and makes
+/// changes reviewable.
+pub struct FileEditTool {
+    workspace: Option<PathBuf>,
+}
+
+impl FileEditTool {
+    pub fn new(workspace: Option<PathBuf>) -> Self {
+        Self { workspace }
+    }
+
+    fn resolve_path(&self, path: &str) -> PathBuf {
+        if let Some(ref ws) = self.workspace {
+            let target = Path::new(path);
+            if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                ws.join(target)
+            }
+        } else {
+            PathBuf::from(path)
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for FileEditTool {
+    fn name(&self) -> &str {
+        "file_edit"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "file_edit".into(),
+            description: "Edit a file by replacing exact text. Use this instead of file_write when modifying existing files — it's safer and more precise. The old_text must match exactly (including whitespace and indentation). For creating new files, use file_write instead.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to edit (relative to workspace)"
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text to find and replace. Must match the file content precisely, including whitespace and indentation. Include 2-3 lines of context before and after the target to ensure unique matching."
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Text to replace old_text with. Can be empty to delete the matched text."
+                    }
+                },
+                "required": ["path", "old_text", "new_text"]
+            }),
+        }
+    }
+
+    fn is_blocking(&self) -> bool {
+        true
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::FileSystem]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let path_str = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'path' argument")?;
+        let old_text = args
+            .get("old_text")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'old_text' argument")?;
+        let new_text = args
+            .get("new_text")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'new_text' argument")?;
+
+        let resolved = self.resolve_path(path_str);
+
+        // Read the file
+        let content = tokio::fs::read_to_string(&resolved)
+            .await
+            .map_err(|e| format!("failed to read file '{}': {}", path_str, e))?;
+
+        // Normalize line endings for matching
+        let normalized = content.replace("\r\n", "\n");
+        let old_normalized = old_text.replace("\r\n", "\n");
+
+        // Count matches
+        let match_count = normalized.matches(&old_normalized).count();
+
+        if match_count == 0 {
+            // Try a more flexible match — strip leading/trailing whitespace on each line
+            let old_lines: Vec<&str> = old_normalized.lines().map(|l| l.trim()).collect();
+            let content_lines: Vec<&str> = normalized.lines().collect();
+
+            // Try to find a fuzzy match position
+            let mut found = false;
+            for window_start in 0..content_lines.len().saturating_sub(old_lines.len().saturating_sub(1)) {
+                let window = &content_lines[window_start..std::cmp::min(window_start + old_lines.len(), content_lines.len())];
+                let trimmed_window: Vec<&str> = window.iter().map(|l| l.trim()).collect();
+                if trimmed_window == old_lines {
+                    found = true;
+                    break;
+                }
+            }
+
+            if found {
+                return Err(format!(
+                    "old_text not found as exact match in '{}'. A similar block exists but whitespace/indentation differs. \
+                    Make sure old_text matches the file content exactly, including leading spaces and tabs.",
+                    path_str
+                ));
+            }
+
+            return Err(format!(
+                "old_text not found in '{}'. The text you're trying to replace does not exist in the file. \
+                Use file_read to check the current file content first.",
+                path_str
+            ));
+        }
+
+        if match_count > 1 {
+            return Err(format!(
+                "old_text matches {} locations in '{}'. Include more surrounding context \
+                (2-3 lines before and after) to make the match unique.",
+                match_count, path_str
+            ));
+        }
+
+        // Perform the replacement
+        let new_content = normalized.replacen(&old_normalized, &new_text.replace("\r\n", "\n"), 1);
+
+        tokio::fs::write(&resolved, new_content.as_bytes())
+            .await
+            .map_err(|e| format!("failed to write file: {e}"))?;
+
+        // Report what changed
+        let old_lines = old_normalized.lines().count();
+        let new_lines = new_text.lines().count();
+        let diff_info = if new_text.is_empty() {
+            format!("Deleted {} lines", old_lines)
+        } else if old_text.is_empty() {
+            format!("Inserted {} lines", new_lines)
+        } else {
+            format!("Replaced {} lines with {} lines", old_lines, new_lines)
+        };
+
+        Ok(format!(
+            "Successfully edited '{}': {}",
+            path_str, diff_info
+        ))
+    }
+}
+
+// ─── Grep Search Tool ───────────────────────────────────────────────────────
+
+/// Search for text patterns in files. Essential for understanding codebases
+/// and finding relevant code before editing.
+pub struct GrepTool {
+    workspace: Option<PathBuf>,
+}
+
+impl GrepTool {
+    pub fn new(workspace: Option<PathBuf>) -> Self {
+        Self { workspace }
+    }
+}
+
+#[async_trait]
+impl Tool for GrepTool {
+    fn name(&self) -> &str {
+        "grep"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "grep".into(),
+            description: "Search for a text pattern in files. Returns matching lines with file paths and line numbers. Use this to find code, understand codebase structure, and locate things to edit.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Text or regex pattern to search for"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory or file to search in (relative to workspace, default: workspace root)"
+                    },
+                    "include": {
+                        "type": "string",
+                        "description": "File extension filter, e.g. '*.rs' or '*.ts'"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        }
+    }
+
+    fn is_blocking(&self) -> bool {
+        true
+    }
+
+    fn required_capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::FileSystem]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, String> {
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'pattern' argument")?;
+
+        let path_str = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+
+        let include_filter = args
+            .get("include")
+            .and_then(|v| v.as_str());
+
+        let target = if let Some(ref ws) = self.workspace {
+            ws.join(path_str)
+        } else {
+            PathBuf::from(path_str)
+        };
+
+        // Build grep command
+        let mut cmd = tokio::process::Command::new("grep");
+        cmd.arg("-rn")         // recursive + line numbers
+           .arg("--color=never")
+           .arg("-I");          // skip binary files
+
+        if let Some(inc) = include_filter {
+            cmd.arg("--include").arg(inc);
+        }
+
+        // Limit output to prevent context overflow
+        cmd.arg("-m").arg("50"); // max 50 matches per file
+
+        cmd.arg("--").arg(pattern).arg(&target);
+
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| format!("grep failed: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if stdout.is_empty() {
+            if !stderr.is_empty() {
+                return Err(format!("grep error: {}", stderr.trim()));
+            }
+            return Ok(format!("No matches found for '{}' in {}", pattern, path_str));
+        }
+
+        // Strip workspace prefix from paths for readability
+        let result = if let Some(ref ws) = self.workspace {
+            let prefix = format!("{}/", ws.display());
+            stdout
+                .lines()
+                .map(|line| line.strip_prefix(&prefix).unwrap_or(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            stdout.to_string()
+        };
+
+        // Truncate if very long
+        if result.len() > 8000 {
+            let truncated: String = result.chars().take(8000).collect();
+            Ok(format!("{}\n\n... (output truncated, {} total chars)", truncated, result.len()))
+        } else {
+            Ok(result)
+        }
+    }
+}
+
 /// Simple web search using DuckDuckGo HTML API.
 pub struct WebSearchTool {
     client: reqwest::Client,
@@ -1910,12 +2196,17 @@ pub fn register_builtin_tools(
     registry.register(Arc::new(HttpTool::new()));
     registry.register(Arc::new(FileReadTool::new(workspace.clone())));
     registry.register(Arc::new(FileWriteTool::new(workspace.clone())));
-    registry.register(Arc::new(FileListTool::new(workspace)));
+    registry.register(Arc::new(FileEditTool::new(workspace.clone())));
+    registry.register(Arc::new(FileListTool::new(workspace.clone())));
+    registry.register(Arc::new(GrepTool::new(workspace.clone())));
     registry.register(Arc::new(WebSearchTool::new()));
 
     // Register persistent process manager tools
+    // ProcessStartTool gets workspace so servers default to serving workspace files
     let process_mgr = Arc::new(crate::process_manager::ProcessManager::default());
-    registry.register(Arc::new(ProcessStartTool::new(Arc::clone(&process_mgr))));
+    registry.register(Arc::new(
+        ProcessStartTool::new(Arc::clone(&process_mgr)).with_workspace(workspace)
+    ));
     registry.register(Arc::new(ProcessPollTool::new(Arc::clone(&process_mgr))));
     registry.register(Arc::new(ProcessWriteTool::new(Arc::clone(&process_mgr))));
     registry.register(Arc::new(ProcessKillTool::new(Arc::clone(&process_mgr))));
@@ -3579,11 +3870,17 @@ pub fn register_cron_tools(
 /// Start a persistent background process that can be polled and interacted with.
 pub struct ProcessStartTool {
     manager: Arc<crate::process_manager::ProcessManager>,
+    workspace: Option<PathBuf>,
 }
 
 impl ProcessStartTool {
     pub fn new(manager: Arc<crate::process_manager::ProcessManager>) -> Self {
-        Self { manager }
+        Self { manager, workspace: None }
+    }
+
+    pub fn with_workspace(mut self, workspace: Option<PathBuf>) -> Self {
+        self.workspace = workspace;
+        self
     }
 }
 
@@ -3630,7 +3927,18 @@ impl crate::tools::Tool for ProcessStartTool {
             .ok_or("Missing required parameter: process_id")?.to_string();
         let command = args.get("command").and_then(|v| v.as_str())
             .ok_or("Missing required parameter: command")?;
-        let working_dir = args.get("working_dir").and_then(|v| v.as_str());
+        // Resolve working_dir: use provided value relative to workspace,
+        // or default to workspace root so servers serve the right files.
+        let working_dir_resolved = args.get("working_dir")
+            .and_then(|v| v.as_str())
+            .map(|d| {
+                if let Some(ref ws) = self.workspace {
+                    ws.join(d).to_string_lossy().to_string()
+                } else {
+                    d.to_string()
+                }
+            })
+            .or_else(|| self.workspace.as_ref().map(|ws| ws.to_string_lossy().to_string()));
 
         // Exec policy check on the command
         {
@@ -3642,7 +3950,7 @@ impl crate::tools::Tool for ProcessStartTool {
         }
 
         self.manager
-            .start(process_id.clone(), command, working_dir, None)
+            .start(process_id.clone(), command, working_dir_resolved.as_deref(), None)
             .await?;
 
         Ok(format!("Process '{}' started. Use process_poll to read output, process_write to send input.", process_id))

@@ -870,12 +870,12 @@ export interface AgentTemplate {
 }
 
 export const AGENT_TEMPLATES: AgentTemplate[] = [
+  // ── General ──
   {
     name: "Research Assistant",
-    icon: "�",
+    icon: "🔍",
     color: "#6366f1",
-    persona:
-      "You are a thorough research assistant. Search the web, read papers, extract key findings, and cite your sources. Always provide structured summaries.",
+    persona: "You are a thorough research assistant. Search the web, read papers, extract key findings, and cite your sources. Always provide structured summaries.",
     skills: ["web-search", "citations", "markdown"],
     model: "default",
     description: "Find information and summarize it clearly",
@@ -884,8 +884,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     name: "Writing Helper",
     icon: "✍️",
     color: "#10b981",
-    persona:
-      "You are a professional writer. Create engaging content — articles, reports, emails, documentation. Maintain consistent tone and structure.",
+    persona: "You are a professional writer. Create engaging content — articles, reports, emails, documentation. Maintain consistent tone and structure.",
     skills: ["web-search", "markdown", "files"],
     model: "default",
     description: "Draft emails, documents, and creative content",
@@ -894,8 +893,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     name: "Daily Planner",
     icon: "📅",
     color: "#f59e0b",
-    persona:
-      "You help plan and organize daily tasks. Summarize what's important, set priorities, suggest time blocks, and keep track of to-dos. Be concise and actionable.",
+    persona: "You help plan and organize daily tasks. Summarize what's important, set priorities, suggest time blocks, and keep track of to-dos.",
     skills: ["email", "calendar", "cron", "alerts"],
     model: "default",
     description: "Organize your day, tasks, and priorities",
@@ -904,11 +902,288 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     name: "Problem Solver",
     icon: "💡",
     color: "#ec4899",
-    persona:
-      "You help think through problems step by step. Break down complex questions, brainstorm options, weigh pros and cons, and suggest solutions. Be clear and practical.",
+    persona: "You help think through problems step by step. Break down complex questions, brainstorm options, weigh pros and cons, and suggest solutions.",
     skills: ["web-search", "markdown"],
     model: "default",
     description: "Think through decisions and brainstorm ideas",
+  },
+  // ── Engineering ──
+  {
+    name: "Senior Developer",
+    icon: "👨‍💻",
+    color: "#10b981",
+    persona: "You are a premium implementation specialist mastering multiple frameworks, advanced CSS, and modern web technologies. Write production-quality code with clean architecture.",
+    skills: ["code-exec", "files", "web-search"],
+    model: "default",
+    description: "Full-stack code implementation and architecture",
+  },
+  {
+    name: "Frontend Developer",
+    icon: "🖥️",
+    color: "#06b6d4",
+    persona: "You are an expert frontend developer specializing in modern web technologies, React/Vue/Angular frameworks, UI implementation, and performance optimization.",
+    skills: ["code-exec", "files", "web-search"],
+    model: "default",
+    description: "Modern web UI development and frameworks",
+  },
+  {
+    name: "Backend Architect",
+    icon: "🏗️",
+    color: "#3b82f6",
+    persona: "You are a senior backend architect specializing in scalable system design, database architecture, API development, and distributed systems.",
+    skills: ["code-exec", "files", "web-search"],
+    model: "default",
+    description: "Scalable backend systems and API design",
+  },
+  {
+    name: "AI Engineer",
+    icon: "🤖",
+    color: "#3b82f6",
+    persona: "You are an expert AI/ML engineer specializing in machine learning model development, deployment, and integration into production systems.",
+    skills: ["code-exec", "files", "web-search"],
+    model: "default",
+    description: "ML models, data pipelines, and AI integration",
+  },
+  {
+    name: "DevOps Automator",
+    icon: "⚙️",
+    color: "#f97316",
+    persona: "You are an expert DevOps engineer specializing in infrastructure automation, CI/CD pipeline development, and cloud platform management.",
+    skills: ["code-exec", "files", "web-search"],
+    model: "default",
+    description: "CI/CD, infrastructure, and cloud automation",
+  },
+  {
+    name: "Security Engineer",
+    icon: "🔒",
+    color: "#ef4444",
+    persona: "You are an expert application security engineer specializing in threat modeling, vulnerability assessment, and secure code review.",
+    skills: ["code-exec", "files", "web-search"],
+    model: "default",
+    description: "Security audits, threat modeling, and hardening",
+  },
+  {
+    name: "Mobile App Builder",
+    icon: "📱",
+    color: "#8b5cf6",
+    persona: "You are a specialized mobile application developer with expertise in native iOS/Android development and cross-platform frameworks.",
+    skills: ["code-exec", "files", "web-search"],
+    model: "default",
+    description: "iOS, Android, and cross-platform mobile apps",
+  },
+  {
+    name: "Rapid Prototyper",
+    icon: "🚀",
+    color: "#10b981",
+    persona: "You are specialized in ultra-fast proof-of-concept development and MVP creation using efficient tools and frameworks.",
+    skills: ["code-exec", "files", "web-search"],
+    model: "default",
+    description: "Fast prototyping and MVP development",
+  },
+  // ── Design ──
+  {
+    name: "UX Architect",
+    icon: "📐",
+    color: "#8b5cf6",
+    persona: "You are a technical architecture and UX specialist who creates solid foundations for developers. You bridge the gap between project specifications and implementation.",
+    skills: ["web-search", "markdown", "files"],
+    model: "default",
+    description: "CSS systems, layout frameworks, and UX structure",
+  },
+  {
+    name: "UI Designer",
+    icon: "🎨",
+    color: "#8b5cf6",
+    persona: "You are an expert UI designer specializing in visual design systems, component libraries, and pixel-perfect interfaces.",
+    skills: ["web-search", "markdown", "files"],
+    model: "default",
+    description: "Visual design systems and component libraries",
+  },
+  {
+    name: "UX Researcher",
+    icon: "🔬",
+    color: "#10b981",
+    persona: "You are an expert user experience researcher specializing in user behavior analysis, usability testing, and data-driven design decisions.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "User research, usability testing, and insights",
+  },
+  {
+    name: "Brand Guardian",
+    icon: "🛡️",
+    color: "#3b82f6",
+    persona: "You are an expert brand strategist and guardian specializing in brand identity development and consistency maintenance.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Brand identity, consistency, and guidelines",
+  },
+  {
+    name: "Visual Storyteller",
+    icon: "🎬",
+    color: "#8b5cf6",
+    persona: "You are an expert visual communication specialist focused on creating compelling visual narratives and multimedia content.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Visual narratives and multimedia content",
+  },
+  // ── Marketing ──
+  {
+    name: "Content Creator",
+    icon: "📝",
+    color: "#14b8a6",
+    persona: "You are an expert content strategist and creator for multi-platform campaigns. Develop editorial calendars, create compelling copy, and optimize content for engagement.",
+    skills: ["web-search", "markdown", "files"],
+    model: "default",
+    description: "Multi-platform content strategy and creation",
+  },
+  {
+    name: "Growth Hacker",
+    icon: "📈",
+    color: "#10b981",
+    persona: "You are an expert growth strategist specializing in rapid user acquisition through data-driven experimentation.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Data-driven growth and user acquisition",
+  },
+  {
+    name: "Social Media Strategist",
+    icon: "📣",
+    color: "#3b82f6",
+    persona: "You are an expert social media strategist for LinkedIn, Twitter, and professional platforms. Create cross-platform content strategies.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Cross-platform social media strategy",
+  },
+  // ── Product ──
+  {
+    name: "Feedback Synthesizer",
+    icon: "📊",
+    color: "#3b82f6",
+    persona: "You are an expert in collecting, analyzing, and synthesizing user feedback from multiple channels to extract actionable insights.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "User feedback analysis and actionable insights",
+  },
+  {
+    name: "Sprint Prioritizer",
+    icon: "🎯",
+    color: "#10b981",
+    persona: "You are an expert product manager specializing in agile sprint planning, feature prioritization, and resource allocation.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Sprint planning and feature prioritization",
+  },
+  {
+    name: "Trend Researcher",
+    icon: "🔮",
+    color: "#8b5cf6",
+    persona: "You are an expert market intelligence analyst specializing in identifying emerging trends and competitive analysis.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Market trends and competitive intelligence",
+  },
+  // ── Project Management ──
+  {
+    name: "Senior Project Manager",
+    icon: "📋",
+    color: "#3b82f6",
+    persona: "You convert specs to tasks and remember previous projects. Focused on realistic scope and actionable project plans.",
+    skills: ["web-search", "markdown", "cron"],
+    model: "default",
+    description: "Task planning, timelines, and project tracking",
+  },
+  {
+    name: "Studio Producer",
+    icon: "🎬",
+    color: "#eab308",
+    persona: "You are a senior strategic leader specializing in high-level creative and technical project orchestration and resource management.",
+    skills: ["web-search", "markdown", "cron"],
+    model: "default",
+    description: "Creative project orchestration and leadership",
+  },
+  // ── Testing & QA ──
+  {
+    name: "API Tester",
+    icon: "🧪",
+    color: "#8b5cf6",
+    persona: "You are an expert API testing specialist focused on comprehensive API validation, performance testing, and quality assurance.",
+    skills: ["code-exec", "web-search", "markdown"],
+    model: "default",
+    description: "API validation, performance, and quality",
+  },
+  {
+    name: "Accessibility Auditor",
+    icon: "♿",
+    color: "#0077B6",
+    persona: "You are an expert accessibility specialist who audits interfaces against WCAG standards and tests with assistive technologies.",
+    skills: ["web-search", "markdown", "code-exec"],
+    model: "default",
+    description: "WCAG compliance and accessibility testing",
+  },
+  {
+    name: "Performance Benchmarker",
+    icon: "⚡",
+    color: "#f97316",
+    persona: "You are an expert performance testing and optimization specialist focused on measuring, analyzing, and improving system performance.",
+    skills: ["code-exec", "web-search", "markdown"],
+    model: "default",
+    description: "Performance testing and optimization",
+  },
+  // ── Support ──
+  {
+    name: "Support Responder",
+    icon: "💬",
+    color: "#3b82f6",
+    persona: "You are an expert customer support specialist delivering exceptional customer service, issue resolution, and user guidance.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Customer support and issue resolution",
+  },
+  {
+    name: "Legal Compliance Checker",
+    icon: "⚖️",
+    color: "#ef4444",
+    persona: "You are an expert legal and compliance specialist ensuring business operations, data handling, and content creation meet regulatory requirements.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Legal compliance and regulatory checks",
+  },
+  {
+    name: "Finance Tracker",
+    icon: "💰",
+    color: "#10b981",
+    persona: "You are an expert financial analyst and controller specializing in financial planning, budget management, and business analytics.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Financial planning and budget analysis",
+  },
+  // ── Specialized ──
+  {
+    name: "Agents Orchestrator",
+    icon: "🎭",
+    color: "#06b6d4",
+    persona: "You are an autonomous pipeline manager that orchestrates the entire development workflow. You are the leader of this process.",
+    skills: ["web-search", "code-exec", "files", "markdown"],
+    model: "default",
+    description: "Orchestrate multi-agent development workflows",
+  },
+  {
+    name: "Data Analytics Reporter",
+    icon: "📉",
+    color: "#6366f1",
+    persona: "You are an expert data analyst transforming raw data into actionable business insights. Create dashboards and performance reports.",
+    skills: ["code-exec", "web-search", "markdown"],
+    model: "default",
+    description: "Data analysis, dashboards, and reporting",
+  },
+  {
+    name: "Executive Summary Generator",
+    icon: "📄",
+    color: "#8b5cf6",
+    persona: "You are a consultant-grade AI specialist trained to think and communicate like a senior strategy consultant. Produce clear, actionable executive briefings.",
+    skills: ["web-search", "markdown"],
+    model: "default",
+    description: "Strategy consulting and executive briefings",
   },
 ];
 
@@ -1307,4 +1582,117 @@ export interface ValidateSourceResult {
   source: string;
   found_items: string[];
   error?: string;
+}
+
+// ══════════════════════════════════════════════════════════════
+// Agent Coordination / Orchestration
+// ══════════════════════════════════════════════════════════════
+
+/** Adapter types for agent coordination. */
+export type AgentAdapterType =
+  | "claude_local"
+  | "codex_local"
+  | "cursor"
+  | "opencode_local"
+  | "process"
+  | "http"
+  | "a2a_gateway";
+
+/** An agent flow defines how a coordinated agent runs. */
+export interface AgentFlowConfig {
+  id: string;
+  name: string;
+  adapter_type: AgentAdapterType;
+  description: string;
+  /** Provider + model used (e.g. "anthropic:claude-sonnet-4") */
+  model: string;
+  /** Role in the team ("router", "researcher", "developer", "reviewer") */
+  role: string;
+  /** Adapter-specific configuration */
+  adapter_config: Record<string, string>;
+  /** Heartbeat interval in seconds (0 = manual only) */
+  heartbeat_interval_sec: number;
+  /** Maximum concurrent runs for this agent */
+  max_concurrent_runs: number;
+  /** Working directory for process-based adapters */
+  cwd?: string;
+  /** Icon identifier */
+  icon: string;
+  /** Color hex */
+  color: string;
+  /** Whether this flow is currently active */
+  active: boolean;
+}
+
+/** Orchestration task to be dispatched to an agent flow. */
+export interface OrchestrationTask {
+  id: string;
+  title: string;
+  description: string;
+  /** Agent flow ID this task is assigned to */
+  assigned_flow_id: string | null;
+  /** Parent task ID for delegation hierarchy */
+  parent_task_id: string | null;
+  status: "todo" | "in_progress" | "blocked" | "done" | "failed";
+  priority: "low" | "medium" | "high" | "urgent";
+  created_at: string;
+  updated_at: string;
+  output?: string;
+}
+
+/** Event emitted during orchestration execution. */
+export interface OrchestrationEvent {
+  type:
+    | "dag_created"
+    | "task_started"
+    | "task_completed"
+    | "task_failed"
+    | "agent_spawned"
+    | "agent_heartbeat"
+    | "delegation"
+    | "escalated"
+    | "finished";
+  task_id?: string;
+  flow_id?: string;
+  detail: string;
+  timestamp: string;
+}
+
+/** Result of running an orchestration. */
+export interface OrchestrationResultFrontend {
+  status: string;
+  outputs: Record<string, unknown>;
+  duration_ms: number;
+  rewrite_count: number;
+  total_nodes: number;
+  completed_nodes: number;
+  failed_nodes: number;
+}
+
+/** Capability info from the backend. */
+export interface CapabilityInfo {
+  action: string;
+  skill_count: number;
+  skills: string[];
+}
+
+/** Input to start an orchestration run. */
+export interface OrchestrationRunRequest {
+  /** Natural language goal or structured task plan */
+  goal: string;
+  /** Specific flow IDs to use (empty = auto-select) */
+  flow_ids: string[];
+  /** Strategy: "single" sends to one agent, "fan_out" parallelizes, "pipeline" chains */
+  strategy: "single" | "fan_out" | "pipeline" | "auto";
+}
+
+/** Predefined flow templates for quick setup. */
+export interface FlowTemplate {
+  id: string;
+  name: string;
+  description: string;
+  adapter_type: AgentAdapterType;
+  icon: string;
+  color: string;
+  default_config: Record<string, string>;
 }

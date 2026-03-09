@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "pnpm --dir /Users/sushanth/llamabot/clawdesk/crates/ui dev",
-    "beforeBuildCommand": "pnpm --dir /Users/sushanth/llamabot/clawdesk/crates/ui build"
+    "beforeDevCommand": "bash -lc 'ROOT=\"$(git rev-parse --show-toplevel)\" && bash \"$ROOT/scripts/download-llama-server.sh\" && pnpm --dir \"$ROOT/crates/ui\" dev'",
+    "beforeBuildCommand": "bash -lc 'ROOT=\"$(git rev-parse --show-toplevel)\" && bash \"$ROOT/scripts/download-llama-server.sh\" && pnpm --dir \"$ROOT/crates/ui\" build'"
   },
   "app": {
     "withGlobalTauri": true,

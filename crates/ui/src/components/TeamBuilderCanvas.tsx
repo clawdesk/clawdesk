@@ -285,6 +285,12 @@ export function TeamBuilderCanvas({
   const [teamName, setTeamName] = useState("My Team");
   const [isDeploying, setIsDeploying] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const dragStateRef = useRef<{
+    memberId: string;
+    offsetX: number;
+    offsetY: number;
+    pointerId: number;
+  } | null>(null);
 
   // Dynamic model list
   const [providerCaps, setProviderCaps] = useState<ProviderCapabilityInfo[]>([]);
@@ -294,11 +300,25 @@ export function TeamBuilderCanvas({
   const modelGroups = useMemo(() => buildModelGroups(providerCaps), [providerCaps]);
 
   const CANVAS_W = 700;
+  const CANVAS_H = 520;
 
   const selected = useMemo(
     () => members.find((m) => m.id === selectedId) ?? null,
     [members, selectedId],
   );
+
+  const canvasExtent = useMemo(() => {
+    const padding = 120;
+    const width = Math.max(
+      CANVAS_W,
+      ...members.map((member) => member.x + 220 + padding),
+    );
+    const height = Math.max(
+      CANVAS_H,
+      ...members.map((member) => member.y + 100 + padding),
+    );
+    return { width, height };
+  }, [members]);
 
   // ── Template selection ──────────────────────────────────
 
@@ -397,6 +417,43 @@ export function TeamBuilderCanvas({
     };
     setMembers((prev) => autoLayout([...prev, newMember], CANVAS_W));
   }, [CANVAS_W]);
+
+  const updateMemberPosition = useCallback((memberId: string, x: number, y: number) => {
+    setMembers((prev) => prev.map((member) => (
+      member.id === memberId
+        ? { ...member, x: Math.max(20, Math.round(x)), y: Math.max(20, Math.round(y)) }
+        : member
+    )));
+  }, []);
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const dragState = dragStateRef.current;
+      const canvas = canvasRef.current;
+      if (!dragState || !canvas || event.pointerId !== dragState.pointerId) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const nextX = event.clientX - rect.left + canvas.scrollLeft - dragState.offsetX;
+      const nextY = event.clientY - rect.top + canvas.scrollTop - dragState.offsetY;
+      updateMemberPosition(dragState.memberId, nextX, nextY);
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      if (dragStateRef.current?.pointerId === event.pointerId) {
+        dragStateRef.current = null;
+      }
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    };
+  }, [updateMemberPosition]);
 
   // ── Deploy all agents ───────────────────────────────────
 
@@ -561,8 +618,17 @@ export function TeamBuilderCanvas({
 
         <div className="tb-split">
           {/* ── Canvas ────────────────────────────────── */}
-          <div className="tb-canvas-area" ref={canvasRef}>
-            <svg className="tb-svg-layer" width="100%" height="100%">
+          <div
+            className="tb-canvas-area"
+            ref={canvasRef}
+            data-no-drag
+            onPointerDown={(event) => {
+              if (event.target === event.currentTarget) {
+                setSelectedId(null);
+              }
+            }}
+          >
+            <svg className="tb-svg-layer" width={canvasExtent.width} height={canvasExtent.height}>
               <defs>
                 <marker
                   id="tb-arrow"
@@ -598,7 +664,10 @@ export function TeamBuilderCanvas({
             </svg>
 
             {/* HTML nodes overlay */}
-            <div className="tb-nodes-layer">
+            <div
+              className="tb-nodes-layer"
+              style={{ width: canvasExtent.width, height: canvasExtent.height }}
+            >
               {members.map((m) => {
                 const isRoot = !m.parentId;
                 const isSelected = m.id === selectedId;
@@ -613,7 +682,18 @@ export function TeamBuilderCanvas({
                       borderColor: isSelected ? m.color : undefined,
                       "--node-color": m.color,
                     } as React.CSSProperties}
-                    onClick={() => setSelectedId(m.id === selectedId ? null : m.id)}
+                    data-no-drag
+                    onPointerDown={(event) => {
+                      if ((event.target as HTMLElement | null)?.closest("button")) return;
+                      event.stopPropagation();
+                      setSelectedId(m.id);
+                      dragStateRef.current = {
+                        memberId: m.id,
+                        offsetX: event.clientX - event.currentTarget.getBoundingClientRect().left,
+                        offsetY: event.clientY - event.currentTarget.getBoundingClientRect().top,
+                        pointerId: event.pointerId,
+                      };
+                    }}
                   >
                     <div className="tb-node-header">
                       <span className="tb-node-icon-badge" style={{ background: `${m.color}20`, color: m.color }}>

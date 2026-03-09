@@ -47,19 +47,15 @@ function ConfigFieldInput({
   switch (field.field_type) {
     case "boolean":
       return (
-        <button
-          type="button"
-          onClick={() => onChange(value === "true" ? "false" : "true")}
-          className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors ${
-            value === "true" ? "bg-blue-500" : "bg-neutral-300 dark:bg-neutral-600"
-          }`}
-        >
-          <span
-            className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform ${
-              value === "true" ? "translate-x-4" : "translate-x-0"
-            }`}
+        <label className="toggle-label">
+          <input
+            type="checkbox"
+            checked={value === "true"}
+            onChange={() => onChange(value === "true" ? "false" : "true")}
+            style={{ accentColor: "var(--brand)" }}
           />
-        </button>
+          {value === "true" ? "Enabled" : "Disabled"}
+        </label>
       );
 
     case "select":
@@ -161,6 +157,7 @@ function IntegrationConfigDialog({
   const [testResult, setTestResult] = useState<HealthStatusInfo | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [hasPersistedSetup, setHasPersistedSetup] = useState(false);
+  const [vaultUnlocked, setVaultUnlocked] = useState(false);
 
   // Hydrate draft + credential statuses on mount
   useEffect(() => {
@@ -171,6 +168,7 @@ function IntegrationConfigDialog({
           api.getExtensionConfig(integration.name).catch(() => ({} as Record<string, string>)),
           api.checkExtensionCredentials(integration.name).catch(() => ({} as Record<string, boolean>)),
         ]);
+        const vault = await api.vaultStatus().catch(() => null);
         if (cancelled) return;
         // Merge config_values (from listing) with fresh fetch
         const merged: Record<string, string> = {};
@@ -179,8 +177,9 @@ function IntegrationConfigDialog({
         }
         setDraft(merged);
         setCredStatuses(creds);
+        setVaultUnlocked(Boolean(vault?.unlocked));
         setHasPersistedSetup(
-          Object.values(merged).some((value) => value.trim() !== "") || Object.values(creds).some(Boolean)
+          Object.values(cfg).some((value) => value.trim() !== "") || Object.values(creds).some(Boolean)
         );
       } finally {
         if (!cancelled) setLoadingPanel(false);
@@ -203,28 +202,50 @@ function IntegrationConfigDialog({
     setValidationErrors([]);
     setSaveMessage(null);
     try {
+      const credentialEntries = integration.credentials_required
+        .map((cred) => ({ cred, value: (credInputs[cred.name] ?? "").trim() }))
+        .filter((entry) => entry.value.length > 0);
+
       // Save config values (non-empty only)
       const toSave: Record<string, string> = {};
       for (const [k, v] of Object.entries(draft)) {
-        if (v !== "") toSave[k] = v;
+        const trimmed = v.trim();
+        if (trimmed !== "") toSave[k] = trimmed;
+      }
+      for (const { cred, value } of credentialEntries) {
+        toSave[cred.env_var ?? cred.name] = value;
       }
       await api.saveExtensionConfig(integration.name, toSave);
 
-      // Store any filled credential inputs into the vault
-      for (const [credName, credVal] of Object.entries(credInputs)) {
-        if (credVal) {
-          await api.storeExtensionCredential(integration.name, credName, credVal);
+      let storedInVault = 0;
+      let savedToConfigOnly = 0;
+      if (vaultUnlocked) {
+        for (const { cred, value } of credentialEntries) {
+          try {
+            await api.storeExtensionCredential(integration.name, cred.name, value);
+            storedInVault += 1;
+          } catch {
+            savedToConfigOnly += 1;
+          }
         }
+      } else {
+        savedToConfigOnly = credentialEntries.length;
       }
 
       // Validate
       const missing = await api.validateExtensionConfig(integration.name).catch(() => []);
+      const credentialWarning = savedToConfigOnly > 0
+        ? ` ${savedToConfigOnly} credential${savedToConfigOnly > 1 ? "s were" : " was"} saved in integration config because the vault is locked or unavailable.`
+        : "";
       if (missing.length > 0) {
         setValidationErrors(missing);
-        setSaveMessage(`Saved, but ${missing.length} required field${missing.length > 1 ? "s are" : " is"} still missing.`);
+        setSaveMessage(`Saved, but ${missing.length} required field${missing.length > 1 ? "s are" : " is"} still missing.${credentialWarning}`);
         pushToast(`Saved, but ${missing.length} required field(s) still missing`);
       } else {
-        setSaveMessage(`${hasPersistedSetup ? "Configuration updated" : "Configuration saved"} for ${integration.name}.`);
+        const vaultNote = storedInVault > 0
+          ? ` ${storedInVault} credential${storedInVault > 1 ? "s" : ""} also stored in the vault.`
+          : credentialWarning;
+        setSaveMessage(`${hasPersistedSetup ? "Configuration updated" : "Configuration saved"} for ${integration.name}.${vaultNote}`);
         pushToast(`Configuration saved for ${integration.name}`);
       }
 
@@ -327,6 +348,11 @@ function IntegrationConfigDialog({
         {hasCredentials && (
           <fieldset className="extensions-config-group">
             <legend>Credentials</legend>
+            {!vaultUnlocked ? (
+              <div className="extensions-config-field__help">
+                Credential Vault is locked. Entered secrets will still save into the integration configuration so the agent can use them, but unlock the vault if you want encrypted at-rest storage.
+              </div>
+            ) : null}
             <div className="extensions-credentials-grid">
               {integration.credentials_required.map(cred => {
                 const ok = credStatuses[cred.name] === true;

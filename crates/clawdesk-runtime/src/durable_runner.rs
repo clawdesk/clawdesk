@@ -23,7 +23,7 @@ use crate::lease::LeaseManager;
 use crate::types::*;
 use chrono::Utc;
 use clawdesk_agents::runner::AgentConfig;
-use clawdesk_providers::ChatMessage;
+use clawdesk_providers::{ChatMessage, MessageRole};
 use clawdesk_types::error::ClawDeskError;
 use clawdesk_types::session::SessionKey;
 use std::sync::Arc;
@@ -158,6 +158,7 @@ impl DurableAgentRunner {
                 },
                 Some(Checkpoint::AgentLoop {
                     messages,
+                    system_prompt,
                     total_input_tokens,
                     total_output_tokens,
                     ..
@@ -165,7 +166,7 @@ impl DurableAgentRunner {
             ) => {
                 run.total_input_tokens = total_input_tokens;
                 run.total_output_tokens = total_output_tokens;
-                (config.clone(), messages, String::new())
+                (config.clone(), messages, system_prompt)
             }
             (WorkflowType::AgentLoop { config, .. }, None) => {
                 warn!(run_id = %run.id, "no checkpoint found, starting from scratch");
@@ -247,7 +248,7 @@ impl DurableAgentRunner {
         let runner = self.runner_factory.create_runner(config)?;
 
         // Execute the agent loop.
-        let response = runner.run(history, system_prompt).await?;
+        let response = runner.run(history.clone(), system_prompt.clone()).await?;
 
         // Journal the LLM result.
         let seq = run.next_seq();
@@ -278,10 +279,18 @@ impl DurableAgentRunner {
         run.total_input_tokens += response.input_tokens;
         run.total_output_tokens += response.output_tokens;
 
+        let mut checkpoint_messages = history;
+        checkpoint_messages.extend(response.tool_messages.iter().cloned());
+        checkpoint_messages.push(ChatMessage::new(
+            MessageRole::Assistant,
+            response.content.as_str(),
+        ));
+
         // Checkpoint.
         let checkpoint = Checkpoint::AgentLoop {
             round: response.total_rounds,
-            messages: vec![], // Messages are consumed by the runner; checkpoint stores summary.
+            messages: checkpoint_messages,
+            system_prompt,
             total_input_tokens: run.total_input_tokens,
             total_output_tokens: run.total_output_tokens,
             guard_state: GuardSnapshot {

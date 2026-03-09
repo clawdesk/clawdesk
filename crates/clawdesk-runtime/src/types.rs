@@ -335,6 +335,9 @@ pub enum Checkpoint {
         round: usize,
         /// Accumulated messages (system + history + tool results).
         messages: Vec<ChatMessage>,
+        /// Effective system prompt/instruction bundle for the run.
+        #[serde(default)]
+        system_prompt: String,
         /// Token accounting.
         total_input_tokens: u64,
         total_output_tokens: u64,

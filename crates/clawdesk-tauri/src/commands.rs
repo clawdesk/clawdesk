@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sochdb::semantic_cache::CacheMatchType;
 use sochdb::trace::{SpanKind, SpanStatusCode, TraceStatus, CostEvent};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -775,6 +775,96 @@ pub(crate) fn build_skill_tool_registry(
     }
 
     registry
+}
+
+fn format_mcp_bridge_tool_name(server_name: &str, tool_name: &str) -> String {
+    format!(
+        "mcp_{}_{}",
+        server_name.replace('-', "_").replace(' ', "_").to_lowercase(),
+        tool_name.replace('-', "_").to_lowercase(),
+    )
+}
+
+async fn collect_connected_mcp_tools(
+    state: &AppState,
+) -> Vec<clawdesk_agents::McpDiscoveredTool> {
+    let server_names = {
+        let client = state.mcp_client.read().await;
+        client.connected_servers()
+    };
+
+    let mut discovered = Vec::new();
+    for server_name in server_names {
+        let client = state.mcp_client.read().await;
+        match client.list_tools_for_server(&server_name).await {
+            Ok(server_tools) => {
+                discovered.extend(server_tools.into_iter().map(|tool| clawdesk_agents::McpDiscoveredTool {
+                    server_name: server_name.clone(),
+                    original_name: tool.name,
+                    description: tool.description.unwrap_or_default(),
+                    input_schema: tool.input_schema,
+                }));
+            }
+            Err(error) => {
+                tracing::warn!(server = %server_name, error = ?error, "failed to collect MCP tools for prompt context");
+            }
+        }
+    }
+
+    discovered
+}
+
+async fn build_extensions_runtime_context(
+    state: &AppState,
+    discovered_tools: &[clawdesk_agents::McpDiscoveredTool],
+) -> String {
+    let enabled_integrations = {
+        let registry = state.integration_registry.read().await;
+        registry
+            .enabled()
+            .into_iter()
+            .map(|integration| {
+                let transport = match integration.transport {
+                    clawdesk_extensions::registry::TransportConfig::Stdio { .. } => "stdio",
+                    clawdesk_extensions::registry::TransportConfig::Sse { .. } => "sse",
+                    clawdesk_extensions::registry::TransportConfig::DirectApi { .. } => "api",
+                };
+                (integration.name, integration.description, transport.to_string())
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if enabled_integrations.is_empty() && discovered_tools.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from(
+        "\n\n## Extensions and MCP Runtime\nUse connected integrations and MCP tools directly when they fit the task. Prefer these over generic HTTP or shell work when a domain tool already exists.\n",
+    );
+
+    if !enabled_integrations.is_empty() {
+        section.push_str("\nEnabled integrations:\n");
+        for (name, description, transport) in enabled_integrations {
+            section.push_str(&format!("- {} ({}) — {}\n", name, transport, description));
+        }
+    }
+
+    if !discovered_tools.is_empty() {
+        section.push_str("\nConnected MCP bridge tools available in this run:\n");
+        for tool in discovered_tools {
+            section.push_str(&format!(
+                "- {} — {}\n",
+                format_mcp_bridge_tool_name(&tool.server_name, &tool.original_name),
+                if tool.description.is_empty() {
+                    format!("MCP tool {} on {}", tool.original_name, tool.server_name)
+                } else {
+                    tool.description.clone()
+                }
+            ));
+        }
+    }
+
+    section
 }
 
 /// Send a message to an agent and get a response via real AgentRunner + LLM.
@@ -1931,6 +2021,105 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
         );
     }
 
+    let connected_mcp_tools = collect_connected_mcp_tools(state.inner()).await;
+    if !connected_mcp_tools.is_empty() {
+        let app_for_mcp = app.clone();
+        clawdesk_agents::register_mcp_bridge_tools(
+            &mut request_tool_registry,
+            connected_mcp_tools.clone(),
+            Arc::new(move |server_name: String, tool_name: String, arguments: serde_json::Value| {
+                let app = app_for_mcp.clone();
+                Box::pin(async move {
+                    let state = app.state::<AppState>();
+                    let client = state.mcp_client.read().await;
+                    let args: std::collections::HashMap<String, serde_json::Value> = match arguments {
+                        serde_json::Value::Object(map) => map.into_iter().collect(),
+                        _ => std::collections::HashMap::new(),
+                    };
+                    let result = client
+                        .call_tool(&server_name, &tool_name, args)
+                        .await
+                        .map_err(|error| format!("{:?}", error))?;
+
+                    let rendered = result
+                        .content
+                        .iter()
+                        .map(|item| match item {
+                            clawdesk_mcp::McpContent::Text { text } => text.clone(),
+                            clawdesk_mcp::McpContent::Image { mime_type, .. } => {
+                                format!("[image content: {}]", mime_type)
+                            }
+                            clawdesk_mcp::McpContent::Resource { uri, text, .. } => {
+                                text.clone().unwrap_or_else(|| format!("[resource: {}]", uri))
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+
+                    if rendered.is_empty() {
+                        if result.is_error {
+                            Err(format!("MCP tool {}/{} returned no content", server_name, tool_name))
+                        } else {
+                            Ok(format!("MCP tool {}/{} completed successfully.", server_name, tool_name))
+                        }
+                    } else {
+                        Ok(rendered)
+                    }
+                })
+            }),
+        );
+    }
+
+    let extensions_runtime_context = build_extensions_runtime_context(
+        state.inner(),
+        &connected_mcp_tools,
+    )
+    .await;
+    if !extensions_runtime_context.is_empty() {
+        system_prompt.push_str(&extensions_runtime_context);
+    }
+
+    // ── Workspace file instructions ──
+    // Tell agents to use file tools for code generation and editing.
+    system_prompt.push_str(
+        "\n\n## Workspace & Coding Tools\n\
+You have access to a workspace directory where you can read, write, edit, and search files.\n\n\
+**When creating code, apps, scripts, or any files**: Use `file_write` with relative paths \
+(e.g. `app/index.html`, `src/main.rs`). Write each file individually. Do NOT just output code \
+in your response — save it to the workspace so the user can access it in the Files page.\n\n\
+**When modifying existing files**: Use `file_edit` (search/replace) instead of `file_write`. \
+Provide the exact text to find (`old_text`) and the replacement (`new_text`). Include 2-3 lines \
+of context to ensure a unique match. This is safer than overwriting the entire file.\n\n\
+**When understanding code**: Use `grep` to search for patterns, `file_read` to read files, \
+and `file_list` to browse directories. Always read relevant files before editing them.\n\n\
+**Coding workflow**: 1) Use `grep`/`file_list` to understand the codebase → 2) Use `file_read` \
+to read files you need to change → 3) Use `file_edit` for precise modifications or `file_write` \
+for new files → 4) Use `shell_exec` to run tests, build, or verify your changes.\n\n\
+## Live Preview & Dev Servers\n\
+When building web apps, APIs, or services, start a dev server so the user sees it live \
+in the Preview panel:\n\n\
+1. Write files to workspace first with `file_write` (e.g., `todo-app.html`, `index.html`).\n\
+2. Start a static file server using `process_start` — it automatically runs from the workspace \
+directory where your files are. Example:\n\
+   - `process_start` with command `python3 -m http.server 8080` or `npx serve . -p 3000`\n\
+3. Include the URL `http://localhost:<port>` in your response — the Preview panel \
+auto-detects it and shows the live page.\n\
+4. The user sees desktop/mobile viewport modes, can refresh, and manage services.\n\
+5. IMPORTANT: All servers started via `process_start` run from the workspace directory \
+automatically. You do NOT need to specify a working_dir.\n\n\
+## Browser Automation\n\
+You can automate a real browser for web scraping, testing, or interaction:\n\
+- `browser_navigate` — open a URL in a headless browser\n\
+- `browser_click` — click an element by CSS selector\n\
+- `browser_type` — type text into an input\n\
+- `browser_screenshot` — capture a screenshot of the page\n\
+- `browser_extract_text` — extract visible text from the page or element\n\
+- `browser_eval_js` — execute JavaScript on the page\n\
+- `browser_get_title` — get the page title\n\n\
+Use browser tools when you need to: scrape dynamic websites, test web apps you built, \
+interact with web UIs, or capture visual output for the user.\n"
+    );
+
     let request_tool_registry = Arc::new(request_tool_registry);
 
     // /1 FIX: Look up channel metadata from the dock and build a
@@ -2557,6 +2746,52 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
             AuditOutcome::Success,
         )
         .await;
+
+    // ── Persist execution trace to audit log ──
+    // Write tool calls, sub-agent spawns, compaction events, fallbacks,
+    // and round summaries as individual audit entries. This makes agent
+    // execution decisions visible in the LogsPage alongside security events.
+    for t in &trace {
+        let (cat, action) = match t.event.as_str() {
+            "ToolStart" | "ToolEnd" => (AuditCategory::ToolExecution, "tool_execution"),
+            "Compaction" | "ContextGuard" => (AuditCategory::SessionLifecycle, "context_management"),
+            "Fallback" => (AuditCategory::SessionLifecycle, "model_fallback"),
+            "Error" => (AuditCategory::SecurityAlert, "agent_error"),
+            _ => continue, // skip duplicated Response/Done/RoundStart — already covered by assistant_response
+        };
+        state
+            .audit_logger
+            .log(
+                cat,
+                action,
+                AuditActor::Agent { id: agent.id.clone() },
+                Some(agent.id.clone()),
+                serde_json::json!({
+                    "event": t.event,
+                    "detail": t.detail,
+                    "chat_id": &chat_id,
+                    "model": &agent.model,
+                }),
+                if t.event == "Error" { AuditOutcome::Failed } else { AuditOutcome::Success },
+            )
+            .await;
+    }
+
+    // ── Persist tool execution spans to SochDB TraceStore ──
+    if let Some(tid) = &soch_trace_id {
+        for t in &trace {
+            match t.event.as_str() {
+                "ToolStart" => {
+                    let _ = state.trace_store.start_span(tid, &format!("tool:{}", t.detail), None, SpanKind::Internal);
+                }
+                "ToolEnd" => {
+                    // Best-effort end: find the most recent matching span
+                    let _ = state.trace_store.start_span(tid, &format!("tool_end:{}", t.detail), None, SpanKind::Internal);
+                }
+                _ => {}
+            }
+        }
+    }
 
     // ── Memory Write Path (unified engine) ──
     // Durable write with UTF-8 safe truncation, content-hash dedup, and

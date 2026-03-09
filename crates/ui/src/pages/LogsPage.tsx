@@ -11,6 +11,8 @@ interface LogEntry {
   message: string;
 }
 
+type LogView = "all" | "execution" | "audit";
+
 interface LogsPageProps {
   pushToast: (msg: string) => void;
 }
@@ -18,6 +20,7 @@ interface LogsPageProps {
 export function LogsPage({ pushToast }: LogsPageProps) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [filter, setFilter] = useState("");
+  const [view, setView] = useState<LogView>("all");
   const [levels, setLevels] = useState<Record<LogEntry["level"], boolean>>({
     debug: true,
     info: true,
@@ -30,7 +33,8 @@ export function LogsPage({ pushToast }: LogsPageProps) {
 
   const fetchLogs = useCallback(async () => {
     try {
-      const entries = await api.getAuditLogs(200);
+      // Use getExecutionLogs which merges execution traces + audit events
+      const entries = await api.getExecutionLogs(500);
       const mapped: LogEntry[] = entries.map((e) => ({
         id: e.id,
         timestamp: e.timestamp,
@@ -71,6 +75,9 @@ export function LogsPage({ pushToast }: LogsPageProps) {
 
   const filtered = logs.filter((l) => {
     if (!levels[l.level]) return false;
+    // View-based filtering
+    if (view === "execution" && l.subsystem !== "execution" && l.subsystem !== "toolexecution") return false;
+    if (view === "audit" && (l.subsystem === "execution" || l.subsystem === "toolexecution")) return false;
     if (filter && !l.message.toLowerCase().includes(filter.toLowerCase()) && !l.subsystem.toLowerCase().includes(filter.toLowerCase())) return false;
     return true;
   });
@@ -102,7 +109,7 @@ export function LogsPage({ pushToast }: LogsPageProps) {
   return (
     <PageLayout
       title="Logs"
-      subtitle="Live log stream from all gateway subsystems."
+      subtitle="Agent execution traces, tool calls, and system events."
       actions={
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn subtle" onClick={handleExport}>Export</button>
@@ -110,6 +117,29 @@ export function LogsPage({ pushToast }: LogsPageProps) {
         </div>
       }
     >
+      {/* View tabs */}
+      <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
+        {([
+          ["all", "All"],
+          ["execution", "Execution"],
+          ["audit", "Audit"],
+        ] as const).map(([key, label]) => (
+          <button
+            key={key}
+            className={`btn ${view === key ? "primary" : "subtle"}`}
+            onClick={() => setView(key)}
+            style={{ padding: "6px 14px", fontSize: 12 }}
+          >
+            {label}
+            {key === "execution" && (
+              <span style={{ marginLeft: 4, opacity: 0.7 }}>
+                ({logs.filter((l) => l.subsystem === "execution" || l.subsystem === "toolexecution").length})
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
       {/* Toolbar */}
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 200 }}>
@@ -172,7 +202,14 @@ export function LogsPage({ pushToast }: LogsPageProps) {
             <div key={l.id} className={`log-row log-${l.level}`}>
               <span className="log-time">{formatTime(l.timestamp)}</span>
               <span className={`log-level ${l.level}`}>{l.level.toUpperCase().padEnd(5)}</span>
-              <span className="log-subsystem">{l.subsystem}</span>
+              <span className="log-subsystem" title={l.subsystem}>
+                {l.subsystem === "execution" ? "⚡" :
+                 l.subsystem === "toolexecution" ? "🔧" :
+                 l.subsystem === "sessionlifecycle" ? "📋" :
+                 l.subsystem === "securityalert" ? "🛡️" :
+                 l.subsystem === "messagesend" || l.subsystem === "messagereceive" ? "💬" :
+                 "📌"} {l.subsystem}
+              </span>
               <span className="log-message">{l.message}</span>
             </div>
           ))

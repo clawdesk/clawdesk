@@ -62,6 +62,10 @@ function isModelActive(state?: RunningModel["state"]): boolean {
   return state === "ready" || state === "starting" || state === "stopping";
 }
 
+function hasTrackedModelState(state?: RunningModel["state"]): boolean {
+  return state === "ready" || state === "starting" || state === "stopping" || state === "failed";
+}
+
 function pluralize(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`;
 }
@@ -91,6 +95,20 @@ export function LocalModelsPage({ pushToast }: Props) {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!(status?.running_models ?? []).some((model) => model.state === "starting" || model.state === "stopping")) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      refresh();
+    }, 1500);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [refresh, status?.running_models]);
 
   useEffect(() => {
     const unlisten = listen<any>("local-model-download", (event) => {
@@ -138,12 +156,19 @@ export function LocalModelsPage({ pushToast }: Props) {
   };
 
   const handleStart = async (name: string) => {
+    if (!status?.llama_server_available) {
+      setShowSettings(true);
+      pushToast("llama-server is not available. Install it or set the binary path in Settings.");
+      return;
+    }
+
     try {
       const port = await api.localModelsStart(name);
-      pushToast(`${name} started on port ${port}`);
-      refresh();
+      pushToast(`${name} starting on port ${port}`);
+      await refresh();
     } catch (e: any) {
-      pushToast(`Failed to start: ${e}`);
+      const message = e instanceof Error ? e.message : String(e);
+      pushToast(`Failed to start: ${message}`);
     }
   };
 
@@ -440,6 +465,7 @@ export function LocalModelsPage({ pushToast }: Props) {
                     runningState={runningModel?.state}
                     onDownload={() => handleDownload(model)}
                     onStart={() => handleStart(model.model.name)}
+                    canStart={Boolean(status?.llama_server_available)}
                   />
                 );
               })}
@@ -473,7 +499,8 @@ export function LocalModelsPage({ pushToast }: Props) {
                       icon="archive"
                       title={model.name}
                       subtitle={`${fmtGb(model.size_gb)} on disk`}
-                      chips={[running ? `${formatStateLabel(running.state)} on :${running.port}` : "Stopped"]}
+                      chips={running ? [formatStateLabel(running.state), `Port ${running.port}`] : ["Stopped"]}
+                      stateColor={running?.state ? STATE_COLORS[running.state] ?? "#6b7280" : undefined}
                       actions={
                         <>
                           {running?.state === "ready" ? (
@@ -486,10 +513,29 @@ export function LocalModelsPage({ pushToast }: Props) {
                               <Icon name="loader" />
                               <span>{formatStateLabel(running!.state)}</span>
                             </button>
+                          ) : running?.state === "failed" ? (
+                            <div className="local-models-row__action-group">
+                              <button className="local-models-button local-models-button--ghost-danger" onClick={() => handleStop(model.name)}>
+                                <Icon name="close" />
+                                <span>Clear</span>
+                              </button>
+                              <button
+                                className={`local-models-button ${status?.llama_server_available ? "local-models-button--primary" : "local-models-button--disabled"}`}
+                                onClick={() => handleStart(model.name)}
+                                disabled={!status?.llama_server_available}
+                              >
+                                <Icon name="refresh" />
+                                <span>{status?.llama_server_available ? "Retry" : "Runtime Missing"}</span>
+                              </button>
+                            </div>
                           ) : (
-                            <button className="local-models-button local-models-button--primary" onClick={() => handleStart(model.name)}>
+                            <button
+                              className={`local-models-button ${status?.llama_server_available ? "local-models-button--primary" : "local-models-button--disabled"}`}
+                              onClick={() => handleStart(model.name)}
+                              disabled={!status?.llama_server_available}
+                            >
                               <Icon name="play" />
-                              <span>Start</span>
+                              <span>{status?.llama_server_available ? "Start" : "Runtime Missing"}</span>
                             </button>
                           )}
                           <button className="local-models-button local-models-button--ghost-danger" onClick={() => handleDelete(model.name)}>
@@ -523,10 +569,23 @@ export function LocalModelsPage({ pushToast }: Props) {
                     chips={[formatStateLabel(model.state), `Port ${model.port}`, model.pid ? `PID ${model.pid}` : "No PID"]}
                     stateColor={STATE_COLORS[model.state] ?? "#6b7280"}
                     actions={
-                      <button className="local-models-button local-models-button--danger" onClick={() => handleStop(model.name)}>
-                        <Icon name="pause" />
-                        <span>Stop</span>
-                      </button>
+                      model.state === "failed" ? (
+                        <div className="local-models-row__action-group">
+                          <button className="local-models-button local-models-button--ghost-danger" onClick={() => handleStop(model.name)}>
+                            <Icon name="close" />
+                            <span>Clear</span>
+                          </button>
+                          <button className="local-models-button local-models-button--primary" onClick={() => handleStart(model.name)}>
+                            <Icon name="refresh" />
+                            <span>Retry</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <button className="local-models-button local-models-button--danger" onClick={() => handleStop(model.name)}>
+                          <Icon name="pause" />
+                          <span>Stop</span>
+                        </button>
+                      )
                     }
                   />
                 ))
@@ -626,16 +685,20 @@ function ModelCard({
   onDownload,
   onStart,
   runningState,
+  canStart,
 }: {
   fit: ModelFit;
   downloading: boolean;
   onDownload: () => void;
   onStart: () => void;
   runningState?: RunningModel["state"];
+  canStart: boolean;
 }) {
   const model = fit.model;
   const fitColor = FIT_COLORS[fit.fit_level];
   const isActive = isModelActive(runningState);
+  const hasTrackedState = hasTrackedModelState(runningState);
+  const hasFailed = runningState === "failed";
   const runningColor = runningState ? STATE_COLORS[runningState] ?? "#6b7280" : "#16a34a";
 
   return (
@@ -687,6 +750,11 @@ function ModelCard({
         <div className="local-model-card__chips">
           <span className="local-models-chip">{fit.installed ? "Downloaded" : "Remote"}</span>
           <span className="local-models-chip">{fit.use_case}</span>
+          {hasTrackedState && (
+            <span className="local-models-chip" style={{ color: runningColor, borderColor: `${runningColor}33` }}>
+              {formatStateLabel(runningState!)}
+            </span>
+          )}
         </div>
 
         {fit.installed ? (
@@ -698,10 +766,32 @@ function ModelCard({
               />
               <span>{formatStateLabel(runningState!)}</span>
             </div>
+          ) : hasFailed ? (
+            <div className="local-model-card__action-group">
+              <div className="local-model-card__running local-model-card__running--failed" style={{ color: runningColor }}>
+                <span
+                  className="local-model-card__running-dot"
+                  style={{ background: runningColor, boxShadow: `0 0 0 5px ${runningColor}1f` }}
+                />
+                <span>Last start failed</span>
+              </div>
+              <button
+                className={`local-models-button ${canStart ? "local-models-button--primary" : "local-models-button--disabled"}`}
+                onClick={onStart}
+                disabled={!canStart}
+              >
+                <Icon name="refresh" />
+                <span>{canStart ? "Retry" : "Runtime Missing"}</span>
+              </button>
+            </div>
           ) : (
-            <button className="local-models-button local-models-button--primary" onClick={onStart}>
+            <button
+              className={`local-models-button ${canStart ? "local-models-button--primary" : "local-models-button--disabled"}`}
+              onClick={onStart}
+              disabled={!canStart}
+            >
               <Icon name="play" />
-              <span>Start</span>
+              <span>{canStart ? "Start" : "Runtime Missing"}</span>
             </button>
           )
         ) : (

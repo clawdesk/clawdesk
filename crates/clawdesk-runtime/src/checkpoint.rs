@@ -175,8 +175,7 @@ impl CheckpointStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{GuardSnapshot, RetryPolicy, RunState, WorkflowType};
-    use chrono::Utc;
+    use crate::types::{GuardSnapshot, RetryPolicy, WorkflowType};
 
     fn test_store() -> Arc<SochStore> {
         Arc::new(SochStore::open_in_memory().expect("in-memory store"))
@@ -191,6 +190,7 @@ mod tests {
         let cp = Checkpoint::AgentLoop {
             round: 5,
             messages: vec![],
+            system_prompt: "You are durable.".into(),
             total_input_tokens: 1000,
             total_output_tokens: 500,
             guard_state: GuardSnapshot {
@@ -221,6 +221,7 @@ mod tests {
             let cp = Checkpoint::AgentLoop {
                 round,
                 messages: vec![],
+                system_prompt: format!("system prompt {round}"),
                 total_input_tokens: round as u64 * 100,
                 total_output_tokens: round as u64 * 50,
                 guard_state: GuardSnapshot {

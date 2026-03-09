@@ -131,6 +131,14 @@ import type {
   MigrationReportInfo,
   MigrationRequest,
   ValidateSourceResult,
+  // Orchestration
+  AgentFlowConfig,
+  OrchestrationTask,
+  OrchestrationEvent,
+  OrchestrationResultFrontend,
+  CapabilityInfo,
+  OrchestrationRunRequest,
+  FlowTemplate,
 } from "./types";
 
 // ── Browser-dev mode detection ────────────────────────────
@@ -770,6 +778,68 @@ export async function runPipeline(pipelineId: string): Promise<PipelineRunResult
 
 export async function getPipelineRuns(pipelineId: string): Promise<any[]> {
   return invoke<any[]>("get_pipeline_runs", { pipelineId });
+}
+
+// ══════════════════════════════════════════════════════════════
+// Agent Coordination / Orchestration
+// ══════════════════════════════════════════════════════════════
+
+/** List all registered agent flows. */
+export async function listAgentFlows(): Promise<AgentFlowConfig[]> {
+  return invoke<AgentFlowConfig[]>("list_agent_flows");
+}
+
+/** Create a new agent flow configuration. */
+export async function createAgentFlow(flow: Omit<AgentFlowConfig, "id">): Promise<AgentFlowConfig> {
+  return invoke<AgentFlowConfig>("create_agent_flow", { request: { id: "", ...flow } });
+}
+
+/** Update an existing agent flow. */
+export async function updateAgentFlow(flowId: string, updates: Partial<AgentFlowConfig>): Promise<AgentFlowConfig> {
+  return invoke<AgentFlowConfig>("update_agent_flow", { flowId, request: updates });
+}
+
+/** Delete an agent flow. */
+export async function deleteAgentFlow(flowId: string): Promise<boolean> {
+  return invoke<boolean>("delete_agent_flow", { flowId });
+}
+
+/** List available flow templates. */
+export async function listFlowTemplates(): Promise<FlowTemplate[]> {
+  return invoke<FlowTemplate[]>("list_flow_templates");
+}
+
+/** Start an orchestration run — dispatch a goal to selected agent flows. */
+export async function runOrchestration(request: OrchestrationRunRequest): Promise<OrchestrationResultFrontend> {
+  return invoke<OrchestrationResultFrontend>("run_orchestration", { request });
+}
+
+/** List capabilities from the capability index. */
+export async function listCapabilities(): Promise<CapabilityInfo[]> {
+  return invoke<CapabilityInfo[]>("list_capabilities");
+}
+
+/** Get current orchestration status. */
+export async function getOrchestrationStatus(): Promise<{ capabilities_registered: number; actions_available: number; event_channel: string }> {
+  return invoke<{ capabilities_registered: number; actions_available: number; event_channel: string }>("get_orchestration_status");
+}
+
+/** List orchestration tasks. */
+export async function listOrchestrationTasks(): Promise<OrchestrationTask[]> {
+  return invoke<OrchestrationTask[]>("list_orchestration_tasks");
+}
+
+/** Send a message through an agent flow (orchestrated routing). */
+export async function sendOrchestrated(
+  flowId: string,
+  content: string,
+  chatId?: string
+): Promise<SendMessageResponse> {
+  return invoke<SendMessageResponse>("send_orchestrated", {
+    flowId,
+    content,
+    chatId: chatId ?? null,
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1440,6 +1510,10 @@ export async function getAuditLogs(limit: number): Promise<LogEntry[]> {
   return invoke<LogEntry[]>("get_audit_logs", { limit });
 }
 
+export async function getExecutionLogs(limit: number): Promise<LogEntry[]> {
+  return invoke<LogEntry[]>("get_execution_logs", { limit });
+}
+
 export async function policyAddRateLimit(
   operation: string,
   maxPerMinute: number,
@@ -1932,7 +2006,7 @@ export async function disconnectAllMcp(): Promise<boolean> {
 export async function listIntegrations(): Promise<IntegrationInfo[]> {
   if (isBrowserDev) {
     return [
-      { name: "github", description: "GitHub API", category: "DevTools", icon: "🐙", enabled: true, credentials_required: [{ name: "token", description: "Personal access token", env_var: "GITHUB_TOKEN", required: true }], has_oauth: true, health_check_url: "https://api.github.com", config_fields: [{ key: "GITHUB_API_URL", label: "API URL", description: "GitHub API endpoint", field_type: "url", default: "https://api.github.com", required: false, placeholder: "https://api.github.com", options: [], group: "Connection" }], config_values: {}, transport_type: "stdio" },
+      { name: "github", description: "GitHub repositories, issues, pull requests, and code search", category: "DevTools", icon: "🐙", enabled: true, credentials_required: [{ name: "GITHUB_PERSONAL_ACCESS_TOKEN", description: "GitHub personal access token with repo scope", env_var: "GITHUB_PERSONAL_ACCESS_TOKEN", required: true }], has_oauth: true, health_check_url: "https://api.github.com", config_fields: [{ key: "GITHUB_API_URL", label: "API URL", description: "GitHub API endpoint (change for GitHub Enterprise)", field_type: "url", default: "https://api.github.com", required: false, placeholder: "https://api.github.com", options: [], group: "Connection" }], config_values: {}, transport_type: "stdio" },
       { name: "slack", description: "Slack workspace", category: "Communication", icon: "💼", enabled: false, credentials_required: [{ name: "bot_token", description: "Bot token", env_var: "SLACK_BOT_TOKEN", required: true }], has_oauth: true, health_check_url: "https://slack.com/api/api.test", config_fields: [], config_values: {}, transport_type: "stdio" },
       { name: "jira", description: "Atlassian Jira", category: "Productivity", icon: "📋", enabled: false, credentials_required: [{ name: "api_token", description: "API token", env_var: "JIRA_API_TOKEN", required: true }], has_oauth: false, health_check_url: undefined, config_fields: [{ key: "JIRA_BASE_URL", label: "Jira URL", description: "Your Jira instance URL", field_type: "url", required: true, placeholder: "https://your-company.atlassian.net", options: [], group: "Connection" }], config_values: {}, transport_type: "api" },
     ];
