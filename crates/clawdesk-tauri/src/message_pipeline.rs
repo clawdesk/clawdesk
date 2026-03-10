@@ -582,6 +582,7 @@ pub(crate) async fn assemble_history(
 }
 
 /// Check the context guard and apply compaction if needed.
+#[allow(dead_code)]
 async fn apply_context_guard(
     state: &AppState,
     app: &AppHandle,
@@ -641,6 +642,7 @@ async fn apply_context_guard(
 }
 
 /// Apply compaction at a specific level (DropMetadata, SummarizeOld, Truncate).
+#[allow(dead_code)]
 async fn apply_compaction_level(
     state: &AppState,
     app: &AppHandle,
@@ -728,6 +730,7 @@ async fn apply_compaction_level(
 }
 
 /// Apply budget-based truncation (ForceTruncate / CircuitBroken).
+#[allow(dead_code)]
 async fn apply_budget_truncation(
     state: &AppState,
     app: &AppHandle,
