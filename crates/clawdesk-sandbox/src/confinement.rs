@@ -636,10 +636,12 @@ fn probe_landlock_abi() -> u32 {
 #[cfg(target_os = "linux")]
 fn check_unshare_available() -> bool {
     // Check if we're root or if user namespaces are enabled.
-    unsafe { libc::geteuid() == 0 }
-        || std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false)
+    let is_root = unsafe { libc::geteuid() == 0 };
+    let userns_enabled = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false);
+
+    is_root || userns_enabled
 }
 
 // ---------------------------------------------------------------------------
