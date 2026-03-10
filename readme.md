@@ -21,6 +21,12 @@
   <a href="#contributing">Contributing</a>
 </p>
 
+> **⚠️ Active Development — Things Will Break**
+>
+> ClawDesk is under active development and is not yet stable. APIs, CLI commands, and data formats may change without notice. Expect rough edges, missing features, and occasional breakage. We're currently focused on testing and hardening the core runtime.
+>
+> **Contributors and testers are welcome!** If you hit a bug, please open an issue. If you want to help, check the open issues or submit a PR.
+
 ---
 
 ClawDesk - Agent2OS is a **multi-interface AI agent runtime** that runs locally with full audit trails, identity verification, and zero-trust networking. Built as a **45-crate Rust workspace**, it provides a production-grade agent runtime with:
