@@ -76,39 +76,34 @@ ClawDesk is designed to be useful to both everyday users and technical operators
 
 | | |
 |---|---|
-| **Local-First Runtime** | Agents execute on your hardware — laptop, server, cloud VM, Raspberry Pi. No cloud dependency required. |
-| **Security Hardened** | CascadeScanner (Aho-Corasick + Regex), SHA-256 audit chain, scoped tokens, identity contracts, plugin sandbox. |
-| **Multi-Model Support** | Claude (Haiku/Sonnet/Opus), OpenAI, Gemini, Ollama, Azure, Bedrock, Cohere, Vertex — 8 providers via a single trait. |
-| **25+ Channel Adapters** | Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, IRC, Teams, iMessage, Mastodon, Nostr, Twitch, and more. |
-| **Skill Registry** | 15+ built-in skills with hot-loading, trigger evaluation, token-budgeted knapsack selection, and per-skill ACLs. |
-| **tmux Desktop** | Full 10-window terminal layout mirroring the Tauri desktop app — Dashboard, Chat, Agents, Skills, Security, and more. Navigate with `Ctrl-B + 0..9`. |
-| **Terminal UI (TUI)** | Ratatui-based interactive dashboard with Vim keybindings, 10 screens, 4 themes, model picker, and 30fps event loop. |
-| **Agent Pipelines** | Declarative TOML pipelines with DAG execution, gates, parallel branches, checkpointing, and dead-letter queue. |
-| **Memory System** | Hybrid search (Vector + BM25 + RRF) with temporal decay, MMR deduplication, and batch ingestion pipeline. |
-| **Browser Automation** | Chrome DevTools Protocol integration — navigate, click, type, screenshot, DOM intelligence. |
-| **RAG Pipeline** | Document ingestion (PDF, text), semantic chunking, vector search retrieval. |
-| **MCP Support** | Model Context Protocol client/server over JSON-RPC 2.0 with stdio and SSE transports. |
-| **Local Models** | Hardware detection (CUDA/Metal/CPU), model database, llama-server lifecycle management. |
-| **A2A Protocol** | Agent-to-Agent communication with capability discovery, task FSM, and bipartite routing. |
-| **WireGuard Tunnel** | Peer-to-peer encrypted networking with invite-based device pairing. NAT traversal via STUN. |
-| **Full Observability** | OpenTelemetry tracing + metrics, cost tracking, token budgeting, and tamper-evident audit logs. |
-| **Self-Update** | Atomic binary self-update from GitHub with SHA-256 verification and rollback support. |
-| **Encrypted Backups** | AES-256-GCM encrypted config backups with Argon2 key derivation. |
-| **Desktop UI** | Tauri 2.0 + React frontend with 138+ IPC commands, system tray, markdown rendering, drag-drop. |
+| **Run It Yourself** | Use ClawDesk on your laptop, server, cloud VM, Raspberry Pi, or other machines you control. |
+| **Private by Default** | Keep conversations, settings, and workflows closer to your own environment instead of relying on a hosted dashboard. |
+| **Choose Your AI Models** | Switch between Claude, OpenAI, Gemini, Ollama, Bedrock, Azure, Cohere, Vertex, and more. |
+| **Connect Your Channels** | Bring agents into tools like Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, IRC, Teams, iMessage, and more. |
+| **Built-In Skills and Tools** | Use bundled capabilities for files, browser tasks, memory, automation, security checks, and custom workflows. |
+| **Desktop + Terminal Experience** | Use a full desktop app, a tmux workspace, a terminal dashboard, or direct CLI commands depending on the moment. |
+| **Automation Workflows** | Run repeatable tasks, pipelines, background jobs, and operational routines without rebuilding the same prompts every time. |
+| **Memory and Retrieval** | Help agents remember useful context, search documents, and work across longer-running tasks. |
+| **Browser and App Actions** | Let agents browse pages, inspect content, click through flows, and interact with supported tools. |
+| **Local Model Support** | Run supported local models on your own hardware when you want lower latency, lower cost, or more privacy. |
+| **Secure Remote Access** | Operate across devices and remote machines with built-in support for controlled networking and tunnels. |
+| **Visibility and Auditability** | Track what agents did, how they ran, and what they cost with logs, traces, and system metrics. |
+| **Updates and Backups** | Keep the system current and protect your setup with update and backup support. |
+| **Extensible Platform** | Add skills, connect services, define agents, and shape ClawDesk around your own workflows. |
 
 ## Runs Anywhere
 
-ClawDesk is not just a desktop app — it's a **multi-interface AI runtime** that deploys anywhere:
+ClawDesk is not tied to a single screen or setup. You can use the same system in the way that makes sense for where you are working:
 
 | Interface | Command | Best For |
 |-----------|---------|----------|
-| **Desktop App** (Tauri 2.0) | `cargo tauri dev` | Everyday GUI use on macOS/Linux/Windows |
-| **tmux Workspace** (10 screens) | `clawdesk tmux launch` | Terminal power users, SSH, cloud VMs |
-| **TUI Dashboard** (ratatui) | `clawdesk tui` | Interactive terminal with Vim keybindings |
-| **CLI** (40+ commands) | `clawdesk agent msg "hello"` | Scripts, automation, cron jobs |
-| **Gateway Server** (Axum) | `clawdesk gateway run` | REST API, webhook integrations |
-| **Daemon** (systemd/launchd) | `clawdesk daemon run` | Always-on background service |
-| **Docker** | `docker-compose up` | Containerized headless deployment |
+| **Desktop App** | `cargo tauri dev` | People who want a visual home for daily AI work |
+| **tmux Workspace** | `clawdesk tmux launch` | SSH sessions, remote servers, and terminal-heavy workflows |
+| **TUI Dashboard** | `clawdesk tui` | Interactive terminal control with a focused dashboard |
+| **CLI** | `clawdesk agent msg "hello"` | Quick actions, scripts, automation, and cron jobs |
+| **Gateway Server** | `clawdesk gateway run` | Integrations, APIs, webhooks, and connected services |
+| **Daemon** | `clawdesk daemon run` | Always-on assistants and background automations |
+| **Docker** | `docker-compose up` | Headless deployment in container-based environments |
 
 ### Supported Platforms
 
@@ -121,7 +116,7 @@ ClawDesk is not just a desktop app — it's a **multi-interface AI runtime** tha
 | **Cloud VMs** (AWS/GCP/Azure/DO) | — | ✅ | ✅ | ✅ |
 | **Headless servers** | — | ✅ | ✅ | ✅ |
 
-> **No display required.** The tmux workspace, TUI, CLI, gateway server, and daemon all run without a GUI — perfect for cloud VMs, Raspberry Pi, headless servers, and SSH sessions.
+> **No display required.** If you do not want a desktop app, ClawDesk still works well through the terminal, background services, remote servers, Raspberry Pi, Docker, and SSH sessions.
 
 ## Powered by SochDB
 
@@ -378,7 +373,7 @@ If you need to skip the auto-download in offline CI, set `CLAWDESK_SKIP_LLAMA_SE
 
 ## CLI
 
-ClawDesk ships a full-featured CLI with over 40 commands. Build it with `cargo build -p clawdesk-cli`.
+ClawDesk includes a command-line interface for quick actions, automation, diagnostics, and terminal-first workflows. If you like scripting or want AI available outside the desktop app, the CLI is the fastest path.
 
 <details>
 <summary><strong>Full command tree</strong> (click to expand)</summary>
@@ -437,7 +432,7 @@ clawdesk
 
 ## tmux Desktop
 
-ClawDesk includes a built-in tmux session manager that mirrors the **Tauri desktop app** in the terminal. The default **desktop** layout creates 10 tmux windows — one for each screen in the Tauri app.
+ClawDesk includes a built-in tmux workspace for people who want a richer terminal experience. It gives you a multi-window setup that mirrors the main parts of the desktop app, which makes it useful on remote machines, cloud VMs, and SSH sessions.
 
 ```bash
 # First-time: guided onboarding → provider setup → layout selection → auto-launch
@@ -485,7 +480,7 @@ See the full [tmux Desktop Guide](docs/tmux-workspace.md) for details.
 
 ## Terminal UI (TUI)
 
-The ratatui-based TUI provides a full interactive dashboard in the terminal with Vim keybindings:
+The TUI gives you a focused terminal dashboard for monitoring, navigation, and interactive use without opening the full desktop app:
 
 ```bash
 clawdesk tui                       # Launch with dark theme
