@@ -145,25 +145,34 @@ jobs:
               "$lib"
           done
 
-          # 2. Sign all executables in Contents/MacOS (llama-server, main binary, etc.)
-          echo "=== Signing MacOS binaries ==="
-          find "$APP_PATH/Contents/MacOS" -type f -perm +111 ! -name '*.dylib' -print0 2>/dev/null | while IFS= read -r -d '' bin; do
-            echo "  Signing: $bin"
-            codesign --force --options runtime --timestamp \
-              --sign "$IDENTITY" \
-              --entitlements "$ENTITLEMENTS" \
-              "$bin"
-          done
+          # 2. Sign Mach-O sidecars first (excluding the main executable)
+          MAIN_BIN="$APP_PATH/Contents/MacOS/clawdesk-tauri"
 
-          # 3. Sign sidecar executables in Contents/Resources (if any)
-          echo "=== Signing Resources binaries ==="
-          find "$APP_PATH/Contents/Resources" -type f -perm +111 ! -name '*.dylib' -print0 2>/dev/null | while IFS= read -r -d '' bin; do
-            echo "  Signing: $bin"
+          echo "=== Signing Mach-O sidecars ==="
+          while IFS= read -r -d '' bin; do
+            # Sign all Mach-O binaries first so the main executable does not fail
+            # due to unsigned nested components (e.g. llama-server).
+            if [[ "$bin" == "$MAIN_BIN" ]]; then
+              continue
+            fi
+            if file "$bin" | grep -q 'Mach-O'; then
+              echo "  Signing: $bin"
+              codesign --force --options runtime --timestamp \
+                --sign "$IDENTITY" \
+                --entitlements "$ENTITLEMENTS" \
+                "$bin"
+            fi
+          done < <(find "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources" -type f -print0 2>/dev/null)
+
+          # 3. Sign the main executable after sidecars
+          if [[ -f "$MAIN_BIN" ]]; then
+            echo "=== Signing main executable ==="
+            echo "  Signing: $MAIN_BIN"
             codesign --force --options runtime --timestamp \
               --sign "$IDENTITY" \
               --entitlements "$ENTITLEMENTS" \
-              "$bin"
-          done
+              "$MAIN_BIN"
+          fi
 
           # 4. Sign the app bundle itself
           echo "=== Signing app bundle ==="

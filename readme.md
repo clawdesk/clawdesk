@@ -326,7 +326,7 @@ The React frontend communicates with the Rust backend through **138+ typed IPC c
 
 ```bash
 # Clone the repository
-git clone https://github.com/anthropics/clawdesk.git
+git clone https://github.com/clawdesk/clawdesk.git
 cd clawdesk
 
 # Install UI dependencies

@@ -14,7 +14,7 @@ Go from zero to a working agent in under five minutes.
 
 ```bash
 # Clone and build
-git clone https://github.com/anthropics/clawdesk && cd clawdesk
+git clone https://github.com/clawdesk/clawdesk.git && cd clawdesk
 cargo build -p clawdesk-cli --release
 
 # Move the binary somewhere in $PATH (optional)
