@@ -81,39 +81,25 @@ jobs:
 
       - name: Build Tauri App
         working-directory: crates/clawdesk-tauri
-        run: cargo tauri build --target x86_64-unknown-linux-gnu
+        run: cargo tauri build --target x86_64-unknown-linux-gnu --bundles deb,rpm
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-          APPIMAGE_EXTRACT_AND_RUN: "1"
 
       # ── Normalize artifact names ────────────────────────────
       - name: Normalize Linux artifact names
         run: |
-          APP_DIR="target/x86_64-unknown-linux-gnu/release/bundle/appimage"
           DEB_DIR="target/x86_64-unknown-linux-gnu/release/bundle/deb"
-
-          APPIMAGE=$(ls -1 "$APP_DIR"/*.AppImage 2>/dev/null | head -1 || true)
-          if [[ -n "$APPIMAGE" ]]; then
-            mv "$APPIMAGE" "$APP_DIR/ClawDesk_amd64.AppImage"
-          fi
-
-          APPIMAGE_TGZ=$(ls -1 "$APP_DIR"/*.AppImage.tar.gz 2>/dev/null | head -1 || true)
-          if [[ -n "$APPIMAGE_TGZ" ]]; then
-            mv "$APPIMAGE_TGZ" "$APP_DIR/ClawDesk_amd64.AppImage.tar.gz"
-            if [[ -f "${APPIMAGE_TGZ}.sig" ]]; then
-              mv "${APPIMAGE_TGZ}.sig" "$APP_DIR/ClawDesk_amd64.AppImage.tar.gz.sig"
-            fi
-          fi
-
-          APPIMAGE_SIG=$(ls -1 "$APP_DIR"/*.AppImage.sig 2>/dev/null | head -1 || true)
-          if [[ -n "$APPIMAGE_SIG" ]]; then
-            mv "$APPIMAGE_SIG" "$APP_DIR/ClawDesk_amd64.AppImage.sig"
-          fi
+          RPM_DIR="target/x86_64-unknown-linux-gnu/release/bundle/rpm"
 
           DEB=$(ls -1 "$DEB_DIR"/*.deb 2>/dev/null | head -1 || true)
           if [[ -n "$DEB" ]]; then
             mv "$DEB" "$DEB_DIR/ClawDesk_amd64.deb"
+          fi
+
+          RPM=$(ls -1 "$RPM_DIR"/*.rpm 2>/dev/null | head -1 || true)
+          if [[ -n "$RPM" ]]; then
+            mv "$RPM" "$RPM_DIR/ClawDesk_amd64.rpm"
           fi
 
       - name: Upload Linux artifacts
@@ -121,11 +107,8 @@ jobs:
         with:
           name: ClawDesk-x86_64-unknown-linux-gnu
           path: |
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz.sig
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.sig
             target/x86_64-unknown-linux-gnu/release/bundle/deb/ClawDesk_amd64.deb
+            target/x86_64-unknown-linux-gnu/release/bundle/rpm/ClawDesk_amd64.rpm
           if-no-files-found: error
 
       - name: Create Release & Upload
@@ -138,10 +121,7 @@ jobs:
           overwrite_files: true
           generate_release_notes: true
           files: |
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz.sig
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.sig
             target/x86_64-unknown-linux-gnu/release/bundle/deb/ClawDesk_amd64.deb
+            target/x86_64-unknown-linux-gnu/release/bundle/rpm/ClawDesk_amd64.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

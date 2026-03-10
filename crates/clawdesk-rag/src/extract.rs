@@ -11,6 +11,7 @@ pub enum DocType {
     Text,
     Markdown,
     Csv,
+    Code,
 }
 
 impl DocType {
@@ -22,6 +23,13 @@ impl DocType {
             "txt" | "log" => Some(Self::Text),
             "md" | "markdown" => Some(Self::Markdown),
             "csv" => Some(Self::Csv),
+            "json" | "html" | "xml" | "yaml" | "yml" | "toml" | "ini" | "cfg"
+            | "py" | "js" | "ts" | "jsx" | "tsx" | "rs" | "go" | "java"
+            | "c" | "cpp" | "h" | "hpp" | "rb" | "sh" | "bash" | "zsh"
+            | "sql" | "r" | "swift" | "kt" | "scala" | "lua" | "pl"
+            | "ex" | "exs" | "zig" | "nim" | "v" | "d" | "cs" | "fs"
+            | "hs" | "ml" | "lisp" | "clj" | "el" | "vim" | "conf"
+            | "env" | "dockerfile" | "makefile" => Some(Self::Code),
             _ => None,
         }
     }
@@ -32,6 +40,7 @@ impl DocType {
             Self::Text => "Text",
             Self::Markdown => "Markdown",
             Self::Csv => "CSV",
+            Self::Code => "Code",
         }
     }
 }
@@ -45,7 +54,7 @@ pub fn extract_text(path: &Path) -> Result<String, String> {
 
     match doc_type {
         DocType::Pdf => extract_pdf(path),
-        DocType::Text | DocType::Markdown | DocType::Csv => extract_plaintext(path),
+        DocType::Text | DocType::Markdown | DocType::Csv | DocType::Code => extract_plaintext(path),
     }
 }
 

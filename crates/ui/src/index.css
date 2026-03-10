@@ -4871,6 +4871,29 @@ h6.md-heading {
   flex-shrink: 0;
 }
 
+.chat-composer-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin-left: 2px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.chat-composer-chip-remove:hover {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+}
+
 .chat-composer-actions {
   display: flex;
   align-items: center;

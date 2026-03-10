@@ -86,9 +86,6 @@ jobs:
         shell: bash
         run: |
           SRC="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            SRC="${SRC}.exe"
-          fi
           cp "$SRC" "${{ matrix.artifact }}"
 
       # ── macOS signing + notarization (skipped if cert secret absent) ──

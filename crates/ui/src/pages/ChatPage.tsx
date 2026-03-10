@@ -2427,6 +2427,14 @@ export function ChatPage({
                       <span key={doc.id} className="chat-composer-chip">
                         <Icon name="paperclip" />
                         {doc.filename}
+                        <button
+                          className="chat-composer-chip-remove"
+                          aria-label={`Remove ${doc.filename}`}
+                          title="Remove file"
+                          onClick={() => setUploadedContextDocs((prev) => prev.filter((d) => d.id !== doc.id))}
+                        >
+                          ×
+                        </button>
                       </span>
                     ))}
                   </div>

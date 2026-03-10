@@ -144,6 +144,40 @@ enum Commands {
         #[command(subcommand)]
         action: TmuxAction,
     },
+    /// RAG document management — ingest, list, search, delete files
+    #[cfg(feature = "rag")]
+    #[command(alias = "docs")]
+    Rag {
+        #[command(subcommand)]
+        action: RagAction,
+    },
+}
+
+#[cfg(feature = "rag")]
+#[derive(Subcommand)]
+enum RagAction {
+    /// Ingest a file into the RAG store
+    Ingest {
+        /// Path to the file to ingest
+        file: String,
+    },
+    /// List all ingested documents
+    #[command(alias = "ls")]
+    List,
+    /// Search across ingested documents
+    Search {
+        /// Search query
+        query: String,
+        /// Number of results to return
+        #[arg(long, short = 'k', default_value = "5")]
+        top_k: usize,
+    },
+    /// Delete an ingested document by ID
+    #[command(alias = "rm")]
+    Delete {
+        /// Document ID to delete
+        doc_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -824,6 +858,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         Commands::Tmux { action } => {
             cmd_tmux(action).await?;
+        }
+        #[cfg(feature = "rag")]
+        Commands::Rag { action } => {
+            cmd_rag(action)?;
         }
     }
 
@@ -1527,6 +1565,69 @@ async fn cmd_login() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────
+
+/// RAG document management — ingest, list, search, delete.
+#[cfg(feature = "rag")]
+fn cmd_rag(action: RagAction) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let store = open_store()?;
+    let rag = clawdesk_rag::RagManager::new(std::sync::Arc::new(store));
+
+    match action {
+        RagAction::Ingest { file } => {
+            let path = std::path::Path::new(&file);
+            match rag.ingest_file(path) {
+                Ok((doc_id, chunk_count)) => {
+                    let filename = path.file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or(&file);
+                    println!("Ingested \"{filename}\" → {chunk_count} chunks (id: {doc_id})");
+                }
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+        RagAction::List => {
+            let docs = rag.list_documents()?;
+            if docs.is_empty() {
+                println!("No documents ingested.");
+            } else {
+                println!("{:<38} {:<30} {:<8} {:<8} {}", "ID", "FILENAME", "TYPE", "CHUNKS", "SIZE");
+                println!("{}", "-".repeat(90));
+                for doc in &docs {
+                    let size = if doc.size_bytes > 1_048_576 {
+                        format!("{:.1}MB", doc.size_bytes as f64 / 1_048_576.0)
+                    } else {
+                        format!("{}KB", doc.size_bytes / 1024)
+                    };
+                    println!("{:<38} {:<30} {:<8} {:<8} {}",
+                        doc.id, doc.filename, doc.doc_type.label(), doc.chunk_count, size);
+                }
+                println!("\n{} document(s)", docs.len());
+            }
+        }
+        RagAction::Search { query, top_k } => {
+            let results = rag.search(&query, top_k)?;
+            if results.is_empty() {
+                println!("No results for \"{query}\".");
+            } else {
+                for (i, result) in results.iter().enumerate() {
+                    println!("--- Result {} (score: {:.3}, doc: {}) ---", i + 1, result.similarity, result.doc_id);
+                    // Truncate long chunk text for terminal display
+                    let preview: String = result.chunk_text.chars().take(300).collect();
+                    println!("{}", preview);
+                    if result.chunk_text.len() > 300 {
+                        println!("...");
+                    }
+                    println!();
+                }
+            }
+        }
+        RagAction::Delete { doc_id } => {
+            rag.remove_document(&doc_id)?;
+            println!("Deleted document {doc_id}");
+        }
+    }
+    Ok(())
+}
 
 /// Open a SochStore for direct CLI access (config set/get, doctor).
 fn open_store() -> Result<clawdesk_sochdb::SochStore, Box<dyn std::error::Error + Send + Sync>> {
