@@ -772,6 +772,7 @@ async fn apply_budget_truncation(
 // ═══════════════════════════════════════════════════════════
 
 /// Run the unified prompt pipeline and produce the system prompt + memory injection.
+#[allow(dead_code)]
 pub(crate) async fn build_prompt(
     state: &AppState,
     request: &SendMessageRequest,
@@ -861,6 +862,7 @@ pub(crate) async fn build_prompt(
 
 /// Check the semantic cache for a hit. Returns CacheResult::Hit with the response
 /// if found, or CacheResult::Miss to continue to LLM.
+#[allow(dead_code)]
 pub(crate) async fn check_semantic_cache(
     state: &AppState,
     app: &AppHandle,
@@ -949,7 +951,7 @@ pub(crate) async fn check_semantic_cache(
 
 /// Process the agent response: persist, audit, update knowledge graph,
 /// store in cache, record usage, write memory.
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) async fn finalize_response(
     state: &AppState,
     app: &AppHandle,
