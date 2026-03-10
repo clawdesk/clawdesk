@@ -29,21 +29,24 @@
 
 ---
 
-ClawDesk - Agent2OS is a **multi-interface AI agent runtime** that runs locally with full audit trails, identity verification, and zero-trust networking. Built as a **45-crate Rust workspace**, it provides a production-grade agent runtime with:
+ClawDesk - Agent2OS is a personal AI workspace you can run on your own devices. It is built for people who want one place to chat with AI, organize work, automate repetitive tasks, and keep useful assistants available across desktop, terminal, and server environments.
 
-- **Tauri 2.0 Desktop App** — React + TypeScript GUI with 138+ IPC commands and system tray
-- **tmux Desktop Workspace** — 10-screen terminal layout mirroring the Tauri app, perfect for SSH and cloud VMs
-- **TUI Dashboard** — ratatui-based interactive terminal UI with Vim keybindings and 4 themes
-- **CLI** — 40+ commands for scripting, automation, agent REPL, and quick tasks
-- **Gateway Server** — Axum HTTP/WS REST API + OpenAI-compatible endpoints
-- **Daemon** — Background service with platform-native management (launchd/systemd/Windows)
-- **Docker** — Containerized headless deployment
+Instead of switching between browser tabs, hosted tools, scripts, and disconnected bots, ClawDesk gives you a single home for AI-powered work. You can use it as a desktop app, keep it running in the background, connect it to the tools and channels you already use, or run it headless on a remote machine.
+
+With ClawDesk, you can:
+
+- **Talk to AI in a way that fits your workflow** from desktop, terminal, or command line
+- **Automate busywork** such as repeated prompts, routines, checks, and operational tasks
+- **Connect your messaging and work tools** so agents can meet you where work already happens
+- **Keep more control over privacy and setup** by running it on your own machine or server
+- **Use one system across laptop, cloud VM, Raspberry Pi, and Docker** instead of learning separate tools for each place
+- **Run always-on assistants** for background jobs, monitoring, and long-running workflows
 
 Runs on **macOS, Linux, Windows, cloud VMs (AWS/GCP/Azure/DO), Raspberry Pi, and any machine with Rust**.
 
-In short: **ClawDesk is Agent2OS** — a private operating layer for AI agents that can live on your laptop, terminal, server, or edge device instead of being locked into a browser tab or a hosted SaaS product.
+In short: **ClawDesk is Agent2OS** — a private place to run AI assistants for real work, on your computer or infrastructure, in a way that stays close to your tools, your data, and your workflow.
 
-Inspired by [OpenClaw](https://github.com/openclaw/openclaw) — the TypeScript AI agent gateway — ClawDesk reimagines the same powerful concepts (multi-channel messaging, skill orchestration, agent sessions) as a **native, multi-interface runtime** with a pure Rust backend. Less moving parts, fewer dependencies, one binary.
+Inspired by [OpenClaw](https://github.com/openclaw/openclaw), ClawDesk takes the same broad idea of a personal, always-available AI system and pushes it toward a native, local-first experience with fewer moving parts and stronger control over where it runs.
 
 > **Project status:** ClawDesk is in active development. Expect rapid changes, rough edges, incomplete documentation in some areas, and occasional regressions as major features land. If you hit bugs, missing docs, confusing behavior, or platform-specific issues, please report them. Contributors, testers, and feedback from real-world usage are actively wanted.
 
@@ -51,23 +54,25 @@ Inspired by [OpenClaw](https://github.com/openclaw/openclaw) — the TypeScript 
 
 > **Simplify. Reduce friction. Ship one binary.**
 
-OpenClaw is incredibly capable — but running a Node.js gateway, wiring up channels, and managing configs can be a lot of moving parts. ClawDesk's goal is to take those same ideas and collapse them into a single desktop app that just works:
+ClawDesk exists to make powerful AI tooling feel more like a real product and less like a pile of parts. The goal is simple: give one system that can be easy enough for everyday use, but flexible enough for automation, remote machines, and serious long-running work.
 
-- **No gateway to run** — the Tauri app _is_ the runtime (or run the gateway server standalone for headless deployments).
-- **No config files to write** — everything is managed through the UI, CLI, or TOML config.
-- **No separate daemon** — agents, skills, channels, and storage live in one process (or run as a daemon for always-on deployments).
-- **No runtime dependencies** — Rust compiles to a single native binary. No Node.js, no Python, no Docker required.
-- **No display required** — tmux, TUI, CLI, gateway, and daemon modes run headless on servers, VMs, and edge devices.
+- **Start from a desktop app when you want something simple**
+- **Drop to the terminal when you want more control**
+- **Run it in the background when you need always-on behavior**
+- **Use the same core system across personal devices, servers, and edge hardware**
+- **Avoid getting locked into a single model, a single interface, or a hosted service**
 
 ## Why ClawDesk
 
-- **Your machine, your data.** Agents run locally — no cloud roundtrips, no data leaving your device unless you choose to.
-- **Defense-in-depth by default.** CascadeScanner, SHA-256 audit chain, scoped tokens, and identity contracts ship with every build.
-- **Multi-model, no lock-in.** Swap between Claude, OpenAI, Gemini, Bedrock, and Ollama via a single provider trait.
-- **One binary, full stack.** 45 Rust crates compile into a single binary — agents, skills, security, tunnels, and UI included.
-- **Runs anywhere.** Desktop (Tauri), terminal (tmux/TUI), CLI, gateway server, daemon, Docker, cloud VMs, Raspberry Pi.
+- **It stays close to how you already work.** Desktop when you want visuals, terminal when you want speed, background services when you want automation.
+- **It keeps you in control.** You choose where it runs, which models it uses, and how your data flows.
+- **It is built for more than chat.** ClawDesk is meant for ongoing tasks, workflows, tools, channels, and assistants that keep working after one prompt.
+- **It scales from personal use to serious setups.** Start on a laptop, then move the same system to a server, VM, Docker host, or Raspberry Pi.
+- **It does not trap you in one surface.** Use the GUI, CLI, tmux workspace, TUI, gateway, or daemon depending on the job.
 
 ## Features
+
+ClawDesk is designed to be useful to both everyday users and technical operators. You can ignore the deeper internals at first and simply think of it as one system for AI chat, automation, connected tools, and long-running assistants.
 
 | | |
 |---|---|
