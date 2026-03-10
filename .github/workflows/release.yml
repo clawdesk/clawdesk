@@ -28,7 +28,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             artifact: clawdesk-darwin-amd64
           - target: aarch64-apple-darwin
             os: macos-14
@@ -82,6 +82,72 @@ jobs:
           fi
           cp "$SRC" "${{ matrix.artifact }}"
 
+      # ── macOS signing + notarization (skipped if cert secret absent) ──
+      - name: Import Apple certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "No APPLE_CERTIFICATE secret — skipping signing"
+            exit 0
+          fi
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      - name: Sign and notarize macOS CLI binary
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "No APPLE_CERTIFICATE secret — skipping signing"
+            exit 0
+          fi
+          BINARY="${{ matrix.artifact }}"
+          chmod +x "$BINARY"
+
+          # Sign with hardened runtime (required for notarization)
+          codesign --force --options runtime --timestamp \
+            --sign "Developer ID Application" \
+            "$BINARY"
+          codesign --verify --verbose=2 "$BINARY"
+          echo "Signed: $BINARY"
+
+          # Notarize — Apple records the signature; no stapling on plain binaries
+          zip "${BINARY}.zip" "$BINARY"
+          xcrun notarytool submit "${BINARY}.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --timeout 300 2>&1 | tee /tmp/notarize-cli.txt
+          if grep -q 'status: Invalid' /tmp/notarize-cli.txt; then
+            echo "::error::Notarization failed"
+            exit 1
+          fi
+          rm "${BINARY}.zip"
+          echo "Notarized: $BINARY"
+
+      - name: Cleanup keychain
+        if: runner.os == 'macOS' && always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
+          rm -f $RUNNER_TEMP/certificate.p12
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -109,6 +175,63 @@ jobs:
           lipo -create -output clawdesk-darwin-universal \
             clawdesk-darwin-amd64 clawdesk-darwin-arm64
           chmod +x clawdesk-darwin-universal
+
+      - name: Import Apple certificate (universal)
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "No APPLE_CERTIFICATE secret — skipping signing"
+            exit 0
+          fi
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      - name: Sign and notarize universal binary
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "No APPLE_CERTIFICATE secret — skipping signing"
+            exit 0
+          fi
+          codesign --force --options runtime --timestamp \
+            --sign "Developer ID Application" \
+            clawdesk-darwin-universal
+          codesign --verify --verbose=2 clawdesk-darwin-universal
+
+          zip clawdesk-darwin-universal.zip clawdesk-darwin-universal
+          xcrun notarytool submit clawdesk-darwin-universal.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --timeout 300 2>&1 | tee /tmp/notarize-uni.txt
+          if grep -q 'status: Invalid' /tmp/notarize-uni.txt; then
+            echo "::error::Universal binary notarization failed"
+            exit 1
+          fi
+          rm clawdesk-darwin-universal.zip
+          echo "Universal binary signed and notarized"
+
+      - name: Cleanup keychain (universal)
+        if: always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
+          rm -f $RUNNER_TEMP/certificate.p12
 
       - name: Upload universal binary
         uses: actions/upload-artifact@v4
