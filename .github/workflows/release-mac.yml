@@ -145,9 +145,9 @@ jobs:
               "$lib"
           done
 
-          # 2. Sign sidecar executables (llama-server, etc.)
-          echo "=== Signing sidecar binaries ==="
-          find "$APP_PATH/Contents/Resources" -type f -perm +111 ! -name '*.dylib' -print0 2>/dev/null | while IFS= read -r -d '' bin; do
+          # 2. Sign all executables in Contents/MacOS (llama-server, main binary, etc.)
+          echo "=== Signing MacOS binaries ==="
+          find "$APP_PATH/Contents/MacOS" -type f -perm +111 ! -name '*.dylib' -print0 2>/dev/null | while IFS= read -r -d '' bin; do
             echo "  Signing: $bin"
             codesign --force --options runtime --timestamp \
               --sign "$IDENTITY" \
@@ -155,15 +155,15 @@ jobs:
               "$bin"
           done
 
-          # 3. Sign the main executable
-          echo "=== Signing main executable ==="
-          MAIN_BIN="$APP_PATH/Contents/MacOS/clawdesk-tauri"
-          if [[ -f "$MAIN_BIN" ]]; then
+          # 3. Sign sidecar executables in Contents/Resources (if any)
+          echo "=== Signing Resources binaries ==="
+          find "$APP_PATH/Contents/Resources" -type f -perm +111 ! -name '*.dylib' -print0 2>/dev/null | while IFS= read -r -d '' bin; do
+            echo "  Signing: $bin"
             codesign --force --options runtime --timestamp \
               --sign "$IDENTITY" \
               --entitlements "$ENTITLEMENTS" \
-              "$MAIN_BIN"
-          fi
+              "$bin"
+          done
 
           # 4. Sign the app bundle itself
           echo "=== Signing app bundle ==="

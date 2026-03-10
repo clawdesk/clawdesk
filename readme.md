@@ -630,3 +630,8 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 - [OpenClaw](https://github.com/openclaw/openclaw) — The original AI agent gateway (TypeScript) that inspired ClawDesk's architecture, skill system, and channel abstractions.
 - [SochDB](https://github.com/sochdb/sochdb) — Embedded ACID vector database powering all of ClawDesk's persistent storage.
 - [Tauri](https://tauri.app/) — Desktop app framework that makes single-binary native apps possible.
+- [llmfit](https://github.com/AlexsJones/llmfit) — LLM fine-tuning toolkit.
+- [llama-swap](https://github.com/mostlygeek/llama-swap) — Hot-swap proxy for llama.cpp model serving.
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) — The inference engine behind ClawDesk's local model support.
+- [pi-mono](https://github.com/badlogic/pi-mono) — Minimal monorepo toolkit for Raspberry Pi deployments.
+- [agency-agents](https://github.com/msitarzewski/agency-agents) — Multi-agent orchestration patterns.
