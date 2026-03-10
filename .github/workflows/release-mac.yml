@@ -112,17 +112,69 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
 
-      # Sign the .app with Developer ID certificate
+      # Sign all binaries individually with hardened runtime
       - name: Code sign app bundle
         run: |
           APP_PATH=$(find target/${{ matrix.target }}/release/bundle/macos -name "*.app" -maxdepth 1 | head -1)
-          echo "Signing: $APP_PATH"
-          codesign --force --options runtime --deep \
-            --sign "Developer ID Application" \
-            --timestamp \
+          echo "App: $APP_PATH"
+
+          # Create entitlements for hardened runtime
+          cat > $RUNNER_TEMP/entitlements.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+            <true/>
+            <key>com.apple.security.cs.disable-library-validation</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+          IDENTITY="Developer ID Application"
+          ENTITLEMENTS="$RUNNER_TEMP/entitlements.plist"
+
+          # 1. Sign all dylibs first (innermost out)
+          echo "=== Signing dylibs ==="
+          find "$APP_PATH" -name '*.dylib' -print0 | while IFS= read -r -d '' lib; do
+            echo "  Signing: $lib"
+            codesign --force --options runtime --timestamp \
+              --sign "$IDENTITY" \
+              --entitlements "$ENTITLEMENTS" \
+              "$lib"
+          done
+
+          # 2. Sign sidecar executables (llama-server, etc.)
+          echo "=== Signing sidecar binaries ==="
+          find "$APP_PATH/Contents/Resources" -type f -perm +111 ! -name '*.dylib' -print0 2>/dev/null | while IFS= read -r -d '' bin; do
+            echo "  Signing: $bin"
+            codesign --force --options runtime --timestamp \
+              --sign "$IDENTITY" \
+              --entitlements "$ENTITLEMENTS" \
+              "$bin"
+          done
+
+          # 3. Sign the main executable
+          echo "=== Signing main executable ==="
+          MAIN_BIN="$APP_PATH/Contents/MacOS/clawdesk-tauri"
+          if [[ -f "$MAIN_BIN" ]]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$IDENTITY" \
+              --entitlements "$ENTITLEMENTS" \
+              "$MAIN_BIN"
+          fi
+
+          # 4. Sign the app bundle itself
+          echo "=== Signing app bundle ==="
+          codesign --force --options runtime --timestamp \
+            --sign "$IDENTITY" \
+            --entitlements "$ENTITLEMENTS" \
             "$APP_PATH"
-          echo "Signed with Developer ID"
-          codesign --verify --verbose "$APP_PATH"
+
+          echo "=== Verification ==="
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          echo "All signatures valid"
 
       # Re-create DMG with signed app and sign the DMG itself
       - name: Create signed DMG
@@ -144,11 +196,27 @@ jobs:
           DMG_PATH=$(find target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" | head -1)
           echo "Submitting for notarization: $DMG_PATH"
 
+          # Submit and capture output for the submission ID
           xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait --timeout 600
+            --wait --timeout 600 2>&1 | tee /tmp/notarize-output.txt
+
+          # Check if notarization succeeded
+          if grep -q 'status: Invalid' /tmp/notarize-output.txt; then
+            echo "::error::Notarization failed with Invalid status"
+            # Extract submission ID and fetch the detailed log
+            SUBMISSION_ID=$(grep 'id:' /tmp/notarize-output.txt | head -1 | awk '{print $2}')
+            if [[ -n "$SUBMISSION_ID" ]]; then
+              echo "=== Notarization Log (submission $SUBMISSION_ID) ==="
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_ID_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" || true
+            fi
+            exit 1
+          fi
 
           xcrun stapler staple "$DMG_PATH"
           echo "Notarized and stapled"
