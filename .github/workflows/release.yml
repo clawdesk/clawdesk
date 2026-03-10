@@ -40,12 +40,6 @@ jobs:
             os: ubuntu-latest
             artifact: clawdesk-linux-arm64
             cross: true
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            artifact: clawdesk-windows-amd64.exe
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            artifact: clawdesk-windows-arm64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -194,11 +188,8 @@ jobs:
             artifacts/clawdesk-darwin-universal/clawdesk-darwin-universal
             artifacts/clawdesk-linux-amd64/clawdesk-linux-amd64
             artifacts/clawdesk-linux-arm64/clawdesk-linux-arm64
-            artifacts/clawdesk-windows-amd64.exe/clawdesk-windows-amd64.exe
-            artifacts/clawdesk-windows-arm64.exe/clawdesk-windows-arm64.exe
             artifacts/checksums.sha256
             scripts/install.sh
-            scripts/install.ps1
 
   # ── Verify Install Script ───────────────────────────────────
 

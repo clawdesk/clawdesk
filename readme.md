@@ -341,6 +341,8 @@ cargo tauri build
 
 ### CLI Quick Start
 
+Prebuilt CLI binaries are currently published for macOS and Linux. Windows CLI binaries are coming soon.
+
 ```bash
 # Build the CLI
 cargo build -p clawdesk-cli
