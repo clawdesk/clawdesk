@@ -51,7 +51,7 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: 'crates/clawdesk-tauri -> target'
+          workspaces: '. -> target'
           cache-targets: true
 
       - name: Cache Cargo bin
@@ -69,7 +69,7 @@ jobs:
         run: pnpm run build
 
       - name: Download llama-server sidecar
-        run: bash scripts/download-llama-server.sh
+        run: bash scripts/download-llama-server.sh --target ${{ matrix.target }}
 
       - name: Install Tauri CLI
         run: |
@@ -115,7 +115,7 @@ jobs:
       # Sign the .app with Developer ID certificate
       - name: Code sign app bundle
         run: |
-          APP_PATH=$(find crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app" -maxdepth 1 | head -1)
+          APP_PATH=$(find target/${{ matrix.target }}/release/bundle/macos -name "*.app" -maxdepth 1 | head -1)
           echo "Signing: $APP_PATH"
           codesign --force --options runtime --deep \
             --sign "Developer ID Application" \
@@ -127,8 +127,8 @@ jobs:
       # Re-create DMG with signed app and sign the DMG itself
       - name: Create signed DMG
         run: |
-          DMG_PATH=$(find crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" | head -1)
-          APP_PATH=$(find crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app" -maxdepth 1 | head -1)
+          DMG_PATH=$(find target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" | head -1)
+          APP_PATH=$(find target/${{ matrix.target }}/release/bundle/macos -name "*.app" -maxdepth 1 | head -1)
           rm -f "$DMG_PATH"
           hdiutil create -volname "ClawDesk" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
           codesign --force --sign "Developer ID Application" --timestamp "$DMG_PATH"
@@ -141,7 +141,7 @@ jobs:
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          DMG_PATH=$(find crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" | head -1)
+          DMG_PATH=$(find target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" | head -1)
           echo "Submitting for notarization: $DMG_PATH"
 
           xcrun notarytool submit "$DMG_PATH" \
@@ -162,8 +162,8 @@ jobs:
       # ── Normalize artifact names ────────────────────────────
       - name: Normalize macOS artifact names
         run: |
-          DMG_DIR="crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/dmg"
-          BUNDLE_DIR="crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          DMG_DIR="target/${{ matrix.target }}/release/bundle/dmg"
+          BUNDLE_DIR="target/${{ matrix.target }}/release/bundle/macos"
           if [[ "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
             ARCH_SUFFIX="aarch64"
           else
@@ -189,9 +189,9 @@ jobs:
         with:
           name: ClawDesk-${{ matrix.target }}
           path: |
-            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/dmg/ClawDesk_*.dmg
-            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz
-            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz.sig
+            target/${{ matrix.target }}/release/bundle/dmg/ClawDesk_*.dmg
+            target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz
+            target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz.sig
           if-no-files-found: error
 
       - name: Create Release & Upload
@@ -204,8 +204,8 @@ jobs:
           overwrite_files: true
           generate_release_notes: true
           files: |
-            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/dmg/ClawDesk_*.dmg
-            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz
-            crates/clawdesk-tauri/target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz.sig
+            target/${{ matrix.target }}/release/bundle/dmg/ClawDesk_*.dmg
+            target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz
+            target/${{ matrix.target }}/release/bundle/macos/ClawDesk_*.app.tar.gz.sig
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

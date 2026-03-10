@@ -21,17 +21,41 @@ FORCE="${FORCE:-false}"
 REPO="ggml-org/llama.cpp"
 
 # Parse CLI args
+OVERRIDE_TARGET=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) LLAMA_CPP_VERSION="$2"; shift 2;;
     --force)   FORCE=true; shift;;
+    --target)  OVERRIDE_TARGET="$2"; shift 2;;
     *)         echo "Unknown arg: $1"; exit 1;;
   esac
 done
 
 # ── Detect platform ───────────────────────────────────────────────────────
-OS="$(uname -s)"
-ARCH="$(uname -m)"
+# If --target is given (e.g. x86_64-apple-darwin), derive OS/ARCH from it
+# instead of from the host. This supports cross-compilation in CI.
+if [[ -n "${OVERRIDE_TARGET}" ]]; then
+  case "${OVERRIDE_TARGET}" in
+    aarch64-apple-darwin)
+      OS="Darwin"; ARCH="arm64";;
+    x86_64-apple-darwin)
+      OS="Darwin"; ARCH="x86_64";;
+    x86_64-unknown-linux-gnu)
+      OS="Linux"; ARCH="x86_64";;
+    aarch64-unknown-linux-gnu)
+      OS="Linux"; ARCH="aarch64";;
+    x86_64-pc-windows-msvc)
+      OS="MINGW64_NT"; ARCH="x86_64";;
+    aarch64-pc-windows-msvc)
+      OS="MINGW64_NT"; ARCH="aarch64";;
+    *)
+      echo "ERROR: Unsupported --target: ${OVERRIDE_TARGET}"
+      exit 1;;
+  esac
+else
+  OS="$(uname -s)"
+  ARCH="$(uname -m)"
+fi
 
 case "${OS}-${ARCH}" in
   Darwin-arm64)

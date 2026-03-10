@@ -42,7 +42,7 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: 'crates/clawdesk-tauri -> target'
+          workspaces: '. -> target'
           cache-targets: true
 
       - name: Cache Cargo bin
@@ -88,8 +88,8 @@ jobs:
       # ── Normalize artifact names ────────────────────────────
       - name: Normalize Linux artifact names
         run: |
-          APP_DIR="crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage"
-          DEB_DIR="crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb"
+          APP_DIR="target/x86_64-unknown-linux-gnu/release/bundle/appimage"
+          DEB_DIR="target/x86_64-unknown-linux-gnu/release/bundle/deb"
 
           APPIMAGE=$(ls -1 "$APP_DIR"/*.AppImage 2>/dev/null | head -1 || true)
           if [[ -n "$APPIMAGE" ]]; then
@@ -119,11 +119,11 @@ jobs:
         with:
           name: ClawDesk-x86_64-unknown-linux-gnu
           path: |
-            crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage
-            crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz
-            crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz.sig
-            crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.sig
-            crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/ClawDesk_amd64.deb
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz.sig
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.sig
+            target/x86_64-unknown-linux-gnu/release/bundle/deb/ClawDesk_amd64.deb
           if-no-files-found: error
 
       - name: Create Release & Upload
@@ -136,10 +136,10 @@ jobs:
           overwrite_files: true
           generate_release_notes: true
           files: |
-            crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage
-            crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz
-            crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz.sig
-            crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.sig
-            crates/clawdesk-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/ClawDesk_amd64.deb
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.tar.gz.sig
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/ClawDesk_amd64.AppImage.sig
+            target/x86_64-unknown-linux-gnu/release/bundle/deb/ClawDesk_amd64.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -42,7 +42,7 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: 'crates/clawdesk-tauri -> target'
+          workspaces: '. -> target'
           cache-targets: true
 
       - name: Cache Cargo bin
@@ -81,8 +81,8 @@ jobs:
       - name: Normalize Windows artifact names
         shell: bash
         run: |
-          MSI_DIR="crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi"
-          NSIS_DIR="crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          MSI_DIR="target/x86_64-pc-windows-msvc/release/bundle/msi"
+          NSIS_DIR="target/x86_64-pc-windows-msvc/release/bundle/nsis"
 
           EXE=$(ls -1 "$NSIS_DIR"/*.exe 2>/dev/null | head -1 || true)
           if [[ -n "$EXE" ]]; then
@@ -115,12 +115,12 @@ jobs:
         with:
           name: ClawDesk-x86_64-pc-windows-msvc
           path: |
-            crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/ClawDesk_x64_en-US.msi
-            crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/ClawDesk_x64_en-US.msi.zip
-            crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/ClawDesk_x64_en-US.msi.zip.sig
-            crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.exe
-            crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.nsis.zip
-            crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.nsis.zip.sig
+            target/x86_64-pc-windows-msvc/release/bundle/msi/ClawDesk_x64_en-US.msi
+            target/x86_64-pc-windows-msvc/release/bundle/msi/ClawDesk_x64_en-US.msi.zip
+            target/x86_64-pc-windows-msvc/release/bundle/msi/ClawDesk_x64_en-US.msi.zip.sig
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.exe
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.nsis.zip
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.nsis.zip.sig
           if-no-files-found: error
 
       - name: Create Release & Upload
@@ -133,9 +133,9 @@ jobs:
           overwrite_files: true
           generate_release_notes: true
           files: |
-            crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/ClawDesk_x64_en-US.msi
-            crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.exe
-            crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.nsis.zip
-            crates/clawdesk-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.nsis.zip.sig
+            target/x86_64-pc-windows-msvc/release/bundle/msi/ClawDesk_x64_en-US.msi
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.exe
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.nsis.zip
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/ClawDesk_x64-setup.nsis.zip.sig
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
