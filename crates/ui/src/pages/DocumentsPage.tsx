@@ -22,6 +22,17 @@ export function DocumentsPage({ pushToast }: Props) {
   const [chunks, setChunks] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
 
+  const refresh = useCallback(async () => {
+    try {
+      const docs = await api.ragListDocuments();
+      setDocuments(docs);
+    } catch (e) {
+      console.error("Failed to load documents:", e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   const ingestPaths = useCallback(async (paths: string[]) => {
     if (!paths.length) return;
     setUploading(true);
@@ -38,17 +49,6 @@ export function DocumentsPage({ pushToast }: Props) {
     if (successCount > 0) refresh();
     setUploading(false);
   }, [pushToast, refresh]);
-
-  const refresh = useCallback(async () => {
-    try {
-      const docs = await api.ragListDocuments();
-      setDocuments(docs);
-    } catch (e) {
-      console.error("Failed to load documents:", e);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 

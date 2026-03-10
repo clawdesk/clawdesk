@@ -123,10 +123,14 @@ Click on your agent to open a chat. Type a message and press Enter. You'll see:
 - **Automations** — Set up cron-triggered agent tasks
 - **Canvas** — Create structured documents with AI assistance
 - **Memory** — The agent remembers past conversations via the memory system
-- **tmux Workspace** — Launch `clawdesk tmux setup` for a multi-pane terminal development environment
+- **tmux Workspace** — Launch `clawdesk tmux setup` for the full 10-screen terminal control plane (see [CLI Guide](cli-guide.md))
 - **Terminal UI** — Run `clawdesk tui` for a ratatui-based dashboard with Vim keybindings
+- **Daemon Mode** — Run agents as a persistent service with `clawdesk daemon install && clawdesk daemon start`
 - **Security Audit** — Run `clawdesk security audit --deep` to scan for security issues
+- **Encrypted Backups** — `clawdesk config backup` creates AES-encrypted snapshots
 - **Shell Completions** — Generate with `clawdesk completions bash` (or zsh, fish, powershell)
+
+> **Operator workflow?** The [CLI Guide](cli-guide.md) covers five golden paths: first run, daily use, service mode, security & compliance, and upgrades — all built around tmux-native workflows.
 
 ## Directory Structure
 
@@ -172,6 +176,8 @@ This checks:
 
 ## Next Steps
 
+- [CLI Guide](cli-guide.md) — Golden-path workflows: first run, daily use, service mode, security, upgrades
+- [tmux Desktop Guide](tmux-workspace.md) — Full 10-screen terminal control plane
 - [Agent System](agent-system.md) — Learn how the agent runner works
 - [Skills & Plugins](skills-and-plugins.md) — Extend agent capabilities
 - [Channels & Messaging](channels-and-messaging.md) — Connect to Slack, Discord, Telegram, etc.

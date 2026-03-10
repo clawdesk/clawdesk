@@ -6,9 +6,10 @@ Welcome to the ClawDesk documentation. ClawDesk is a privacy-first, security-har
 
 | Document | Description |
 |----------|-------------|
-| [Architecture Overview](architecture.md) | System architecture, crate structure, data flow |
 | [Getting Started](getting-started.md) | Installation, first run, creating your first agent |
+| [CLI Guide](cli-guide.md) | Golden-path workflows: first run, daily use, service mode, security, upgrades |
 | [tmux Desktop Guide](tmux-workspace.md) | tmux 10-screen desktop experience mirroring Tauri, onboarding, presets |
+| [Architecture Overview](architecture.md) | System architecture, crate structure, data flow |
 | [Agent System](agent-system.md) | Agent runner, pipelines, failover, tools, context management |
 | [Memory System](memory-system.md) | Embeddings, hybrid search, memory lifecycle |
 | [Skills & Plugins](skills-and-plugins.md) | Skill authoring, registry, triggers, plugin hooks |

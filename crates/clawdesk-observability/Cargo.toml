@@ -24,6 +24,7 @@ opentelemetry-http = { workspace = true }
 
 # HTTP client for sending traces
 reqwest = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

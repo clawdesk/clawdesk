@@ -34,10 +34,10 @@ pub struct ModelPricing {
 impl ModelPricing {
     /// Calculate cost for a given token usage.
     pub fn calculate_cost(&self, usage: &TokenUsage) -> f64 {
-        let input_cost = (usage.prompt_tokens as f64) * self.input_per_million / 1_000_000.0;
-        let output_cost = (usage.completion_tokens as f64) * self.output_per_million / 1_000_000.0;
+        let input_cost = (usage.input_tokens as f64) * self.input_per_million / 1_000_000.0;
+        let output_cost = (usage.output_tokens as f64) * self.output_per_million / 1_000_000.0;
         let cached_cost = if let (Some(cached_rate), Some(cached_tokens)) =
-            (self.cached_per_million, usage.cached_tokens)
+            (self.cached_per_million, usage.cache_read_tokens)
         {
             (cached_tokens as f64) * cached_rate / 1_000_000.0
         } else {
@@ -277,8 +277,8 @@ impl CostAggregator {
         // Update total
         self.total.total_cost_usd += record.cost_usd;
         self.total.total_requests += 1;
-        self.total.total_input_tokens += record.usage.prompt_tokens as u64;
-        self.total.total_output_tokens += record.usage.completion_tokens as u64;
+        self.total.total_input_tokens += record.usage.input_tokens;
+        self.total.total_output_tokens += record.usage.output_tokens;
         if self.total.total_requests > 0 {
             self.total.avg_cost_per_request =
                 self.total.total_cost_usd / self.total.total_requests as f64;
@@ -289,8 +289,8 @@ impl CostAggregator {
         let summary = map.entry(key.to_string()).or_default();
         summary.total_cost_usd += record.cost_usd;
         summary.total_requests += 1;
-        summary.total_input_tokens += record.usage.prompt_tokens as u64;
-        summary.total_output_tokens += record.usage.completion_tokens as u64;
+        summary.total_input_tokens += record.usage.input_tokens;
+        summary.total_output_tokens += record.usage.output_tokens;
         if summary.total_requests > 0 {
             summary.avg_cost_per_request =
                 summary.total_cost_usd / summary.total_requests as f64;
@@ -345,9 +345,10 @@ mod tests {
             cached_per_million: None,
         };
         let usage = TokenUsage {
-            prompt_tokens: 1000,
-            completion_tokens: 500,
-            cached_tokens: None,
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
         };
         let cost = pricing.calculate_cost(&usage);
         // 1000 * 2.50/1M + 500 * 10.00/1M = 0.0025 + 0.005 = 0.0075
@@ -413,9 +414,10 @@ mod tests {
             provider: "openai".into(),
             model: "gpt-4o".into(),
             usage: TokenUsage {
-                prompt_tokens: 1000,
-                completion_tokens: 500,
-                cached_tokens: None,
+                input_tokens: 1000,
+                output_tokens: 500,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
             },
             cost_usd: 0.0075,
             timestamp: 0,

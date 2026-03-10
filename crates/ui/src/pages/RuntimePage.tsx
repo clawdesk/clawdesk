@@ -547,7 +547,7 @@ export function RuntimePage({ pushToast, agents: agentsProp }: RuntimePageProps)
         id: m.id,
         role: m.role as "user" | "assistant" | "system",
         text: m.content,
-        time: m.created_at ? new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "",
+        time: m.timestamp ? new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "",
         tokens: m.metadata?.token_cost,
         cost: m.metadata?.cost_usd,
         duration: m.metadata?.duration_ms,

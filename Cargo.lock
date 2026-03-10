@@ -1719,6 +1719,7 @@ name = "clawdesk-observability"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry-otlp",
