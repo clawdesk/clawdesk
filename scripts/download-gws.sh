@@ -66,6 +66,7 @@ fi
 
 SIDECAR_NAME="gws-${TARGET}"
 DEST="$BINARIES_DIR/$SIDECAR_NAME"
+LICENSE_DEST="$BINARIES_DIR/GWS-LICENSE"
 mkdir -p "$BINARIES_DIR"
 
 echo "=== Google Workspace CLI (gws) ==="
@@ -126,10 +127,27 @@ elif [[ "$MODE" == "download" ]]; then
 
   if [[ "$ASSET" == *.tar.gz ]]; then
     tar -xzf "$TMPDIR/$ASSET" -C "$TMPDIR"
-    cp "$TMPDIR/gws" "$DEST"
   elif [[ "$ASSET" == *.zip ]]; then
     unzip -o "$TMPDIR/$ASSET" -d "$TMPDIR"
-    cp "$TMPDIR/gws.exe" "$DEST"
+  fi
+
+  if [[ "$TARGET" == *windows* ]]; then
+    EXTRACTED_BIN=$(find "$TMPDIR" -type f -name 'gws.exe' -print -quit)
+  else
+    EXTRACTED_BIN=$(find "$TMPDIR" -type f -name 'gws' -print -quit)
+  fi
+
+  if [[ -z "${EXTRACTED_BIN:-}" ]]; then
+    echo "ERROR: Downloaded archive did not contain a gws binary"
+    find "$TMPDIR" -maxdepth 3 -type f | sed "s#^#  - #"
+    exit 1
+  fi
+
+  cp "$EXTRACTED_BIN" "$DEST"
+
+  EXTRACTED_LICENSE=$(find "$TMPDIR" -type f -name 'LICENSE' -print -quit)
+  if [[ -n "${EXTRACTED_LICENSE:-}" ]]; then
+    cp "$EXTRACTED_LICENSE" "$LICENSE_DEST"
   fi
 fi
 
@@ -137,7 +155,7 @@ chmod +x "$DEST"
 
 # Copy license alongside (Apache-2.0 requires distribution of license)
 if [[ -f "$GWS_SOURCE/LICENSE" ]]; then
-  cp "$GWS_SOURCE/LICENSE" "$BINARIES_DIR/GWS-LICENSE"
+  cp "$GWS_SOURCE/LICENSE" "$LICENSE_DEST"
 fi
 
 echo ""
