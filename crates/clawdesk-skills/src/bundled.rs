@@ -60,17 +60,24 @@ pub fn load_bundled_skills() -> SkillRegistry {
     registry
 }
 
-/// Return all 15 bundled core skills.
+/// Return all bundled core skills.
+///
+/// Note: email-compose, calendar, and tasks are excluded because they
+/// conflict with extension-provided skills (gws-gmail, gws-calendar,
+/// gws-tasks). The "Configured Extensions" section in the system prompt
+/// tells the LLM which services are available. Generic skills would
+/// cause the agent to suggest `gcalcli` or generic email advice instead
+/// of using the configured extension.
 pub fn all_bundled_skills() -> Vec<Skill> {
     vec![
         web_search(),
         code_analysis(),
         file_operations(),
-        email_compose(),
+        // email_compose() — removed: conflicts with gws-gmail, himalaya, etc.
         summarization(),
         translation(),
-        task_management(),
-        calendar_awareness(),
+        // task_management() — removed: conflicts with gws-tasks, todoist, etc.
+        // calendar_awareness() — removed: conflicts with gws-calendar, etc.
         memory_recall(),
         creative_writing(),
         image_description(),
@@ -484,7 +491,7 @@ mod tests {
     #[test]
     fn bundled_skills_count() {
         let skills = all_bundled_skills();
-        assert_eq!(skills.len(), 15, "expected 15 bundled skills");
+        assert_eq!(skills.len(), 12, "expected 12 bundled skills (email/calendar/tasks removed)");
     }
 
     #[test]
@@ -493,7 +500,7 @@ mod tests {
         let mut ids: Vec<String> = skills.iter().map(|s| s.manifest.id.0.clone()).collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 15, "skill IDs must be unique");
+        assert_eq!(ids.len(), 12, "skill IDs must be unique");
     }
 
     #[test]
@@ -510,11 +517,10 @@ mod tests {
     #[test]
     fn bundled_registry_load() {
         let registry = load_bundled_skills();
-        // 15 core + 6 design + 52 embedded legacy skills
-        // Use >= to be resilient to future additions
+        // 12 core + 6 design + 92 embedded legacy skills (gog removed)
         assert!(
-            registry.len() >= 70,
-            "expected 70+ skills in registry, got {}",
+            registry.len() >= 100,
+            "expected 100+ skills in registry, got {}",
             registry.len()
         );
     }

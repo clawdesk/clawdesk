@@ -65,7 +65,7 @@ impl EnrichedBackend {
             memory,
             skill_registry,
             provider,
-            default_persona: "You are a helpful assistant.".into(),
+            default_persona: clawdesk_types::session::DEFAULT_SYSTEM_PROMPT.into(),
             model_name: "claude-sonnet-4-20250514".into(),
             context_limit: 128_000,
         }

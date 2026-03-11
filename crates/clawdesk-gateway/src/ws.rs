@@ -35,6 +35,9 @@ struct WsRequest {
     session_id: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// Optional agent ID to select a specific agent from the registry.
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 /// Outgoing WebSocket message to a client.
@@ -216,6 +219,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<GatewayState>) {
                         message: text.to_string(),
                         session_id: None,
                         model: None,
+                        agent_id: None,
                     },
                 };
 
@@ -265,13 +269,30 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<GatewayState>) {
                 //
                 // Loads the provider from state, creates a ProviderRequest from
                 // session history, and streams chunks through the WebSocket.
-                // Falls back to a placeholder when no provider is configured.
+                // Resolves the system prompt from the agent registry so the LLM
+                // has proper identity and capabilities. Falls back to a
+                // placeholder when no provider is configured.
                 let reply_text = {
                     let history = state
                         .store
-                        .load_history(&session_key, 10)
+                        .load_history(&session_key, 50)
                         .await
                         .unwrap_or_default();
+
+                    // Resolve system prompt from agent registry.
+                    let system_prompt = {
+                        let registry = state.agent_registry.load();
+                        let snapshot = req.agent_id.as_deref()
+                            .and_then(|id| registry.get(id))
+                            .or_else(|| registry.get("default"))
+                            .or_else(|| registry.values().next());
+                        match snapshot {
+                            Some(agent) => Some(agent.system_prompt.clone()),
+                            None => Some(
+                                clawdesk_types::session::DEFAULT_SYSTEM_PROMPT.to_string()
+                            ),
+                        }
+                    };
 
                     let providers = state.providers.load();
                     if let Some(provider) = providers.default_provider() {
@@ -300,7 +321,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<GatewayState>) {
                                 .and_then(|e| e.session.model.clone())
                                 .unwrap_or_else(|| "default".to_string()),
                             messages,
-                            system_prompt: None,
+                            system_prompt,
                             max_tokens: None,
                             temperature: None,
                             tools: vec![],

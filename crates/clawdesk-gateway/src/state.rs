@@ -135,6 +135,11 @@ pub struct GatewayState {
     /// Browser session manager for CDP-based automation.
     #[cfg(feature = "browser")]
     pub browser_manager: Arc<clawdesk_browser::BrowserManager>,
+
+    // --- Plugin hook lifecycle ---
+    /// Hook manager for plugin lifecycle dispatch.
+    /// Wired into AgentRunner for before/after agent, tool, compaction hooks.
+    pub hook_manager: Arc<clawdesk_plugin::HookManager>,
 }
 
 impl GatewayState {
@@ -221,6 +226,7 @@ impl GatewayState {
             },
             #[cfg(feature = "browser")]
             browser_manager: clawdesk_browser::BrowserManager::new(clawdesk_browser::manager::BrowserConfig::default()),
+            hook_manager: Arc::new(clawdesk_plugin::HookManager::new()),
         }
     }
 
@@ -231,18 +237,22 @@ impl GatewayState {
 
     /// Hot-reload skills from the filesystem.
     ///
-    /// 1. `SkillLoader` re-scans `~/.clawdesk/skills/`
-    /// 2. Builds a fresh `SkillRegistry`
+    /// 1. Starts with bundled skills (embedded in binary)
+    /// 2. `SkillLoader` re-scans `~/.clawdesk/skills/` and merges
     /// 3. Atomically swaps via `ArcSwap`
     ///
     /// Returns `(loaded_count, errors)`.
     pub async fn reload_skills(&self) -> (usize, Vec<String>) {
-        let result = self.skill_loader.load_fresh(true).await;
-        let loaded = result.loaded;
-        let errors = result.errors;
-        info!(loaded, errors = errors.len(), "skills hot-reloaded");
-        self.skills.store(Arc::new(result.registry));
-        (loaded, errors)
+        // Start with bundled skills so hot-reload doesn't lose them
+        let mut registry = clawdesk_skills::load_bundled_skills();
+        let bundled = registry.len();
+
+        // Merge user skills from disk
+        let disk_count = self.skill_loader.load_all(&mut registry).await;
+
+        info!(bundled, disk = disk_count, total = registry.len(), "skills hot-reloaded");
+        self.skills.store(Arc::new(registry));
+        (bundled + disk_count, vec![])
     }
 
     /// Hot-reload agent definitions from `~/.clawdesk/agents/`.

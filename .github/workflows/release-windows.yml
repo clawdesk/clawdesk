@@ -70,6 +70,10 @@ jobs:
           }
         shell: pwsh
 
+      - name: Build gws sidecar (Google Workspace CLI)
+        run: bash scripts/download-gws.sh --download --target x86_64-pc-windows-msvc
+        shell: bash
+
       - name: Build Tauri App
         working-directory: crates/clawdesk-tauri
         run: cargo tauri build --target x86_64-pc-windows-msvc

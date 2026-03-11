@@ -75,7 +75,8 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-      "binaries/llama-server"
+      "binaries/llama-server",
+      "binaries/gws"
     ],
     "resources": {
       "binaries/lib*": "./"

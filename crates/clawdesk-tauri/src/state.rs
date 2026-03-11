@@ -1707,7 +1707,7 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
 
         let config = AgentConfig {
             model: effective_model,
-            system_prompt: pipeline_result.system_prompt,
+            system_prompt: pipeline_result.system_prompt.clone(),
             ..Default::default()
         };
 
@@ -1859,7 +1859,32 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             max_tool_rounds.max(1).min(CHANNEL_TIMEOUT_SCALE_CAP)
         );
         let channel_timeout = std::time::Duration::from_secs(timeout_secs);
-        let system_prompt_for_run = agent.persona.clone();
+
+        // Use the pipeline-assembled system prompt (with skills, memory, runtime context).
+        // Previously this used agent.persona.clone() which bypassed the prompt pipeline,
+        // losing all injected skills, extensions, and memory context.
+        let mut system_prompt_for_run = pipeline_result.system_prompt.clone();
+
+        // ── Enabled extensions context (same as desktop path) ──
+        // Inject configured extensions so the LLM knows what services are
+        // available (e.g., google-workspace for gws commands).
+        {
+            let registry = app_state.integration_registry.read().await;
+            let enabled = registry.enabled();
+            if !enabled.is_empty() {
+                let mut ext_section = String::from(
+                    "\n\n## Configured Extensions\n\n\
+                     The following external services are enabled and authenticated. \
+                     Use the corresponding CLI tools (via shell_exec) to interact with them.\n\n"
+                );
+                for ext in &enabled {
+                    ext_section.push_str(&format!("- **{}**: {}\n", ext.name, ext.description));
+                }
+                ext_section.push('\n');
+                system_prompt_for_run.push_str(&ext_section);
+            }
+        }
+
         let agent_fut = runner.run(history, system_prompt_for_run);
         let response = match tokio::time::timeout(channel_timeout, agent_fut).await {
             Ok(Ok(resp)) => resp,
@@ -2424,6 +2449,10 @@ impl AppState {
                 ("slack", vec![("bot_token", "SLACK_BOT_TOKEN"), ("app_token", "SLACK_APP_TOKEN"), ("signing_secret", "SLACK_SIGNING_SECRET")]),
                 ("whatsapp", vec![("phone_number_id", "WHATSAPP_PHONE_ID"), ("access_token", "WHATSAPP_ACCESS_TOKEN")]),
                 ("email", vec![("imap_host", "EMAIL_IMAP_HOST"), ("smtp_host", "EMAIL_SMTP_HOST"), ("email", "EMAIL_ADDRESS"), ("password", "EMAIL_PASSWORD")]),
+                ("signal", vec![("phone_number", "SIGNAL_PHONE_NUMBER")]),
+                ("matrix", vec![("homeserver_url", "MATRIX_HOMESERVER_URL"), ("user_id", "MATRIX_USER_ID"), ("access_token", "MATRIX_ACCESS_TOKEN")]),
+                ("teams", vec![("app_id", "TEAMS_APP_ID"), ("app_secret", "TEAMS_APP_SECRET"), ("tenant_id", "TEAMS_TENANT_ID")]),
+                ("mastodon", vec![("instance_url", "MASTODON_INSTANCE_URL"), ("access_token", "MASTODON_ACCESS_TOKEN"), ("username", "MASTODON_USERNAME")]),
             ];
 
             for (kind, fields) in env_channels {

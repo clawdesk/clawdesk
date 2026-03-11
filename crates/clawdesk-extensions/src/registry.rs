@@ -753,81 +753,44 @@ placeholder = "#general"
 group = "Settings"
 "##,
     r#"
-name = "gmail"
-description = "Gmail email reading and sending"
+name = "google-workspace"
+description = "All of Google Workspace — Drive, Gmail, Calendar, Sheets, Docs, Slides, Tasks, People, Chat, Forms, Keep, Meet. 40+ agent skills. Agents use 'gws' CLI commands."
 category = "productivity"
-icon = "📧"
+icon = "🔷"
 enabled = false
+tags = ["api", "oauth"]
 [transport]
 type = "api"
-base_url = "https://gmail.googleapis.com/gmail/v1"
+base_url = "https://www.googleapis.com"
 [oauth]
 auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
 token_url = "https://oauth2.googleapis.com/token"
-client_id = "${GMAIL_CLIENT_ID}"
-scopes = ["https://www.googleapis.com/auth/gmail.modify"]
+client_id = "${GOOGLE_CLIENT_ID}"
+scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/documents"]
 [[config_fields]]
-key = "GMAIL_CLIENT_ID"
-label = "OAuth Client ID"
-description = "Google Cloud OAuth 2.0 client ID (from Cloud Console)"
+key = "GOOGLE_CLIENT_ID"
+label = "Google OAuth Client ID"
+description = "Shared OAuth 2.0 client ID for all Google services. Get from Cloud Console or run 'gws auth setup'."
 field_type = "text"
-required = true
-placeholder = "xxxxxxxxx.apps.googleusercontent.com"
-group = "Authentication"
-[[config_fields]]
-key = "GMAIL_MAX_RESULTS"
-label = "Max Results"
-description = "Maximum number of emails to return per query"
-field_type = "number"
 required = false
-default = "25"
-placeholder = "25"
-group = "Settings"
-"#,
-    r#"
-name = "google-drive"
-description = "Google Drive file management"
-category = "productivity"
-icon = "📁"
-enabled = false
-[transport]
-type = "api"
-base_url = "https://www.googleapis.com/drive/v3"
-[oauth]
-auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
-token_url = "https://oauth2.googleapis.com/token"
-client_id = "${GDRIVE_CLIENT_ID}"
-scopes = ["https://www.googleapis.com/auth/drive"]
-[[config_fields]]
-key = "GDRIVE_CLIENT_ID"
-label = "OAuth Client ID"
-description = "Google Cloud OAuth 2.0 client ID"
-field_type = "text"
-required = true
 placeholder = "xxxxxxxxx.apps.googleusercontent.com"
 group = "Authentication"
-"#,
-    r#"
-name = "google-calendar"
-description = "Google Calendar events and scheduling"
-category = "productivity"
-icon = "📅"
-enabled = false
-[transport]
-type = "api"
-base_url = "https://www.googleapis.com/calendar/v3"
-[oauth]
-auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
-token_url = "https://oauth2.googleapis.com/token"
-client_id = "${GCAL_CLIENT_ID}"
-scopes = ["https://www.googleapis.com/auth/calendar"]
 [[config_fields]]
-key = "GCAL_CLIENT_ID"
-label = "OAuth Client ID"
-description = "Google Cloud OAuth 2.0 client ID"
-field_type = "text"
-required = true
-placeholder = "xxxxxxxxx.apps.googleusercontent.com"
+key = "GOOGLE_CLIENT_SECRET"
+label = "Google OAuth Client Secret"
+description = "OAuth 2.0 client secret (from same Cloud Console project)"
+field_type = "secret"
+required = false
+placeholder = "GOCSPX-xxx"
+group = "Authentication"
+[[config_fields]]
+key = "GWS_AUTH_METHOD"
+label = "Auth Method"
+description = "Choose: 'gws' (use gws auth setup — easiest), 'manual' (provide client ID/secret above), or 'token' (direct access token)"
+field_type = "select"
+required = false
+default = "gws"
+options = [{label = "gws auth setup (easiest)", value = "gws"}, {label = "Manual OAuth (client ID/secret)", value = "manual"}, {label = "Direct access token", value = "token"}]
 group = "Authentication"
 "#,
     r#"

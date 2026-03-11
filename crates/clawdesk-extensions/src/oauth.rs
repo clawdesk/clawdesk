@@ -94,6 +94,9 @@ pub fn build_auth_url(
 }
 
 /// Exchange authorization code for tokens.
+///
+/// Google OAuth requires `client_secret` for installed/web app types.
+/// Pass `None` only for providers that support pure PKCE without a secret.
 pub async fn exchange_code(
     token_url: &str,
     client_id: &str,
@@ -101,17 +104,44 @@ pub async fn exchange_code(
     redirect_uri: &str,
     code_verifier: &str,
 ) -> Result<OAuthTokenResponse, ExtensionError> {
+    exchange_code_with_secret(token_url, client_id, None, code, redirect_uri, code_verifier).await
+}
+
+/// Exchange authorization code for tokens, optionally including client_secret.
+pub async fn exchange_code_with_secret(
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> Result<OAuthTokenResponse, ExtensionError> {
     let client = reqwest::Client::new();
+
+    tracing::debug!(
+        token_url,
+        client_id_len = client_id.len(),
+        has_secret = client_secret.is_some(),
+        code_len = code.len(),
+        redirect_uri,
+        "exchanging OAuth code for tokens"
+    );
+
+    let mut params = vec![
+        ("grant_type", "authorization_code"),
+        ("client_id", client_id),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("code_verifier", code_verifier),
+    ];
+    // Google OAuth requires client_secret for installed/web app clients
+    if let Some(secret) = client_secret {
+        params.push(("client_secret", secret));
+    }
 
     let response = client
         .post(token_url)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("client_id", client_id),
-            ("code", code),
-            ("redirect_uri", redirect_uri),
-            ("code_verifier", code_verifier),
-        ])
+        .form(&params)
         .send()
         .await
         .map_err(|e| ExtensionError::OAuthError(format!("token exchange: {}", e)))?;
@@ -119,12 +149,19 @@ pub async fn exchange_code(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        tracing::error!(
+            status = %status,
+            body = %body,
+            token_url,
+            "OAuth token exchange failed"
+        );
         return Err(ExtensionError::OAuthError(format!(
             "token exchange failed (HTTP {}): {}",
             status, body
         )));
     }
 
+    tracing::info!("OAuth token exchange successful");
     response
         .json()
         .await
@@ -170,10 +207,14 @@ pub async fn refresh_token(
 /// 2. Open browser to auth URL
 /// 3. Listen on localhost for redirect
 /// 4. Exchange code for tokens
+///
+/// Google OAuth requires `client_secret` for installed/web app types.
+/// Pure public clients (mobile apps) can pass `None`.
 pub async fn run_pkce_flow(
     auth_url: &str,
     token_url: &str,
     client_id: &str,
+    client_secret: Option<&str>,
     scopes: &[String],
 ) -> Result<OAuthTokenResponse, ExtensionError> {
     let pkce = PkceChallenge::generate();
@@ -201,7 +242,7 @@ pub async fn run_pkce_flow(
     let code = wait_for_callback(listener, &state).await?;
 
     // Exchange code for tokens
-    let tokens = exchange_code(token_url, client_id, &code, &redirect_uri, &pkce.verifier).await?;
+    let tokens = exchange_code_with_secret(token_url, client_id, client_secret, &code, &redirect_uri, &pkce.verifier).await?;
 
     info!("OAuth PKCE flow completed successfully");
     Ok(tokens)
@@ -233,6 +274,8 @@ async fn wait_for_callback(
         // Parse the GET request for query params
         let first_line = request.lines().next().unwrap_or("");
         let path = first_line.split_whitespace().nth(1).unwrap_or("");
+
+        tracing::debug!(path, "OAuth callback received");
 
         // Extract code and state from query string
         let query = path.split('?').nth(1).unwrap_or("");

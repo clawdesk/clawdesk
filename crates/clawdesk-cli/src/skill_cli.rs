@@ -576,7 +576,7 @@ async fn cmd_skill_create(
         vec![],
         None,
         &base_dir,
-    ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+    ).map_err(|e: String| -> Box<dyn std::error::Error + Send + Sync> { Box::from(e) })?;
     println!("✓ Created skill scaffold at '{}'", path.display());
     Ok(())
 }
@@ -590,7 +590,7 @@ async fn cmd_skill_lint(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
     let report = skill_author::cmd_skill_lint(&skills_dir)
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        .map_err(|e: String| -> Box<dyn std::error::Error + Send + Sync> { Box::from(e) })?;
     println!(
         "Checked {} skill(s): {} error(s), {} warning(s).",
         report.skills_checked, report.errors, report.warnings
@@ -609,7 +609,7 @@ async fn cmd_skill_test(
     use crate::skill_author;
     let path = std::path::PathBuf::from(dir);
     let report = skill_author::cmd_skill_test(&path, input)
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        .map_err(|e: String| -> Box<dyn std::error::Error + Send + Sync> { Box::from(e) })?;
     println!("Trigger score: {:.2}", report.trigger_score);
     println!("Estimated tokens: {}", report.estimated_tokens);
     println!("Bound tools: {}", report.bound_tools.join(", "));

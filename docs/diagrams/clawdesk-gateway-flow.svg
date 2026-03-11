@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1100" font-family="Inter, system-ui, -apple-system, sans-serif" font-size="12">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <linearGradient id="hdr" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#334155"/>
+    </linearGradient>
+    <filter id="sh" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="1" dy="1" stdDeviation="2" flood-opacity="0.1"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="1100" fill="#f8fafc" rx="8"/>
+
+  <!-- Title -->
+  <rect x="20" y="15" width="1160" height="55" rx="8" fill="url(#hdr)"/>
+  <text x="600" y="48" text-anchor="middle" fill="white" font-size="20" font-weight="700">ClawDesk — Gateway HTTP Request → Response Lineage</text>
+
+  <!-- Step 1 -->
+  <rect x="440" y="85" width="320" height="40" rx="20" fill="#3b82f6" filter="url(#sh)"/>
+  <text x="600" y="110" text-anchor="middle" fill="white" font-weight="600" font-size="13">🌐 POST /api/v1/message</text>
+  <line x1="600" y1="125" x2="600" y2="150" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Thread Ownership -->
+  <rect x="400" y="150" width="400" height="38" rx="6" fill="white" stroke="#94a3b8" filter="url(#sh)"/>
+  <text x="600" y="172" text-anchor="middle" fill="#334155" font-size="12">🔒 Thread ownership acquire (concurrency lock)</text>
+  <text x="600" y="184" text-anchor="middle" fill="#64748b" font-size="9">thread_ownership.try_acquire — prevents parallel runs per thread</text>
+  <line x1="600" y1="188" x2="600" y2="212" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Session Load -->
+  <rect x="400" y="212" width="400" height="38" rx="6" fill="white" stroke="#fde047" filter="url(#sh)"/>
+  <text x="600" y="234" text-anchor="middle" fill="#334155" font-size="12">📂 Load/create session from SochDB SessionStore</text>
+  <text x="600" y="246" text-anchor="middle" fill="#64748b" font-size="9">SessionKey::from(session_id) → load_session() or Session::new()</text>
+  <line x1="600" y1="250" x2="600" y2="274" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- A2A Registration -->
+  <rect x="400" y="274" width="400" height="38" rx="6" fill="white" stroke="#94a3b8" filter="url(#sh)"/>
+  <text x="600" y="296" text-anchor="middle" fill="#334155" font-size="12">🤖 Register thread as A2A agent (lazy, first msg)</text>
+  <text x="600" y="308" text-anchor="middle" fill="#64748b" font-size="9">thread_agent_card → thread_agents.upsert_card</text>
+  <line x1="600" y1="312" x2="600" y2="336" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Persist User Msg -->
+  <rect x="400" y="336" width="400" height="38" rx="6" fill="white" stroke="#a5b4fc" filter="url(#sh)"/>
+  <text x="600" y="358" text-anchor="middle" fill="#334155" font-size="12">💾 Persist user message → ConversationStore</text>
+  <text x="600" y="370" text-anchor="middle" fill="#64748b" font-size="9">store.append_message(session_key, user_msg)</text>
+  <line x1="600" y1="374" x2="600" y2="398" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Build History -->
+  <rect x="400" y="398" width="400" height="38" rx="6" fill="white" stroke="#fde047" filter="url(#sh)"/>
+  <text x="600" y="420" text-anchor="middle" fill="#334155" font-size="12">📜 Build chat_history from store (50 messages)</text>
+  <text x="600" y="432" text-anchor="middle" fill="#64748b" font-size="9">load_history(key, 50) → Vec&lt;ChatMessage&gt;</text>
+  <line x1="600" y1="436" x2="600" y2="460" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Agent + Model Resolution -->
+  <rect x="300" y="460" width="260" height="55" rx="6" fill="white" stroke="#86efac" filter="url(#sh)"/>
+  <text x="430" y="480" text-anchor="middle" fill="#166534" font-size="11" font-weight="600">Agent Registry Lookup</text>
+  <text x="430" y="496" text-anchor="middle" fill="#15803d" font-size="10">agent_id → "default" → first</text>
+  <text x="430" y="508" text-anchor="middle" fill="#15803d" font-size="9">→ system_prompt + model</text>
+
+  <rect x="580" y="460" width="280" height="55" rx="6" fill="white" stroke="#86efac" filter="url(#sh)"/>
+  <text x="720" y="480" text-anchor="middle" fill="#166534" font-size="11" font-weight="600">Provider Resolution</text>
+  <text x="720" y="496" text-anchor="middle" fill="#15803d" font-size="10">effective_model → provider_key</text>
+  <text x="720" y="508" text-anchor="middle" fill="#15803d" font-size="9">anthropic / openai / gemini / ollama</text>
+  <line x1="600" y1="515" x2="600" y2="540" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Skill Provider -->
+  <rect x="400" y="540" width="400" height="42" rx="6" fill="white" stroke="#c084fc" filter="url(#sh)"/>
+  <text x="600" y="558" text-anchor="middle" fill="#6b21a8" font-size="12" font-weight="600">🎯 Build SkillProvider + Score Skills</text>
+  <text x="600" y="574" text-anchor="middle" fill="#7c3aed" font-size="9">OrchestratorSkillProvider(knapsack) + EnvResolver + trigger evaluation</text>
+  <line x1="600" y1="582" x2="600" y2="606" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Prompt Pipeline -->
+  <rect x="340" y="606" width="520" height="55" rx="6" fill="white" stroke="#8b5cf6" stroke-width="2" filter="url(#sh)"/>
+  <text x="600" y="624" text-anchor="middle" fill="#5b21b6" font-size="12" font-weight="600">📝 Unified Prompt Pipeline (PromptBuilder)</text>
+  <text x="600" y="640" text-anchor="middle" fill="#7c3aed" font-size="10">identity(persona) + runtime(datetime, channels) + skills(scored, knapsack)</text>
+  <text x="600" y="652" text-anchor="middle" fill="#7c3aed" font-size="9">Same pipeline as Tauri desktop — budget-allocated sections</text>
+  <line x1="600" y1="661" x2="600" y2="688" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- AgentRunner -->
+  <rect x="340" y="688" width="520" height="45" rx="6" fill="#1e293b" filter="url(#sh)"/>
+  <text x="600" y="708" text-anchor="middle" fill="white" font-size="12" font-weight="600">AgentRunner::builder(provider, tools, config, cancel)</text>
+  <text x="600" y="724" text-anchor="middle" fill="#94a3b8" font-size="10">.with_skill_provider(sp) .with_hook_manager(hooks) .build()</text>
+  <line x1="600" y1="733" x2="600" y2="758" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- LLM Execution -->
+  <rect x="350" y="678" width="500" height="90" rx="8" fill="white" stroke="#f59e0b" stroke-width="2" filter="url(#sh)"/>
+  <text x="600" y="700" text-anchor="middle" fill="#92400e" font-size="13" font-weight="700">🔄 runner.run(chat_history, system_prompt)</text>
+  <rect x="380" y="710" width="440" height="22" rx="3" fill="#fef9c3"/>
+  <text x="600" y="726" text-anchor="middle" fill="#78350f" font-size="10">Prompt assembly → provider.stream() → tool_calls → execute → loop</text>
+  <rect x="380" y="738" width="440" height="22" rx="3" fill="#fef9c3"/>
+  <text x="600" y="754" text-anchor="middle" fill="#78350f" font-size="10">Max 25 rounds | Per-turn skill selection | Context guard</text>
+  <line x1="600" y1="768" x2="600" y2="795" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Format -->
+  <rect x="400" y="795" width="400" height="38" rx="6" fill="white" stroke="#94a3b8" filter="url(#sh)"/>
+  <text x="600" y="817" text-anchor="middle" fill="#334155" font-size="12">📝 format_for_channel(reply, channel)</text>
+  <text x="600" y="829" text-anchor="middle" fill="#64748b" font-size="9">ReplyFormatter → Markdown / Slack / Telegram as needed</text>
+  <line x1="600" y1="833" x2="600" y2="857" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Persist Response -->
+  <rect x="400" y="857" width="400" height="38" rx="6" fill="white" stroke="#a5b4fc" filter="url(#sh)"/>
+  <text x="600" y="879" text-anchor="middle" fill="#334155" font-size="12">💾 Persist assistant message + update session</text>
+  <text x="600" y="891" text-anchor="middle" fill="#64748b" font-size="9">store.append_message + save_session (message_count, last_activity)</text>
+  <line x1="600" y1="895" x2="600" y2="919" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Release Lock -->
+  <rect x="400" y="919" width="400" height="38" rx="6" fill="white" stroke="#94a3b8" filter="url(#sh)"/>
+  <text x="600" y="941" text-anchor="middle" fill="#334155" font-size="12">🔓 Release thread ownership</text>
+  <text x="600" y="953" text-anchor="middle" fill="#64748b" font-size="9">thread_ownership.release(thread_id, request_owner)</text>
+  <line x1="600" y1="957" x2="600" y2="981" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Response -->
+  <rect x="440" y="981" width="320" height="40" rx="20" fill="#16a34a" filter="url(#sh)"/>
+  <text x="600" y="1006" text-anchor="middle" fill="white" font-weight="600" font-size="13">✅ JSON { reply, session_id, agent_id }</text>
+
+  <!-- Note -->
+  <rect x="40" y="1040" width="1120" height="45" rx="6" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="600" y="1060" text-anchor="middle" fill="#334155" font-size="11" font-weight="600">Gateway now shares: PromptBuilder pipeline, skill scoring, hook manager, 52 bundled skills, builtin tools</text>
+  <text x="600" y="1076" text-anchor="middle" fill="#64748b" font-size="10">Remaining Tauri-only: semantic cache, memory tools, browser tools, team roster injection, event streaming</text>
+</svg>

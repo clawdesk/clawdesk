@@ -177,6 +177,14 @@ pub async fn create_agent(
             (request.persona.clone(), request.skills.clone(), request.model.clone(), None)
         };
 
+    // Ensure persona is never empty — empty persona causes the LLM to
+    // receive no identity section, making it behave as a generic chatbot.
+    let effective_persona = if effective_persona.trim().is_empty() {
+        clawdesk_types::session::DEFAULT_SYSTEM_PROMPT.to_string()
+    } else {
+        effective_persona
+    };
+
     let agent = DesktopAgent {
         id: Uuid::new_v4().to_string(),
         name: request.name,
@@ -1594,6 +1602,30 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
                 roster.push('\n');
                 system_prompt.push_str(&roster);
             }
+        }
+    }
+
+    // ── Enabled extensions context ────────────────────────────────────
+    // Inject a list of enabled+authenticated extensions into the system
+    // prompt so the LLM knows what services are available. This prevents
+    // ambiguity (e.g., "check my emails" → which email provider?) by
+    // letting the LLM see exactly what's configured.
+    {
+        let registry = state.integration_registry.read().await;
+        let enabled = registry.enabled();
+        if !enabled.is_empty() {
+            let mut ext_section = String::from(
+                "\n\n## Configured Extensions\n\n\
+                 The following external services are enabled and authenticated. \
+                 Use the corresponding CLI tools (via shell_exec) to interact with them. \
+                 If the user's request matches multiple services (e.g., email could be Gmail or Outlook), \
+                 ask the user which one to use.\n\n"
+            );
+            for ext in &enabled {
+                ext_section.push_str(&format!("- **{}**: {}\n", ext.name, ext.description));
+            }
+            ext_section.push('\n');
+            system_prompt.push_str(&ext_section);
         }
     }
 
@@ -5622,6 +5654,7 @@ fn build_dynamic_spawn_fn(
                 ..Default::default()
             };
 
+            let ephemeral_prompt = config.system_prompt.clone();
             let runner =
                 clawdesk_agents::AgentRunner::new(provider, child_tools, config, cancel)
                     .with_sandbox_gate(Arc::new(crate::commands::SandboxGateAdapter {
@@ -5634,7 +5667,7 @@ fn build_dynamic_spawn_fn(
             )];
 
             let timeout = tokio::time::Duration::from_secs(req.effective_timeout());
-            let result = match tokio::time::timeout(timeout, runner.run(history, String::new()))
+            let result = match tokio::time::timeout(timeout, runner.run(history, ephemeral_prompt))
                 .await
             {
                 Ok(Ok(response)) => {

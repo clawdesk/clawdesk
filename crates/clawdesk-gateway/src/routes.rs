@@ -42,6 +42,9 @@ pub struct SendMessageRequest {
     /// Optional thread key for ownership locking.
     /// If omitted, session_id is used.
     pub thread_id: Option<String>,
+    /// Optional agent ID to select a specific agent from the registry.
+    /// If omitted, falls back to the "default" agent or the first available agent.
+    pub agent_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -179,10 +182,49 @@ pub async fn send_message(
         })
         .collect();
 
-    // Resolve provider — try session model, then default
-    let model_name = session.model.as_deref().unwrap_or("sonnet");
+    // Resolve agent persona and model from agent registry FIRST.
+    // Priority: agent_id in request → "default" agent → first available → fallback.
+    let (agent_persona, agent_model_override) = {
+        let registry = state.agent_registry.load();
+        let snapshot = req.agent_id.as_deref()
+            .and_then(|id| registry.get(id))
+            .or_else(|| registry.get("default"))
+            .or_else(|| registry.values().next());
+        match snapshot {
+            Some(agent) => {
+                debug!(agent_id = %agent.id, "Using agent from registry");
+                (agent.system_prompt.clone(), Some(agent.model.clone()))
+            }
+            None => {
+                debug!("No agents in registry — using default system prompt");
+                (clawdesk_types::session::DEFAULT_SYSTEM_PROMPT.to_string(), None)
+            }
+        }
+    };
+
+    // Determine effective model: request model → session model → agent model → default
+    let effective_model_name = if let Some(ref m) = req.model {
+        m.as_str()
+    } else if let Some(ref m) = session.model {
+        m.as_str()
+    } else if let Some(ref m) = agent_model_override {
+        if !m.is_empty() { m.as_str() } else { "sonnet" }
+    } else {
+        "sonnet"
+    };
+
+    // Resolve model alias to full model ID
+    let effective_model_id = match effective_model_name {
+        "haiku" => "claude-haiku-4-20250514".to_string(),
+        "sonnet" => "claude-sonnet-4-20250514".to_string(),
+        "opus" => "claude-opus-4-20250514".to_string(),
+        "local" => "llama3.2".to_string(),
+        other => other.to_string(),
+    };
+
+    // Resolve provider based on the effective model
     let provider_registry = state.providers.load();
-    let provider_key = match model_name {
+    let provider_key = match effective_model_name {
         m if m.contains("haiku") || m.contains("sonnet") || m.contains("opus") || m.contains("claude") => "anthropic",
         m if m.starts_with("gpt") || m.starts_with("o1") || m.starts_with("o3") => "openai",
         m if m.starts_with("gemini") => "gemini",
@@ -196,38 +238,120 @@ pub async fn send_message(
         .ok_or_else(|| {
             ApiError::Internal(format!(
                 "No LLM provider configured for model '{}'. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or similar env var.",
-                model_name
+                effective_model_name
             ))
         })?;
 
-    let model_id = match model_name {
-        "haiku" => "claude-haiku-4-20250514",
-        "sonnet" => "claude-sonnet-4-20250514",
-        "opus" => "claude-opus-4-20250514",
-        "local" => "llama3.2",
-        other => other,
+    // ── Unified Prompt Pipeline ──────────────────────────────────────
+    // Build the system prompt using the same pipeline as the Tauri desktop:
+    // 1. Score skills (trigger evaluation + memory signal boost)
+    // 2. PromptBuilder knapsack (identity + safety + runtime + skills)
+    // This ensures gateway agents get the same skill-enriched prompts as
+    // desktop agents, not just the raw persona string.
+    let system_prompt = {
+        use clawdesk_domain::prompt_builder::{PromptBudget, PromptBuilder, RuntimeContext, ScoredSkill};
+        use clawdesk_types::tokenizer::estimate_tokens;
+
+        // Score active skills for this request
+        let scored_skills: Vec<ScoredSkill> = {
+            let registry = state.skills.load();
+            let active = registry.active_skills();
+            active.iter().map(|s| {
+                ScoredSkill {
+                    skill_id: s.manifest.id.as_str().to_string(),
+                    display_name: s.manifest.display_name.clone(),
+                    prompt_fragment: s.prompt_fragment.clone(),
+                    token_cost: estimate_tokens(&s.prompt_fragment),
+                    priority_weight: s.manifest.priority_weight,
+                    relevance: 1.0, // Gateway doesn't have trigger context yet
+                }
+            }).collect()
+        };
+
+        let budget = PromptBudget {
+            total: 128_000,
+            response_reserve: 8_192,
+            identity_cap: 2_000,
+            skills_cap: 6_144, // Increased from 4K: 90+ skills need more budget for knapsack
+            memory_cap: 4_096,
+            history_floor: 2_000,
+            runtime_cap: 512,
+            safety_cap: 1_024,
+        };
+
+        let runtime_ctx = RuntimeContext {
+            datetime: chrono::Utc::now().to_rfc3339(),
+            channel_description: Some("HTTP API gateway".to_string()),
+            model_name: Some(effective_model_id.clone()),
+            metadata: vec![],
+            available_channels: {
+                let ch = state.channels.load();
+                ch.list().iter().map(|id| format!("{:?}", id).to_lowercase()).collect()
+            },
+        };
+
+        match PromptBuilder::new(budget) {
+            Ok(builder) => {
+                let (assembled, _manifest) = builder
+                    .identity(agent_persona.clone())
+                    .runtime(runtime_ctx)
+                    .skills(scored_skills)
+                    .build();
+                assembled.text
+            }
+            Err(_) => agent_persona.clone(),
+        }
     };
 
     let config = AgentConfig {
-        model: model_id.to_string(),
-        system_prompt: "You are a helpful assistant.".to_string(),
+        model: effective_model_id,
+        system_prompt: system_prompt.clone(),
         max_tool_rounds: 25,
         context_limit: 128_000,
         response_reserve: 8_192,
         ..Default::default()
     };
 
-    let runner = AgentRunner::builder(
+    // Load active skills from the hot-swappable registry and build a
+    // SkillProvider so the AgentRunner can do per-turn skill selection
+    // (trigger evaluation + token-budgeted knapsack). Without this, the
+    // gateway agents have no skills — they can't use domain-specific prompts.
+    let skill_provider: Option<std::sync::Arc<dyn clawdesk_agents::runner::SkillProvider>> = {
+        let registry = state.skills.load();
+        let active = registry.active_skills();
+        if active.is_empty() {
+            None
+        } else {
+            use clawdesk_skills::env_injection::EnvResolver;
+            use clawdesk_skills::orchestrator::SkillOrchestrator;
+            use clawdesk_skills::skill_provider::OrchestratorSkillProvider;
+
+            let orchestrator = SkillOrchestrator::new(active, 8_000);
+            let env_resolver = EnvResolver::default();
+            Some(std::sync::Arc::new(OrchestratorSkillProvider::new(
+                orchestrator,
+                env_resolver,
+            )))
+        }
+    };
+
+    let mut builder = AgentRunner::builder(
         std::sync::Arc::clone(provider),
         std::sync::Arc::clone(&state.tools),
         config,
         state.cancel.clone(),
     )
     .without_sandbox()
-    .build();
+    .with_hook_manager(std::sync::Arc::clone(&state.hook_manager));
+
+    if let Some(sp) = skill_provider {
+        builder = builder.with_skill_provider(sp);
+    }
+
+    let runner = builder.build();
 
     let agent_response = runner
-        .run(chat_history, "You are a helpful assistant.".to_string())
+        .run(chat_history, system_prompt)
         .await
         .map_err(|e| ApiError::Internal(format!("Agent execution failed: {}", e)))?;
 

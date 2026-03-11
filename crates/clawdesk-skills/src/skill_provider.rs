@@ -114,6 +114,7 @@ impl SkillProvider for OrchestratorSkillProvider {
             selected = selected_ids.len(),
             excluded = excluded_ids.len(),
             tools = tool_names.len(),
+            skill_names = ?selected_ids,
             "OrchestratorSkillProvider: skills selected"
         );
 

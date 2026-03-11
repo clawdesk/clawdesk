@@ -636,6 +636,114 @@ impl ChannelFactory {
             )))
         });
 
+        // --- Signal ---
+        // Required: phone_number
+        // Optional: rpc_endpoint, allowed_numbers, poll_interval_secs
+        let signal_schema = ConfigSchema::new("signal")
+            .required("phone_number", ConfigFieldType::String, "Phone number registered with Signal (e.g., +1234567890)")
+            .optional("rpc_endpoint", ConfigFieldType::String, "signal-cli JSON-RPC endpoint (default: http://localhost:8080/api/v1/rpc)")
+            .optional("allowed_numbers", ConfigFieldType::StringArray, "Allowed phone numbers (empty = allow all)")
+            .optional("poll_interval_secs", ConfigFieldType::Integer, "Poll interval in seconds (default: 1)");
+        f.register_with_schema("signal", signal_schema, |config| {
+            let phone_number = config.require_string("phone_number")?;
+            let rpc_endpoint = config.raw().get("rpc_endpoint")
+                .and_then(|v| v.as_str()).unwrap_or("http://localhost:8080/api/v1/rpc").to_string();
+            let allowed_numbers = config.string_array("allowed_numbers");
+            let poll_interval_secs = config.usize_or("poll_interval_secs", 1) as u64;
+            Ok(Arc::new(crate::signal::SignalChannel::new(
+                crate::signal::SignalConfig {
+                    phone_number,
+                    rpc_endpoint,
+                    allowed_numbers,
+                    poll_interval_secs,
+                },
+            )))
+        });
+
+        // --- Matrix ---
+        // Required: homeserver_url, user_id
+        // Optional: access_token, password, rooms, sync_timeout_ms
+        let matrix_schema = ConfigSchema::new("matrix")
+            .required("homeserver_url", ConfigFieldType::String, "Matrix homeserver URL (e.g., https://matrix.org)")
+            .required("user_id", ConfigFieldType::String, "Bot Matrix user ID (e.g., @bot:matrix.org)")
+            .optional("access_token", ConfigFieldType::String, "Access token from /login")
+            .optional("password", ConfigFieldType::String, "Password for /login authentication")
+            .optional("rooms", ConfigFieldType::StringArray, "Room IDs to join and monitor")
+            .optional("sync_timeout_ms", ConfigFieldType::Integer, "Sync timeout in ms (default: 30000)");
+        f.register_with_schema("matrix", matrix_schema, |config| {
+            let homeserver_url = config.require_string("homeserver_url")?;
+            let user_id = config.require_string("user_id")?;
+            let access_token = config.raw().get("access_token").and_then(|v| v.as_str()).map(String::from);
+            let password = config.raw().get("password").and_then(|v| v.as_str()).map(String::from);
+            let rooms = config.string_array("rooms");
+            let sync_timeout_ms = config.usize_or("sync_timeout_ms", 30000) as u64;
+            Ok(Arc::new(crate::matrix::MatrixChannel::new(
+                crate::matrix::MatrixConfig {
+                    homeserver_url,
+                    user_id,
+                    access_token,
+                    password,
+                    rooms,
+                    sync_timeout_ms,
+                },
+            )))
+        });
+
+        // --- Microsoft Teams ---
+        // Required: app_id, app_secret, tenant_id
+        // Optional: service_url
+        let teams_schema = ConfigSchema::new("teams")
+            .required("app_id", ConfigFieldType::String, "Bot Framework App ID")
+            .required("app_secret", ConfigFieldType::String, "Bot Framework App Secret")
+            .required("tenant_id", ConfigFieldType::String, "Azure AD Tenant ID (or 'common')")
+            .optional("service_url", ConfigFieldType::String, "Service URL override");
+        f.register_with_schema("teams", teams_schema, |config| {
+            let app_id = config.require_string("app_id")?;
+            let app_secret = config.require_string("app_secret")?;
+            let tenant_id = config.require_string("tenant_id")?;
+            let service_url = config.raw().get("service_url").and_then(|v| v.as_str()).map(String::from);
+            Ok(Arc::new(crate::teams::TeamsChannel::new(
+                crate::teams::TeamsConfig {
+                    app_id,
+                    app_secret,
+                    tenant_id,
+                    service_url,
+                },
+            )))
+        });
+
+        // --- Mastodon ---
+        // Required: instance_url, access_token, username
+        // Optional: max_toot_length, respond_to_mentions, respond_to_dms, content_warning
+        let mastodon_schema = ConfigSchema::new("mastodon")
+            .required("instance_url", ConfigFieldType::String, "Instance URL (e.g., https://mastodon.social)")
+            .required("access_token", ConfigFieldType::String, "OAuth2 access token")
+            .required("username", ConfigFieldType::String, "Bot account username (without @)")
+            .optional("max_toot_length", ConfigFieldType::Integer, "Max toot length (default: 500)")
+            .optional("respond_to_mentions", ConfigFieldType::Bool, "Respond to public mentions (default: true)")
+            .optional("respond_to_dms", ConfigFieldType::Bool, "Respond to DMs (default: true)")
+            .optional("content_warning", ConfigFieldType::String, "Content warning text to prepend");
+        f.register_with_schema("mastodon", mastodon_schema, |config| {
+            let instance_url = config.require_string("instance_url")?;
+            let access_token = config.require_string("access_token")?;
+            let username = config.require_string("username")?;
+            let max_toot_length = config.usize_or("max_toot_length", 500);
+            let respond_to_mentions = config.bool_or("respond_to_mentions", true);
+            let respond_to_dms = config.bool_or("respond_to_dms", true);
+            let content_warning = config.raw().get("content_warning").and_then(|v| v.as_str()).map(String::from);
+            Ok(Arc::new(crate::mastodon::MastodonChannel::new(
+                crate::mastodon::MastodonConfig {
+                    instance_url,
+                    access_token,
+                    username,
+                    max_toot_length,
+                    respond_to_mentions,
+                    respond_to_dms,
+                    content_warning,
+                },
+            )))
+        });
+
         f
     }
 }

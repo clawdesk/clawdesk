@@ -530,7 +530,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 // Build registries
                 let channels = clawdesk_channel::registry::ChannelRegistry::new();
                 let mut providers = clawdesk_providers::registry::ProviderRegistry::new();
-                let tools = clawdesk_agents::ToolRegistry::new();
+                let mut tools = clawdesk_agents::ToolRegistry::new();
+
+                // Register builtin tools (file I/O, shell, web search, etc.)
+                // so gateway agents can use tools, not just text chat.
+                let workspace_root = clawdesk_types::dirs::dot_clawdesk();
+                clawdesk_agents::builtin_tools::register_builtin_tools(
+                    &mut tools,
+                    Some(workspace_root),
+                );
 
                 // Auto-register all providers from env vars + channel_provider.json
                 clawdesk_providers::registry::auto_register_from_env(&mut providers);
@@ -550,24 +558,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     std::sync::Arc::new(clawdesk_cron::executor::NoopDeliveryHandler),
                 );
 
-                // Skills — load from disk if the directory exists
+                // Skills — load bundled skills (embedded in binary) then merge
+                // with user skills from disk (~/.clawdesk/skills/).
                 let skills_dir = clawdesk_types::dirs::skills();
                 let _ = std::fs::create_dir_all(&skills_dir);
                 let skill_loader = clawdesk_skills::loader::SkillLoader::new(
                     skills_dir,
                 );
-                let load_result = skill_loader.load_fresh(true).await;
                 let skills = {
-                    let reg = load_result.registry;
-                    if load_result.errors.is_empty() {
-                        info!(count = reg.len(), "loaded skills from disk");
-                    } else {
-                        warn!(
-                            count = reg.len(),
-                            errors = load_result.errors.len(),
-                            "loaded skills with some errors"
-                        );
-                    }
+                    // Start with bundled skills (52 skills compiled into binary)
+                    let mut reg = clawdesk_skills::load_bundled_skills();
+                    let bundled_count = reg.len();
+
+                    // Merge user-installed skills from disk on top
+                    let disk_count = skill_loader.load_all(&mut reg).await;
+
+                    info!(bundled = bundled_count, disk = disk_count, total = reg.len(), "loaded skills");
                     reg
                 };
 
@@ -796,7 +802,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         Commands::Completions { shell } => {
             completions::generate_completions(&shell)
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+                .map_err(|e: String| -> Box<dyn std::error::Error + Send + Sync> { Box::from(e) })?;
         }
         Commands::Skill { action } => {
             skill_cli::execute_skill_command(&cli.gateway_url, action).await?;
@@ -1244,8 +1250,8 @@ async fn cmd_tmux(
                 workspace_dir: workspace,
                 attach: !no_attach,
             };
-            tmux::launch(&config).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.into()
+            tmux::launch(&config).map_err(|e: String| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::from(e)
             })?;
         }
         TmuxAction::Setup { session, workspace } => {
@@ -1275,8 +1281,8 @@ async fn cmd_tmux(
                 }
                 std::process::exit(1);
             }
-            tmux::attach_session(&session).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.into()
+            tmux::attach_session(&session).map_err(|e: String| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::from(e)
             })?;
         }
         TmuxAction::Kill { session } => {
@@ -1334,7 +1340,14 @@ async fn cmd_daemon(
 
             let channels = clawdesk_channel::registry::ChannelRegistry::new();
             let mut providers = clawdesk_providers::registry::ProviderRegistry::new();
-            let tools = clawdesk_agents::ToolRegistry::new();
+            let mut tools = clawdesk_agents::ToolRegistry::new();
+
+            // Register builtin tools for daemon agents
+            let workspace_root = clawdesk_types::dirs::dot_clawdesk();
+            clawdesk_agents::builtin_tools::register_builtin_tools(
+                &mut tools,
+                Some(workspace_root),
+            );
 
             // Auto-register all providers from env vars
             clawdesk_providers::registry::auto_register_from_env(&mut providers);
@@ -1350,8 +1363,13 @@ async fn cmd_daemon(
             let skills_dir = clawdesk_types::dirs::skills();
             let _ = std::fs::create_dir_all(&skills_dir);
             let skill_loader = clawdesk_skills::loader::SkillLoader::new(skills_dir);
-            let load_result = skill_loader.load_fresh(true).await;
-            let skills = load_result.registry;
+            let skills = {
+                let mut reg = clawdesk_skills::load_bundled_skills();
+                let bundled = reg.len();
+                let disk = skill_loader.load_all(&mut reg).await;
+                info!(bundled, disk, total = reg.len(), "daemon: loaded skills");
+                reg
+            };
             let channel_factory = clawdesk_channels::factory::ChannelFactory::with_builtins();
 
             let state = std::sync::Arc::new(

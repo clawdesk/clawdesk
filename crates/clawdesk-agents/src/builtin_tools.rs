@@ -177,6 +177,31 @@ impl Tool for ShellTool {
         if let Some(ref dir) = working_dir {
             cmd.current_dir(dir);
         }
+        // Prepend sidecar/bundled tool directories to PATH so agents can
+        // find co-distributed binaries like `gws` without explicit paths.
+        {
+            let mut extra_paths = Vec::new();
+            // Tauri sidecar directory (next to executable)
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    extra_paths.push(dir.to_path_buf());
+                }
+            }
+            // Workspace tools/bundled/ (dev mode)
+            let bundled = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tools/bundled");
+            if bundled.exists() {
+                extra_paths.push(bundled);
+            }
+            if !extra_paths.is_empty() {
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                let prepend: Vec<String> = extra_paths.iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                let new_path = format!("{}:{}", prepend.join(":"), current_path);
+                cmd.env("PATH", new_path);
+            }
+        }
         for (key, val) in &env_vars {
             cmd.env(key, val);
         }

@@ -36,6 +36,17 @@ if [ ! -d "$UI_DIR/node_modules" ]; then
     echo ""
 fi
 
+# -- Build gws sidecar if not present ----------------------------------------
+GWS_SIDECAR="$ROOT/crates/clawdesk-tauri/binaries/gws-$(rustc -vV | grep '^host:' | cut -d' ' -f2)"
+if [ ! -f "$GWS_SIDECAR" ]; then
+    echo "[gws]  Building Google Workspace CLI sidecar..."
+    bash "$ROOT/scripts/download-gws.sh"
+    echo "[gws]  Done"
+    echo ""
+else
+    echo "[gws]  Sidecar already built: $GWS_SIDECAR"
+fi
+
 # -- Launch Tauri dev ----------------------------------------------------------
 # Tauri will auto-start Vite via beforeDevCommand in tauri.conf.json
 echo "[tauri] Building and running Tauri app..."

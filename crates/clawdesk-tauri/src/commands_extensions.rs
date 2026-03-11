@@ -99,6 +99,39 @@ pub struct OAuthFlowInfo {
     pub state: String,
 }
 
+fn resolve_oauth_client_id(
+    registry: &clawdesk_extensions::IntegrationRegistry,
+    integration_name: &str,
+    client_id_template: &str,
+) -> Result<String, String> {
+    let config = registry.get_config(integration_name).unwrap_or_default();
+    let mut client_id = client_id_template.to_string();
+
+    while let Some(start) = client_id.find("${") {
+        if let Some(end) = client_id[start..].find('}') {
+            let key = client_id[start + 2..start + end].to_string();
+            let env_val = std::env::var(&key).ok();
+            if let Some(val) = config.get(&key).or(env_val.as_ref()) {
+                client_id = format!(
+                    "{}{}{}",
+                    &client_id[..start],
+                    val,
+                    &client_id[start + end + 1..]
+                );
+            } else {
+                return Err(format!(
+                    "OAuth requires '{}' to be configured first. Click 'Configure' and set the {} field.",
+                    key, key
+                ));
+            }
+        } else {
+            break;
+        }
+    }
+
+    Ok(client_id)
+}
+
 // ── Integration Registry Commands ─────────────────────────────
 
 /// Convert an `Integration` + its config values into the IPC response type.
@@ -508,6 +541,14 @@ pub async fn vault_unlock(
 ) -> Result<bool, String> {
     let vault = state.credential_vault.read().await;
     vault.unlock(&password).await.map_err(|e| format!("{:?}", e))?;
+
+    // After vault unlock, bridge stored Google OAuth tokens to gws CLI env var
+    // so agents can use `gws` commands immediately.
+    if let Ok(Some(token)) = vault.get("google-workspace_access_token").await {
+        std::env::set_var("GOOGLE_WORKSPACE_CLI_TOKEN", &token);
+        tracing::info!("Set GOOGLE_WORKSPACE_CLI_TOKEN from vault after unlock");
+    }
+
     Ok(true)
 }
 
@@ -649,14 +690,19 @@ pub async fn start_extension_oauth(
     integration_name: String,
     state: State<'_, AppState>,
 ) -> Result<OAuthFlowInfo, String> {
-    let registry = state.integration_registry.read().await;
-    let integration = registry
-        .get(&integration_name)
-        .ok_or_else(|| format!("Integration '{}' not found", integration_name))?;
-    let oauth = integration
-        .oauth
-        .as_ref()
-        .ok_or_else(|| format!("Integration '{}' does not support OAuth", integration_name))?;
+    let (oauth, resolved_client_id) = {
+        let registry = state.integration_registry.read().await;
+        let integration = registry
+            .get(&integration_name)
+            .ok_or_else(|| format!("Integration '{}' not found", integration_name))?;
+        let oauth = integration
+            .oauth
+            .clone()
+            .ok_or_else(|| format!("Integration '{}' does not support OAuth", integration_name))?;
+        let resolved_client_id =
+            resolve_oauth_client_id(&registry, &integration_name, &oauth.client_id)?;
+        (oauth, resolved_client_id)
+    };
 
     let challenge = clawdesk_extensions::oauth::PkceChallenge::generate();
     let oauth_state = clawdesk_extensions::oauth::generate_state();
@@ -664,7 +710,7 @@ pub async fn start_extension_oauth(
 
     let auth_url = clawdesk_extensions::oauth::build_auth_url(
         &oauth.auth_url,
-        &oauth.client_id,
+        &resolved_client_id,
         redirect_uri,
         &oauth.scopes,
         &oauth_state,
@@ -693,6 +739,144 @@ pub async fn start_extension_oauth(
     })
 }
 
+#[tauri::command]
+pub async fn run_extension_oauth(
+    integration_name: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let (oauth, resolved_client_id, client_secret) = {
+        let registry = state.integration_registry.read().await;
+        let integration = registry
+            .get(&integration_name)
+            .ok_or_else(|| format!("Integration '{}' not found", integration_name))?;
+        let oauth = integration
+            .oauth
+            .clone()
+            .ok_or_else(|| format!("Integration '{}' does not support OAuth", integration_name))?;
+        let resolved_client_id =
+            resolve_oauth_client_id(&registry, &integration_name, &oauth.client_id)?;
+
+        // Resolve client_secret from saved config (e.g., GOOGLE_CLIENT_SECRET)
+        let config = registry.get_config(&integration_name).unwrap_or_default();
+        let secret = config.get("GOOGLE_CLIENT_SECRET")
+            .or_else(|| config.get("client_secret"))
+            .or_else(|| config.get("CLIENT_SECRET"))
+            .cloned()
+            .or_else(|| std::env::var("GOOGLE_CLIENT_SECRET").ok());
+
+        (oauth, resolved_client_id, secret)
+    };
+
+    {
+        let vault = state.credential_vault.read().await;
+        if !vault.is_unlocked().await {
+            return Err(
+                "Unlock the Credential Vault before connecting this integration so OAuth tokens can be stored securely."
+                    .into(),
+            );
+        }
+    }
+
+    tracing::info!(
+        name = %integration_name,
+        auth_url = %oauth.auth_url,
+        scopes = ?oauth.scopes,
+        client_id_len = resolved_client_id.len(),
+        has_secret = client_secret.is_some(),
+        "starting OAuth PKCE flow for extension"
+    );
+
+    let token_response = clawdesk_extensions::oauth::run_pkce_flow(
+        &oauth.auth_url,
+        &oauth.token_url,
+        &resolved_client_id,
+        client_secret.as_deref(),
+        &oauth.scopes,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            name = %integration_name,
+            error = ?e,
+            "OAuth PKCE flow failed"
+        );
+        format!("OAuth failed for '{}': {:?}", integration_name, e)
+    })?;
+
+    tracing::info!(
+        name = %integration_name,
+        has_refresh = token_response.refresh_token.is_some(),
+        "OAuth PKCE flow completed — storing tokens"
+    );
+
+    let vault = state.credential_vault.read().await;
+    vault
+        .store(
+            &format!("{}_access_token", integration_name),
+            &token_response.access_token,
+        )
+        .await
+        .map_err(|e| format!("{:?}", e))?;
+
+    if let Some(refresh) = &token_response.refresh_token {
+        vault
+            .store(&format!("{}_refresh_token", integration_name), refresh)
+            .await
+            .map_err(|e| format!("{:?}", e))?;
+    }
+
+    // Bridge ClawDesk OAuth tokens to gws CLI:
+    // Write a credentials.json that gws auto-discovers at ~/.config/gws/.
+    // This contains the refresh_token + client_id + client_secret so gws
+    // handles token refresh automatically. No need to set access tokens
+    // in env vars (they expire after 1 hour).
+    if integration_name == "google-workspace"
+        || integration_name.starts_with("google-")
+    {
+        if let Some(refresh) = &token_response.refresh_token {
+            let gws_config_dir = {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".to_string());
+                std::path::PathBuf::from(home).join(".config").join("gws")
+            };
+            let _ = std::fs::create_dir_all(&gws_config_dir);
+            let creds_json = serde_json::json!({
+                "type": "authorized_user",
+                "client_id": resolved_client_id,
+                "client_secret": client_secret.as_deref().unwrap_or(""),
+                "refresh_token": refresh
+            });
+            let creds_path = gws_config_dir.join("credentials.json");
+            match std::fs::write(&creds_path, serde_json::to_string_pretty(&creds_json).unwrap_or_default()) {
+                Ok(_) => {
+                    // Set restrictive permissions (owner only)
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600));
+                    }
+                    tracing::info!(
+                        path = ?creds_path,
+                        "Wrote gws credentials.json — gws CLI will auto-discover and refresh tokens"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to write gws credentials.json");
+                    // Fallback: set access token env var (will expire after 1h)
+                    std::env::set_var("GOOGLE_WORKSPACE_CLI_TOKEN", &token_response.access_token);
+                }
+            }
+        } else {
+            // No refresh token — set access token directly (expires after 1h)
+            std::env::set_var("GOOGLE_WORKSPACE_CLI_TOKEN", &token_response.access_token);
+            tracing::warn!("No refresh token from Google — access token will expire in ~1h");
+        }
+    }
+
+    Ok(true)
+}
+
 /// Complete an OAuth 2.0 PKCE flow by exchanging the authorization code.
 #[tauri::command]
 pub async fn complete_extension_oauth(
@@ -701,14 +885,24 @@ pub async fn complete_extension_oauth(
     state_param: String,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let registry = state.integration_registry.read().await;
-    let integration = registry
-        .get(&integration_name)
-        .ok_or_else(|| format!("Integration '{}' not found", integration_name))?;
-    let oauth = integration
-        .oauth
-        .as_ref()
-        .ok_or_else(|| format!("Integration '{}' does not support OAuth", integration_name))?;
+    let (oauth, resolved_client_id, client_secret) = {
+        let registry = state.integration_registry.read().await;
+        let integration = registry
+            .get(&integration_name)
+            .ok_or_else(|| format!("Integration '{}' not found", integration_name))?;
+        let oauth = integration
+            .oauth
+            .clone()
+            .ok_or_else(|| format!("Integration '{}' does not support OAuth", integration_name))?;
+        let resolved_client_id =
+            resolve_oauth_client_id(&registry, &integration_name, &oauth.client_id)?;
+        let config = registry.get_config(&integration_name).unwrap_or_default();
+        let secret = config.get("GOOGLE_CLIENT_SECRET")
+            .or_else(|| config.get("client_secret"))
+            .cloned()
+            .or_else(|| std::env::var("GOOGLE_CLIENT_SECRET").ok());
+        (oauth, resolved_client_id, secret)
+    };
 
     // Retrieve stored PKCE verifier
     let vault = state.credential_vault.read().await;
@@ -728,9 +922,10 @@ pub async fn complete_extension_oauth(
     }
 
     let redirect_uri = "http://localhost:18789/oauth/callback";
-    let token_response = clawdesk_extensions::oauth::exchange_code(
+    let token_response = clawdesk_extensions::oauth::exchange_code_with_secret(
         &oauth.token_url,
-        &oauth.client_id,
+        &resolved_client_id,
+        client_secret.as_deref(),
         &code,
         redirect_uri,
         &verifier,
@@ -888,8 +1083,10 @@ fn resolved_transport_to_mcp_config(
 ) -> Option<clawdesk_mcp::McpServerConfig> {
     let transport = match resolved_transport {
         clawdesk_extensions::registry::TransportConfig::Stdio { command, args } => {
+            // Resolve command to sidecar path if available (e.g., gws → bundled binary)
+            let resolved_command = resolve_sidecar_command(command);
             clawdesk_mcp::McpTransportConfig::Stdio {
-                command: command.clone(),
+                command: resolved_command,
                 args: args.clone(),
             }
         }
@@ -957,9 +1154,55 @@ async fn resolve_credentials(
     env
 }
 
+/// Resolve a command name to a Tauri sidecar path if the binary exists
+/// next to the app executable (Tauri convention). Falls back to the
+/// bare command name for system PATH resolution.
+fn resolve_sidecar_command(command: &str) -> String {
+    // Try to find sidecar binary next to the current executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidates = if cfg!(target_os = "macos") {
+                vec![
+                    dir.join(format!("{}-aarch64-apple-darwin", command)),
+                    dir.join(format!("{}-x86_64-apple-darwin", command)),
+                    dir.join(command),
+                ]
+            } else if cfg!(target_os = "linux") {
+                vec![
+                    dir.join(format!("{}-x86_64-unknown-linux-gnu", command)),
+                    dir.join(format!("{}-aarch64-unknown-linux-gnu", command)),
+                    dir.join(command),
+                ]
+            } else {
+                vec![
+                    dir.join(format!("{}-x86_64-pc-windows-msvc.exe", command)),
+                    dir.join(format!("{}.exe", command)),
+                ]
+            };
+            for candidate in candidates {
+                if candidate.exists() {
+                    tracing::debug!(command, path = ?candidate, "resolved sidecar binary");
+                    return candidate.to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+    // Fallback: check tools/bundled/ in the workspace
+    let bundled = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/bundled")
+        .join(command);
+    if bundled.exists() {
+        tracing::debug!(command, path = ?bundled, "resolved bundled tool binary");
+        return bundled.to_string_lossy().to_string();
+    }
+    // Last resort: use bare command name (system PATH)
+    command.to_string()
+}
+
 /// Connect an integration's MCP server (spawn process + handshake + tool discovery).
 ///
 /// Uses `resolve_transport` for `${KEY}` variable interpolation.
+/// Automatically resolves sidecar binaries (e.g., `gws` → bundled path).
 async fn connect_mcp_for_integration(
     state: &AppState,
     integration: &clawdesk_extensions::Integration,
@@ -999,6 +1242,19 @@ pub(crate) async fn launch_enabled_integrations(state: &AppState) {
         let registry = state.integration_registry.read().await;
         registry.enabled()
     };
+
+    // Bridge any previously stored Google OAuth tokens to the gws CLI env var.
+    // This ensures agents can use `gws` commands immediately after restart
+    // without re-authenticating, as long as the vault is unlocked.
+    {
+        let vault = state.credential_vault.read().await;
+        if vault.is_unlocked().await {
+            if let Ok(Some(token)) = vault.get("google-workspace_access_token").await {
+                std::env::set_var("GOOGLE_WORKSPACE_CLI_TOKEN", &token);
+                tracing::info!("Restored GOOGLE_WORKSPACE_CLI_TOKEN from vault for gws CLI");
+            }
+        }
+    }
 
     let mcp_integrations: Vec<_> = integrations
         .iter()

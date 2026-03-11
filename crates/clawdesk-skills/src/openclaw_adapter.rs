@@ -492,6 +492,9 @@ pub fn adapt_skill(
         // Map name to keyword trigger + always fallback.
         // Legacy gating is load-time (requirements); in ClawDesk we use
         // keyword matching on the skill name so it activates contextually.
+        // Triggers use exact skill-name words only — no semantic aliases.
+        // Disambiguation between similar skills (e.g., gws-gmail vs himalaya)
+        // is handled by the LLM based on the agent's configured extensions.
         let keywords: Vec<String> = name
             .split('-')
             .filter(|w| w.len() > 2)

@@ -86,8 +86,8 @@ pub async fn run_tmux_onboarding(
         attach: true,
     };
 
-    tmux::launch(&config).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-        e.into()
+    tmux::launch(&config).map_err(|e: String| -> Box<dyn std::error::Error + Send + Sync> {
+        Box::from(e.to_string())
     })?;
 
     Ok(())

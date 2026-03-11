@@ -13,7 +13,7 @@ import type {
 
 // ── Types ─────────────────────────────────────────────────────
 
-type ExtTab = "integrations" | "vault" | "health";
+type ExtTab = "integrations" | "health" | "advanced-vault";
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -32,6 +32,13 @@ function groupFields(fields: ConfigFieldInfo[]): Map<string, ConfigFieldInfo[]> 
 const INPUT_CLS =
   "extensions-input";
 const BADGE_CLS = "extensions-badge";
+
+function resolveSavedCredentialValue(
+  config: Record<string, string>,
+  cred: IntegrationInfo["credentials_required"][number],
+) {
+  return config[cred.env_var ?? ""] ?? config[cred.name] ?? "";
+}
 
 // ── ConfigFieldInput ──────────────────────────────────────────
 
@@ -148,45 +155,60 @@ function IntegrationConfigDialog({
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState<Record<string, string>>({});
-  const [credInputs, setCredInputs] = useState<Record<string, string>>({});
+  const [credentialDrafts, setCredentialDrafts] = useState<Record<string, string>>({});
   const [credStatuses, setCredStatuses] = useState<Record<string, boolean>>({});
+  const [authorizing, setAuthorizing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [vaultBusy, setVaultBusy] = useState(false);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [loadingPanel, setLoadingPanel] = useState(true);
   const [testResult, setTestResult] = useState<HealthStatusInfo | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [hasPersistedSetup, setHasPersistedSetup] = useState(false);
+  const [vaultExists, setVaultExists] = useState(false);
   const [vaultUnlocked, setVaultUnlocked] = useState(false);
+  const [vaultPassword, setVaultPassword] = useState("");
+
+  const loadPanel = useCallback(async () => {
+    const [cfg, creds] = await Promise.all([
+      api.getExtensionConfig(integration.name).catch(() => ({} as Record<string, string>)),
+      api.checkExtensionCredentials(integration.name).catch(() => ({} as Record<string, boolean>)),
+    ]);
+    const vault = await api.vaultStatus().catch(() => null);
+
+    const merged: Record<string, string> = {};
+    for (const f of integration.config_fields) {
+      merged[f.key] = cfg[f.key] ?? integration.config_values[f.key] ?? "";
+    }
+    const hydratedCredentials: Record<string, string> = {};
+    for (const cred of integration.credentials_required) {
+      hydratedCredentials[cred.name] = resolveSavedCredentialValue(cfg, cred);
+    }
+
+    setDraft(merged);
+    setCredentialDrafts(hydratedCredentials);
+    setCredStatuses(creds);
+    setVaultExists(Boolean(vault?.exists));
+    setVaultUnlocked(Boolean(vault?.unlocked));
+    setHasPersistedSetup(
+      Object.values(cfg).some((value) => value.trim() !== "") || Object.values(creds).some(Boolean)
+    );
+  }, [integration.name, integration.config_fields, integration.config_values, integration.credentials_required]);
 
   // Hydrate draft + credential statuses on mount
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [cfg, creds] = await Promise.all([
-          api.getExtensionConfig(integration.name).catch(() => ({} as Record<string, string>)),
-          api.checkExtensionCredentials(integration.name).catch(() => ({} as Record<string, boolean>)),
-        ]);
-        const vault = await api.vaultStatus().catch(() => null);
+        await loadPanel();
         if (cancelled) return;
-        // Merge config_values (from listing) with fresh fetch
-        const merged: Record<string, string> = {};
-        for (const f of integration.config_fields) {
-          merged[f.key] = cfg[f.key] ?? integration.config_values[f.key] ?? "";
-        }
-        setDraft(merged);
-        setCredStatuses(creds);
-        setVaultUnlocked(Boolean(vault?.unlocked));
-        setHasPersistedSetup(
-          Object.values(cfg).some((value) => value.trim() !== "") || Object.values(creds).some(Boolean)
-        );
       } finally {
         if (!cancelled) setLoadingPanel(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [integration.name, integration.config_fields, integration.config_values]);
+  }, [loadPanel]);
 
   const grouped = useMemo(() => groupFields(integration.config_fields), [integration.config_fields]);
 
@@ -203,7 +225,7 @@ function IntegrationConfigDialog({
     setSaveMessage(null);
     try {
       const credentialEntries = integration.credentials_required
-        .map((cred) => ({ cred, value: (credInputs[cred.name] ?? "").trim() }))
+        .map((cred) => ({ cred, value: (credentialDrafts[cred.name] ?? "").trim() }))
         .filter((entry) => entry.value.length > 0);
 
       // Save config values (non-empty only)
@@ -252,7 +274,6 @@ function IntegrationConfigDialog({
       // Refresh credential statuses
       const creds = await api.checkExtensionCredentials(integration.name).catch(() => ({} as Record<string, boolean>));
       setCredStatuses(creds);
-      setCredInputs({});
       setHasPersistedSetup(true);
       onSaved();
     } catch (e: any) {
@@ -275,6 +296,48 @@ function IntegrationConfigDialog({
       pushToast(`Test failed: ${e}`);
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handleOAuth = async () => {
+    if (!vaultUnlocked) {
+      pushToast("Unlock the Credential Vault before connecting this integration.");
+      return;
+    }
+    setAuthorizing(true);
+    try {
+      await api.runExtensionOAuth(integration.name);
+      pushToast(`${integration.name} connected successfully`);
+      onSaved();
+    } catch (e: any) {
+      pushToast(`OAuth error: ${e}`);
+    } finally {
+      setAuthorizing(false);
+    }
+  };
+
+  const handleVaultAccess = async () => {
+    if (!vaultPassword.trim()) {
+      pushToast(vaultExists ? "Enter the vault password to unlock it." : "Create a vault password first.");
+      return;
+    }
+
+    setVaultBusy(true);
+    try {
+      if (vaultExists) {
+        await api.vaultUnlock(vaultPassword);
+        pushToast("Credential Vault unlocked for this integration");
+      } else {
+        await api.vaultInitialize(vaultPassword);
+        pushToast("Credential Vault created and unlocked");
+      }
+      setVaultPassword("");
+      await loadPanel();
+      onSaved();
+    } catch (e: any) {
+      pushToast(`Vault error: ${e}`);
+    } finally {
+      setVaultBusy(false);
     }
   };
 
@@ -318,6 +381,40 @@ function IntegrationConfigDialog({
         {saveMessage ? <div className="extensions-config-banner extensions-config-banner--success">{saveMessage}</div> : null}
         {validationErrors.length > 0 ? <div className="extensions-config-banner extensions-config-banner--warning">{validationErrors.length} required field{validationErrors.length > 1 ? "s are" : " is"} still missing.</div> : null}
 
+        {(integration.has_oauth || hasCredentials) ? (
+          <section className="extensions-config-vault">
+            <div className="extensions-config-vault__copy">
+              <div className="extensions-config-vault__title">Credential Vault (App-Wide)</div>
+              <div className="extensions-config-field__help">
+                This vault is shared across all integrations. You can create or unlock it here without leaving this screen, but unlocking it applies to the whole app, not just {integration.name}.
+              </div>
+            </div>
+            <div className="extensions-config-vault__status">
+              <span className={`${BADGE_CLS} ${vaultUnlocked ? "extensions-badge--success" : "extensions-badge--neutral"}`}>
+                {vaultUnlocked ? "App Vault Unlocked" : vaultExists ? "App Vault Locked" : "Vault Not Created"}
+              </span>
+            </div>
+            {!vaultUnlocked ? (
+              <div className="extensions-config-vault__actions">
+                <input
+                  type="password"
+                  value={vaultPassword}
+                  onChange={e => setVaultPassword(e.target.value)}
+                  placeholder={vaultExists ? "Enter vault password" : "Create vault password"}
+                  className={INPUT_CLS}
+                />
+                <button onClick={handleVaultAccess} disabled={vaultBusy} className="btn subtle">
+                  {vaultBusy ? (vaultExists ? "Unlocking…" : "Creating…") : (vaultExists ? "Unlock Vault" : "Create Vault")}
+                </button>
+              </div>
+            ) : (
+              <div className="extensions-config-field__help">
+                Secrets saved in this form are still stored with integration-specific keys such as {integration.name}_token, but the vault lock state is shared app-wide.
+              </div>
+            )}
+          </section>
+        ) : null}
+
         {hasConfigFields && (
           <div className="extensions-config-groups">
             {[...grouped.entries()].map(([group, fields]) => (
@@ -330,6 +427,7 @@ function IntegrationConfigDialog({
                         {f.label}
                         {f.required && <span>*</span>}
                       </label>
+                      <div className="extensions-config-field__help">Config key: {f.key}</div>
                       {f.description ? <div className="extensions-config-field__help">{f.description}</div> : null}
                       <ConfigFieldInput
                         field={f}
@@ -348,9 +446,12 @@ function IntegrationConfigDialog({
         {hasCredentials && (
           <fieldset className="extensions-config-group">
             <legend>Credentials</legend>
+            <div className="extensions-config-field__help">
+              Save credentials here once. Saving this form writes them into the {integration.name} configuration, and if the app vault is unlocked ClawDesk also mirrors them into the shared vault automatically. You do not need to add the same secret again in Advanced Vault.
+            </div>
             {!vaultUnlocked ? (
               <div className="extensions-config-field__help">
-                Credential Vault is locked. Entered secrets will still save into the integration configuration so the agent can use them, but unlock the vault if you want encrypted at-rest storage.
+                The app vault is locked. Entered secrets will still save into the {integration.name} configuration so the agent can use them, but unlock the vault if you want encrypted at-rest storage.
               </div>
             ) : null}
             <div className="extensions-credentials-grid">
@@ -366,15 +467,16 @@ function IntegrationConfigDialog({
                           {cred.required ? <span className="extensions-required-mark">*</span> : null}
                         </div>
                         {cred.description ? <div className="extensions-config-field__help">{cred.description}</div> : null}
-                        {cred.env_var ? <div className="extensions-credential-card__env">env: {cred.env_var}</div> : null}
+                        <div className="extensions-credential-card__env">Used by integration as: {cred.env_var ?? cred.name}</div>
+                        {vaultUnlocked ? <div className="extensions-credential-card__env">Stored in vault as: {integration.name}_{cred.name}</div> : null}
                       </div>
                       <span className={`${BADGE_CLS} ${ok ? "extensions-badge--success" : "extensions-badge--neutral"}`}>{ok ? "Configured" : "Missing"}</span>
                     </div>
                     <input
                       type="password"
-                      value={credInputs[cred.name] ?? ""}
-                      onChange={e => setCredInputs(prev => ({ ...prev, [cred.name]: e.target.value }))}
-                      placeholder={ok ? `Replace ${cred.name}` : `Enter ${cred.name}`}
+                      value={credentialDrafts[cred.name] ?? ""}
+                      onChange={e => setCredentialDrafts(prev => ({ ...prev, [cred.name]: e.target.value }))}
+                      placeholder={ok ? `Configured for ${cred.env_var ?? cred.name}` : `Enter ${cred.env_var ?? cred.name}`}
                       className={INPUT_CLS}
                     />
                   </div>
@@ -391,8 +493,8 @@ function IntegrationConfigDialog({
         <div className="extensions-config-actions">
           <div className="extensions-config-actions__left">
             {integration.has_oauth ? (
-              <button onClick={() => void api.startExtensionOAuth(integration.name).then(flow => { window.open(flow.auth_url, "_blank"); pushToast(`Opening OAuth flow for ${integration.name}…`); }).catch((e: any) => pushToast(`OAuth error: ${e}`))} className="btn subtle">
-                <Icon name="link" /> OAuth
+              <button onClick={handleOAuth} disabled={authorizing} className="btn subtle">
+                <Icon name="link" /> {authorizing ? "Connecting…" : "Connect OAuth"}
               </button>
             ) : null}
             <button onClick={handleTest} disabled={testing} className="btn subtle">
@@ -432,6 +534,7 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
   const [credentialValue, setCredentialValue] = useState("");
   const [credentialNames, setCredentialNames] = useState<string[]>([]);
   const [selectedIntegration, setSelectedIntegration] = useState<IntegrationInfo | null>(null);
+  const [oauthPending, setOAuthPending] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -536,12 +639,19 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
   };
 
   const handleOAuth = async (name: string) => {
+    if (!vaultStatus?.unlocked) {
+      pushToast("Unlock the Credential Vault before connecting an OAuth integration.");
+      return;
+    }
+    setOAuthPending(name);
     try {
-      const flow = await api.startExtensionOAuth(name);
-      window.open(flow.auth_url, "_blank");
-      pushToast(`Opening OAuth flow for ${name}…`);
+      await api.runExtensionOAuth(name);
+      pushToast(`${name} connected successfully`);
+      refresh();
     } catch (e: any) {
       pushToast(`OAuth error: ${e}`);
+    } finally {
+      setOAuthPending(current => (current === name ? null : current));
     }
   };
 
@@ -559,8 +669,8 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
 
   const TABS: { key: ExtTab; label: string }[] = [
     { key: "integrations", label: "Integrations" },
-    { key: "vault", label: "Credential Vault" },
     { key: "health", label: "Health Monitor" },
+    { key: "advanced-vault", label: "Advanced Vault" },
   ];
 
   return (
@@ -595,6 +705,12 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
           </button>
         ))}
       </div>
+
+      {tab !== "integrations" ? (
+        <div className="extensions-tab-note">
+          Most credential setup now happens inside each integration's Configure dialog. Use these screens only for health checks or advanced vault maintenance.
+        </div>
+      ) : null}
 
       {tab === "integrations" && (
         <div className="extensions-pane">
@@ -671,9 +787,10 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
                       {i.has_oauth && (
                         <button
                           onClick={() => handleOAuth(i.name)}
+                          disabled={oauthPending === i.name}
                           className="btn subtle"
                         >
-                          OAuth
+                          {oauthPending === i.name ? "Connecting…" : "OAuth"}
                         </button>
                       )}
                       <button
@@ -694,13 +811,13 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
         </div>
       )}
 
-      {tab === "vault" && (
+      {tab === "advanced-vault" && (
         <div className="extensions-pane">
           <div className="extensions-surface">
             <div className="extensions-surface__head">
               <div>
-                <h3>Credential Vault</h3>
-                <p>Securely store integration secrets and manage reusable credentials.</p>
+                <h3>Advanced Vault Tools</h3>
+                <p>Use this only for direct vault maintenance. Normal integration setup and OAuth now happen inside each integration configuration dialog.</p>
               </div>
               <span className={`extensions-status-chip ${
                 vaultStatus?.unlocked
@@ -749,8 +866,8 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
             <div className="extensions-surface">
               <div className="extensions-surface__head">
                 <div>
-                  <h3>Add Credential</h3>
-                  <p>Store a reusable secret in the vault.</p>
+                  <h3>Add Raw Vault Entry</h3>
+                  <p>Store a reusable secret directly in the vault when you need manual control outside a specific integration.</p>
                 </div>
               </div>
               <div className="extensions-inline-form">
@@ -782,8 +899,8 @@ export function ExtensionsPage({ pushToast }: ExtensionsPageProps) {
             <div className="extensions-surface">
               <div className="extensions-surface__head">
                 <div>
-                  <h3>Stored Credentials</h3>
-                  <p>Vault entries currently available to extensions.</p>
+                  <h3>Stored Vault Entries</h3>
+                  <p>Direct vault entries currently available to extensions and OAuth flows.</p>
                 </div>
               </div>
               <div className="extensions-credential-list">

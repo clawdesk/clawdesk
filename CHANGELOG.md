@@ -1,5 +1,137 @@
 # Changelog
 
+## [Unreleased] — 2026-03-10
+
+### Fixed
+
+#### Gateway Agent Pipeline (Critical)
+The HTTP gateway and daemon were missing critical pipeline stages that the
+Tauri desktop app had, causing gateway agents to behave as generic chatbots.
+
+- **System prompt**: Gateway `send_message()` hardcoded `"You are a helpful
+  assistant."` instead of loading agent personas from the registry. Now resolves
+  agent by `agent_id` → `"default"` → first available, using the agent's full
+  system prompt. (`routes.rs`)
+
+- **Tools**: Gateway CLI created an empty `ToolRegistry::new()` without calling
+  `register_builtin_tools()`. Agents had zero tools (no file, shell, web search).
+  Both `gateway run` and `daemon` now register all builtin tools. (`main.rs`)
+
+- **Skills**: Gateway never loaded the 52 bundled skills embedded in the binary.
+  Now calls `load_bundled_skills()` and merges with user skills from disk.
+  Hot-reload (`reload_skills()`) also preserves bundled skills. (`main.rs`,
+  `state.rs`)
+
+- **SkillProvider**: Gateway `AgentRunner` had no `SkillProvider` wired, so
+  per-turn skill selection (trigger evaluation + knapsack) never ran. Now builds
+  `OrchestratorSkillProvider` from the skill registry and wires it into the
+  runner builder. (`routes.rs`)
+
+- **Provider/model ordering**: Provider was resolved before the agent registry
+  was consulted, causing model mismatches. Restructured to resolve agent first,
+  then derive effective model and provider. (`routes.rs`)
+
+- **WebSocket system prompt**: WS handler streamed with `system_prompt: None`.
+  Now resolves agent persona from registry. Added `agent_id` field to
+  `WsRequest`. (`ws.rs`)
+
+- **Dynamic spawn**: `dynamic_spawn` handler built an ephemeral system prompt
+  but passed `String::new()` to `runner.run()`, discarding it. Now passes the
+  actual ephemeral prompt. (`commands.rs`)
+
+- **Empty persona fallback**: Agents created without a persona got an empty
+  identity section. Now falls back to `DEFAULT_SYSTEM_PROMPT`. (`commands.rs`)
+
+#### Centralized Defaults
+- Added `DEFAULT_SYSTEM_PROMPT` constant in `clawdesk_types::session` so all
+  crates share the same capable fallback prompt instead of duplicated strings.
+- Updated `AgentConfig::default()`, `SessionConfig::default()`,
+  `EnrichedBackend::new()`, gateway routes, and WS handler to use it.
+
+#### General Assistant Template
+- Expanded `general-assistant.toml` system prompt from 4 generic lines to
+  a comprehensive prompt encouraging proactive tool use.
+- Enabled full tool capabilities: `shell`, `filesystem_write`, `http_fetch`.
+
+#### Missing Channel Factory Registrations
+Signal, Matrix, Microsoft Teams, and Mastodon had full Rust implementations
+(300-500 lines each) but were never registered in `ChannelFactory::with_builtins()`.
+
+- **Signal**: Registered with ConfigSchema (phone_number, rpc_endpoint).
+  Env vars: `SIGNAL_PHONE_NUMBER`. (`factory.rs`)
+- **Matrix**: Registered with ConfigSchema (homeserver_url, user_id, access_token).
+  Env vars: `MATRIX_HOMESERVER_URL`, `MATRIX_USER_ID`, `MATRIX_ACCESS_TOKEN`. (`factory.rs`)
+- **MS Teams**: Registered with ConfigSchema (app_id, app_secret, tenant_id).
+  Env vars: `TEAMS_APP_ID`, `TEAMS_APP_SECRET`, `TEAMS_TENANT_ID`. (`factory.rs`)
+- **Mastodon**: Registered with ConfigSchema (instance_url, access_token, username).
+  Env vars: `MASTODON_INSTANCE_URL`, `MASTODON_ACCESS_TOKEN`, `MASTODON_USERNAME`. (`factory.rs`)
+- All 4 channels now appear in the Tauri Channels UI as "Available" when env
+  vars are not set, or "Connected" when configured. (`state.rs`)
+
+#### Gateway Prompt Pipeline Parity
+The gateway HTTP path now uses the same PromptBuilder pipeline as Tauri
+desktop, instead of sending raw agent persona strings to the LLM.
+
+- **PromptBuilder integration**: Gateway `send_message()` now runs the full
+  `PromptBuilder` knapsack pipeline — scored skills, identity section, runtime
+  context (datetime, channel, model), and budget-allocated sections. Previously
+  it just fetched the static `agent.system_prompt`. (`routes.rs`)
+
+- **Hook manager**: Added `hook_manager: Arc<HookManager>` field to
+  `GatewayState`. Wired into AgentRunner via `.with_hook_manager()` so gateway
+  agents fire plugin lifecycle hooks (before-agent-start, before-tool-call,
+  etc.). (`state.rs`, `routes.rs`)
+
+- **Channel awareness**: Gateway prompt now includes available channel list
+  from the channel registry, enabling cross-channel message routing awareness
+  in the system prompt. (`routes.rs`)
+
+### Added
+
+- **41 Google Workspace skills**: Copied all GWS CLI skills into bundled
+  skills directory (`openclaw-skills/gws-*`). Includes: gws-drive, gws-gmail,
+  gws-gmail-send, gws-gmail-triage, gws-gmail-reply, gws-calendar,
+  gws-calendar-agenda, gws-calendar-insert, gws-sheets, gws-sheets-read,
+  gws-sheets-append, gws-docs, gws-docs-write, gws-slides, gws-tasks,
+  gws-people, gws-chat, gws-chat-send, gws-workflow (6 workflow variants),
+  gws-events, gws-forms, gws-keep, gws-meet, gws-classroom,
+  gws-admin-reports, gws-modelarmor (4 variants), and gws-shared.
+  All embedded via `include_dir!` — no separate installation needed.
+
+- **Google Workspace integration**: Added `google-workspace` entry to the
+  Extensions registry (26th integration). Shows in Extensions UI with
+  Configure + OAuth buttons. Supports 3 auth methods: `gws` (automated via
+  gws CLI), `manual` (Google Cloud Console client ID/secret), or `token`
+  (direct access token). OAuth uses the same PKCE flow as other integrations.
+
+- **OAuth template resolution fix**: The `start_extension_oauth` command now
+  resolves `${KEY}` templates from user-saved config AND env vars before
+  building the auth URL. Previously, clicking "OAuth" on google-calendar
+  or google-drive did nothing because `client_id="${GCAL_CLIENT_ID}"` was
+  passed literally. Now returns a clear error if the key isn't configured.
+  (`commands_extensions.rs`)
+
+- **Skill budget increase**: Gateway prompt `skills_cap` increased from 4096
+  to 6144 tokens to accommodate 90+ bundled skills (52 original + 41 GWS).
+  The PromptBuilder's knapsack algorithm automatically selects the best
+  skills per-turn based on value density. (`routes.rs`)
+
+- **GWS binary co-distribution**: Added `scripts/build-gws.sh` to build the
+  Google Workspace CLI (`gws`) from source and ship it in `tools/bundled/gws`.
+  The original `gws` crate (Apache-2.0, Google LLC / Justin Poehnelt) is
+  built unmodified from its source at `../cli`. License file copied alongside
+  binary as `GWS-LICENSE`. ClawDesk agents can call `gws` at runtime for
+  Drive, Gmail, Calendar, Sheets, and 17 other Google Workspace APIs.
+
+- **Architecture diagrams**: SVG flow diagrams in `docs/diagrams/`:
+  - `clawdesk-tauri-flow.svg` — Full Tauri desktop request→response lineage
+    including all 4 entry points, OAuth/PKCE auth, credential vault, profile
+    rotation, 17 channels, 52 skills, 15+ tools, MCP bridge, multi-agent
+    orchestration, cross-channel routing, 7 persistence stores
+  - `clawdesk-gateway-flow.svg` — Gateway HTTP request→response lineage
+  - `openclaw-flow.svg` — OpenClaw request→response lineage
+  - `clawdesk-vs-openclaw-comparison.svg` — Side-by-side architecture comparison
+
 ## [Unreleased] — 2026-02-22
 
 ### Added

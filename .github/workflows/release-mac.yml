@@ -77,6 +77,15 @@ jobs:
             cargo install tauri-cli --version "^2.0"
           fi
 
+      - name: Build gws sidecar (Google Workspace CLI)
+        run: |
+          # Build from source if local checkout exists, otherwise download release
+          if [ -d "../cli" ]; then
+            bash scripts/download-gws.sh --target ${{ matrix.target }}
+          else
+            bash scripts/download-gws.sh --download --target ${{ matrix.target }}
+          fi
+
       # ── Apple Code Signing ──────────────────────────────────
       - name: Import Apple certificate
         env:

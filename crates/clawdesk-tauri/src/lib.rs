@@ -392,6 +392,7 @@ pub fn run() {
             commands_extensions::get_integration_health,
             commands_extensions::check_integration_health,
             commands_extensions::start_extension_oauth,
+            commands_extensions::run_extension_oauth,
             commands_extensions::complete_extension_oauth,
             // ── Migration: Import from other AI apps ──────────────────
             commands_migrate::list_migration_sources,

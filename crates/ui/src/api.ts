@@ -2148,6 +2148,11 @@ export async function startExtensionOAuth(integrationName: string): Promise<OAut
   return invoke<OAuthFlowInfo>("start_extension_oauth", { integrationName });
 }
 
+export async function runExtensionOAuth(integrationName: string): Promise<boolean> {
+  if (isBrowserDev) return true;
+  return invoke<boolean>("run_extension_oauth", { integrationName });
+}
+
 export async function completeExtensionOAuth(
   integrationName: string,
   code: string,

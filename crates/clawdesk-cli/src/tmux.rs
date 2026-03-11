@@ -244,17 +244,11 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
         "-n", "Overview",
     ])?;
 
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Overview.0"),
-        &format!("watch -n5 -t '{clawdesk} doctor --verbose 2>/dev/null || echo \"Run: {clawdesk} gateway run\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Overview.0", &format!("watch -n5 -t '{clawdesk} doctor --verbose 2>/dev/null || echo \"Run: {clawdesk} gateway run\"'"))?;
     set_pane_title(name, "Overview.0", "System Health")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Overview.0"), "-c", dir, "-p", "45"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Overview.1"),
-        &format!("echo '┌─── Provider Status ───┐' && echo '' && \
+        execute_payload(name, "Overview.1", &format!("echo '┌─── Provider Status ───┐' && echo '' && \
                    {clawdesk} config get providers 2>/dev/null || echo '  No providers configured' && \
                    echo '' && echo '  Run: {clawdesk} init' && echo '' && \
                    echo '┌─── Navigation ────────┐' && echo '' && \
@@ -276,25 +270,15 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '  SYSTEM (Ctrl-B + n to scroll)' && \
                    echo '    10:Settings  11:Logs  12:Models' && \
                    echo '    13:Docs  14:Runtime' && echo '' && \
-                   echo '  Ctrl-B + d  Detach (session stays alive)'"),
-        "Enter",
-    ])?;
+                   echo '  Ctrl-B + d  Detach (session stays alive)'"))?;
     set_pane_title(name, "Overview.1", "Providers & Navigation")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:Overview.0"), "-c", dir, "-p", "40"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Overview.2"),
-        &format!("watch -n10 -t '{clawdesk} agent list 2>/dev/null || echo \"No agents registered\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Overview.2", &format!("watch -n10 -t '{clawdesk} agent list 2>/dev/null || echo \"No agents registered\"'"))?;
     set_pane_title(name, "Overview.2", "Agents")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:Overview.1"), "-c", dir, "-p", "40"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Overview.3"),
-        &format!("watch -n10 -t '{clawdesk} daemon status 2>/dev/null || echo \"Daemon not running\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Overview.3", &format!("watch -n10 -t '{clawdesk} daemon status 2>/dev/null || echo \"Daemon not running\"'"))?;
     set_pane_title(name, "Overview.3", "Daemon Status")?;
 
     tmux_cmd(&["select-pane", "-t", &format!("{name}:Overview.0")])?;
@@ -307,17 +291,11 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └──────────────────────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Chat", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Chat.0"),
-        &format!("{clawdesk} agent run --workspace {dir}{model_flag}"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Chat.0", &format!("{clawdesk} agent run --workspace {dir}{model_flag}"))?;
     set_pane_title(name, "Chat.0", "Agent Chat")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:Chat.0"), "-c", dir, "-p", "20"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Chat.1"),
-        &format!("echo '──── Chat Session ────' && echo '' && \
+        execute_payload(name, "Chat.1", &format!("echo '──── Chat Session ────' && echo '' && \
                    echo '  Model: {}{model_flag}' && \
                    echo '  Workspace: {dir}' && echo '' && \
                    echo '  Commands:' && \
@@ -330,9 +308,7 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '  Tips:' && \
                    echo '    Ctrl-B + z  = zoom chat pane full screen' && \
                    echo '    Ctrl-B + 0  = back to Overview'",
-                   config.model.as_deref().unwrap_or("default")),
-        "Enter",
-    ])?;
+                   config.model.as_deref().unwrap_or("default")))?;
     set_pane_title(name, "Chat.1", "Session Info")?;
     tmux_cmd(&["select-pane", "-t", &format!("{name}:Chat.0")])?;
 
@@ -348,23 +324,17 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └──────────────────────────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "A2A", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:A2A.0"),
-        &format!("echo '──── A2A Directory ────' && echo '' && \
+        execute_payload(name, "A2A.0", &format!("echo '──── A2A Directory ────' && echo '' && \
                    echo '  Agent-to-Agent protocol for multi-agent collaboration.' && echo '' && \
                    echo '  Registered peers:' && \
                    {clawdesk} a2a list 2>/dev/null || echo '    (none discovered yet)' && echo '' && \
                    echo '  Discover:  {clawdesk} a2a discover' && \
                    echo '  Register:  {clawdesk} a2a register <url>' && \
-                   echo '  Agent card: {clawdesk} a2a card' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Agent card: {clawdesk} a2a card' && echo ''"))?;
     set_pane_title(name, "A2A.0", "Peers")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:A2A.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:A2A.1"),
-        &format!("echo '──── Agent Card ────' && echo '' && \
+        execute_payload(name, "A2A.1", &format!("echo '──── Agent Card ────' && echo '' && \
                    echo '  Your agent card (/.well-known/agent.json):' && echo '' && \
                    {clawdesk} a2a card --json 2>/dev/null || \
                    echo '  Not generated yet. Run:' && \
@@ -373,18 +343,12 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '    • Agent name, description, version' && \
                    echo '    • Supported skills and capabilities' && \
                    echo '    • A2A protocol endpoint URL' && \
-                   echo '    • Authentication requirements' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '    • Authentication requirements' && echo ''"))?;
     set_pane_title(name, "A2A.1", "Agent Card")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:A2A.0"), "-c", dir, "-p", "30"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:A2A.2"),
-        &format!("echo '  A2A uses Google Agent-to-Agent protocol.' && \
-                   echo '  Try: {clawdesk} a2a discover --network local'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "A2A.2", &format!("echo '  A2A uses Google Agent-to-Agent protocol.' && \
+                   echo '  Try: {clawdesk} a2a discover --network local'"))?;
     set_pane_title(name, "A2A.2", "Discovery")?;
 
     // ╔════════════════════════════════════════════════════════╗
@@ -399,17 +363,11 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └──────────────────────────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Skills", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Skills.0"),
-        &format!("watch -n15 -t '{clawdesk} skill list 2>/dev/null || echo \"Skill registry empty\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Skills.0", &format!("watch -n15 -t '{clawdesk} skill list 2>/dev/null || echo \"Skill registry empty\"'"))?;
     set_pane_title(name, "Skills.0", "Registry")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Skills.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Skills.1"),
-        &format!("echo '──── Skill Management ────' && echo '' && \
+        execute_payload(name, "Skills.1", &format!("echo '──── Skill Management ────' && echo '' && \
                    echo '  15+ built-in skills: file ops, shell, browser,' && \
                    echo '  memory, cron, code review, research, etc.' && echo '' && \
                    echo '  Commands:' && \
@@ -420,17 +378,11 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '    {clawdesk} skill lint            — validate' && \
                    echo '    {clawdesk} skill test            — dry-run' && \
                    echo '    {clawdesk} skill audit           — security check' && echo '' && \
-                   echo '  Workspace skills: drop SKILL.md in your project' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Workspace skills: drop SKILL.md in your project' && echo ''"))?;
     set_pane_title(name, "Skills.1", "Detail")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:Skills.0"), "-c", dir, "-p", "25"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Skills.2"),
-        &format!("echo '  Try: {clawdesk} skill search code-review'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Skills.2", &format!("echo '  Try: {clawdesk} skill search code-review'"))?;
     set_pane_title(name, "Skills.2", "Actions")?;
 
     // ── Window 4: Automations ────────────────────────────────
@@ -439,17 +391,11 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └─────────────────────┴────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Automations", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Automations.0"),
-        &format!("watch -n10 -t '{clawdesk} cron list 2>/dev/null || echo \"No scheduled jobs\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Automations.0", &format!("watch -n10 -t '{clawdesk} cron list 2>/dev/null || echo \"No scheduled jobs\"'"))?;
     set_pane_title(name, "Automations.0", "Scheduled Jobs")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Automations.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Automations.1"),
-        &format!("echo '──── Automations ────' && echo '' && \
+        execute_payload(name, "Automations.1", &format!("echo '──── Automations ────' && echo '' && \
                    echo '  Schedule recurring agent tasks with cron syntax.' && echo '' && \
                    echo '  Commands:' && \
                    echo '    {clawdesk} cron list              — view jobs' && \
@@ -460,9 +406,7 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '  Examples:' && \
                    echo '    \"0 9 * * *\"  \"summarize daily emails\"' && \
                    echo '    \"*/30 * * * *\"  \"check channel health\"' && \
-                   echo '    \"0 0 * * 0\"  \"weekly security audit\"' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '    \"0 0 * * 0\"  \"weekly security audit\"' && echo ''"))?;
     set_pane_title(name, "Automations.1", "Job Management")?;
 
     // ╔════════════════════════════════════════════════════════╗
@@ -477,34 +421,22 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └──────────────────────────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Agents", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Agents.0"),
-        &format!("watch -n10 -t '{clawdesk} agent list --bindings 2>/dev/null || echo \"No agents\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Agents.0", &format!("watch -n10 -t '{clawdesk} agent list --bindings 2>/dev/null || echo \"No agents\"'"))?;
     set_pane_title(name, "Agents.0", "Registry")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Agents.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Agents.1"),
-        &format!("echo '──── Agent Management ────' && echo '' && \
+        execute_payload(name, "Agents.1", &format!("echo '──── Agent Management ────' && echo '' && \
                    echo '  Create:    {clawdesk} agent add <id>' && \
                    echo '  Validate:  {clawdesk} agent validate' && \
                    echo '  Reload:    {clawdesk} agent apply' && \
                    echo '  Export:    {clawdesk} agent export <id>' && echo '' && \
                    echo '  Team mode: {clawdesk} agent run --team-dir ./agents/' && echo '' && \
                    echo '  Each agent is defined by a TOML file.' && \
-                   echo '  Drop .toml files in ~/.clawdesk/agents/' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Drop .toml files in ~/.clawdesk/agents/' && echo ''"))?;
     set_pane_title(name, "Agents.1", "Management")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:Agents.0"), "-c", dir, "-p", "30"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Agents.2"),
-        &format!("echo '  Try: {clawdesk} agent add my-agent'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Agents.2", &format!("echo '  Try: {clawdesk} agent add my-agent'"))?;
     set_pane_title(name, "Agents.2", "Actions")?;
 
     // ── Window 6: Channels ───────────────────────────────────
@@ -513,26 +445,18 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └─────────────────────┴────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Channels", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Channels.0"),
-        &format!("watch -n8 -t '{clawdesk} channels status --probe 2>/dev/null || echo \"No channels configured\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Channels.0", &format!("watch -n8 -t '{clawdesk} channels status --probe 2>/dev/null || echo \"No channels configured\"'"))?;
     set_pane_title(name, "Channels.0", "Status")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Channels.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Channels.1"),
-        &format!("echo '──── Channel Configuration ────' && echo '' && \
+        execute_payload(name, "Channels.1", &format!("echo '──── Channel Configuration ────' && echo '' && \
                    echo '  Supported channels:' && \
                    echo '    Telegram, Discord, Slack, WhatsApp,' && \
                    echo '    Signal, Matrix, Email, IRC, Teams,' && \
                    echo '    iMessage, Mastodon, Nostr, Twitch,' && \
                    echo '    Line, Lark, Mattermost, Webchat' && echo '' && \
                    echo '  Configure: {clawdesk} init  (step 4)' && \
-                   echo '  Or edit:   ~/.clawdesk/channels.json' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Or edit:   ~/.clawdesk/channels.json' && echo ''"))?;
     set_pane_title(name, "Channels.1", "Config")?;
 
     // ── Window 7: Files ──────────────────────────────────────
@@ -541,19 +465,13 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └─────────────────────┴────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Files", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Files.0"),
-        &format!("echo '──── Workspace Files ────' && echo '' && ls -la {dir} && echo '' && \
+        execute_payload(name, "Files.0", &format!("echo '──── Workspace Files ────' && echo '' && ls -la {dir} && echo '' && \
                    echo '  Storage root: ~/.clawdesk/' && \
-                   echo '  Workspace:    {dir}' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Workspace:    {dir}' && echo ''"))?;
     set_pane_title(name, "Files.0", "Browser")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Files.0"), "-c", dir, "-p", "45"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Files.1"),
-        &format!("echo '──── File Actions ────' && echo '' && \
+        execute_payload(name, "Files.1", &format!("echo '──── File Actions ────' && echo '' && \
                    echo '  The agent can read, write, and manage files' && \
                    echo '  within the workspace scope.' && echo '' && \
                    echo '  Skills:' && \
@@ -566,9 +484,7 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '  Config dir layout:' && \
                    echo '    ~/.clawdesk/agents/     Agent definitions' && \
                    echo '    ~/.clawdesk/sochdb/     Vector database' && \
-                   echo '    ~/.clawdesk/extensions/ Installed extensions' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '    ~/.clawdesk/extensions/ Installed extensions' && echo ''"))?;
     set_pane_title(name, "Files.1", "Actions")?;
 
     // ╔════════════════════════════════════════════════════════╗
@@ -581,17 +497,11 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └─────────────────────┴────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Extensions", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Extensions.0"),
-        &format!("watch -n15 -t '{clawdesk} extension list 2>/dev/null || echo \"No extensions installed\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Extensions.0", &format!("watch -n15 -t '{clawdesk} extension list 2>/dev/null || echo \"No extensions installed\"'"))?;
     set_pane_title(name, "Extensions.0", "Installed")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Extensions.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Extensions.1"),
-        &format!("echo '──── Extensions ────' && echo '' && \
+        execute_payload(name, "Extensions.1", &format!("echo '──── Extensions ────' && echo '' && \
                    echo '  Extend ClawDesk with WASM plugins.' && echo '' && \
                    echo '  Commands:' && \
                    echo '    {clawdesk} extension list      — browse installed' && \
@@ -601,9 +511,7 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '    {clawdesk} extension create    — scaffold new' && echo '' && \
                    echo '  Extensions run in a capability-sandboxed WASM' && \
                    echo '  runtime with explicit permission grants.' && echo '' && \
-                   echo '  Dir: ~/.clawdesk/extensions/' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Dir: ~/.clawdesk/extensions/' && echo ''"))?;
     set_pane_title(name, "Extensions.1", "Management")?;
 
     // ── Window 9: MCP ────────────────────────────────────────
@@ -612,17 +520,11 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └─────────────────────┴────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "MCP", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:MCP.0"),
-        &format!("watch -n10 -t '{clawdesk} mcp list 2>/dev/null || echo \"No MCP servers connected\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "MCP.0", &format!("watch -n10 -t '{clawdesk} mcp list 2>/dev/null || echo \"No MCP servers connected\"'"))?;
     set_pane_title(name, "MCP.0", "Servers")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:MCP.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:MCP.1"),
-        &format!("echo '──── Model Context Protocol ────' && echo '' && \
+        execute_payload(name, "MCP.1", &format!("echo '──── Model Context Protocol ────' && echo '' && \
                    echo '  MCP connects agents to external tool servers.' && echo '' && \
                    echo '  Commands:' && \
                    echo '    {clawdesk} mcp list           — list servers' && \
@@ -632,9 +534,7 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '    {clawdesk} mcp disconnect     — remove server' && echo '' && \
                    echo '  Servers provide tools, prompts, and resources' && \
                    echo '  that agents can use during conversations.' && echo '' && \
-                   echo '  Config: ~/.clawdesk/mcp.json' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Config: ~/.clawdesk/mcp.json' && echo ''"))?;
     set_pane_title(name, "MCP.1", "Tools")?;
 
     // ╔════════════════════════════════════════════════════════╗
@@ -647,9 +547,7 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └─────────────────────┴────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Settings", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Settings.0"),
-        &format!("echo '──── Configuration ────' && echo '' && \
+        execute_payload(name, "Settings.0", &format!("echo '──── Configuration ────' && echo '' && \
                    echo '  View:   {clawdesk} config get <key>' && \
                    echo '  Set:    {clawdesk} config set <key> <value>' && \
                    echo '  Backup: {clawdesk} config backup' && \
@@ -660,15 +558,11 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '    gateway.port    — gateway port' && \
                    echo '    gateway.host    — gateway bind address' && echo '' && \
                    echo '  Data dir: ~/.clawdesk/' && \
-                   echo '  Re-run setup: {clawdesk} init' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Re-run setup: {clawdesk} init' && echo ''"))?;
     set_pane_title(name, "Settings.0", "Config")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Settings.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Settings.1"),
-        &format!("echo '──── Provider Setup ────' && echo '' && \
+        execute_payload(name, "Settings.1", &format!("echo '──── Provider Setup ────' && echo '' && \
                    echo '  Providers (8 supported):' && \
                    echo '    Anthropic  — claude-sonnet-4, claude-haiku-4.5' && \
                    echo '    OpenAI     — gpt-4o, gpt-4o-mini' && \
@@ -681,9 +575,7 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '  Set API key:' && \
                    echo '    export ANTHROPIC_API_KEY=\"sk-ant-...\"' && \
                    echo '    export OPENAI_API_KEY=\"sk-...\"' && echo '' && \
-                   echo '  Or use: {clawdesk} login' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Or use: {clawdesk} login' && echo ''"))?;
     set_pane_title(name, "Settings.1", "Providers")?;
 
     // ── Window 11: Logs ──────────────────────────────────────
@@ -694,19 +586,11 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └──────────────────────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Logs", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Logs.0"),
-        &format!("{clawdesk} gateway run --port 18789 2>&1"),
-        "",
-    ])?;
+        execute_payload(name, "Logs.0", &format!("{clawdesk} gateway run --port 18789 2>&1"))?;
     set_pane_title(name, "Logs.0", "Gateway Output")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:Logs.0"), "-c", dir, "-p", "30"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Logs.1"),
-        &format!("{clawdesk} daemon logs -n 100 2>/dev/null || echo 'Daemon not running. Start with: {clawdesk} daemon start'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Logs.1", &format!("{clawdesk} daemon logs -n 100 2>/dev/null || echo 'Daemon not running. Start with: {clawdesk} daemon start'"))?;
     set_pane_title(name, "Logs.1", "Daemon")?;
 
     // ── Window 12: Local Models ──────────────────────────────
@@ -715,20 +599,14 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └─────────────────────┴────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Models", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Models.0"),
-        &format!("watch -n15 -t '{clawdesk} models list 2>/dev/null || \
+        execute_payload(name, "Models.0", &format!("watch -n15 -t '{clawdesk} models list 2>/dev/null || \
                    ollama list 2>/dev/null || \
                    echo \"No local model runtime found.\" && \
-                   echo \"Install Ollama: curl -fsSL https://ollama.ai/install.sh | sh\"'"),
-        "Enter",
-    ])?;
+                   echo \"Install Ollama: curl -fsSL https://ollama.ai/install.sh | sh\"'"))?;
     set_pane_title(name, "Models.0", "Installed Models")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Models.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Models.1"),
-        &format!("echo '──── Local Models ────' && echo '' && \
+        execute_payload(name, "Models.1", &format!("echo '──── Local Models ────' && echo '' && \
                    echo '  Run models locally with Ollama or llama.cpp.' && echo '' && \
                    echo '  Commands:' && \
                    echo '    {clawdesk} models list           — installed models' && \
@@ -741,9 +619,7 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '    codellama    — Code Llama 7B/13B' && \
                    echo '    deepseek-r1  — DeepSeek R1' && \
                    echo '    phi4         — Microsoft Phi-4' && echo '' && \
-                   echo '  Ollama: ollama pull llama3.2' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Ollama: ollama pull llama3.2' && echo ''"))?;
     set_pane_title(name, "Models.1", "Download Manager")?;
 
     // ── Window 13: Documents ─────────────────────────────────
@@ -752,9 +628,7 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └─────────────────────┴────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Docs", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Docs.0"),
-        &format!("echo '──── Documents ────' && echo '' && \
+        execute_payload(name, "Docs.0", &format!("echo '──── Documents ────' && echo '' && \
                    echo '  RAG (Retrieval-Augmented Generation) document store.' && echo '' && \
                    echo '  Manage:' && \
                    echo '    {clawdesk} docs index <path>   — index documents' && \
@@ -765,15 +639,11 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '    .md, .txt, .pdf, .html, .json, .csv,' && \
                    echo '    .rs, .py, .js, .ts, .go, .java, ...' && echo '' && \
                    echo '  Indexed documents are chunked, embedded, and' && \
-                   echo '  stored in SochDB for vector + BM25 search.' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  stored in SochDB for vector + BM25 search.' && echo ''"))?;
     set_pane_title(name, "Docs.0", "Document Index")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Docs.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Docs.1"),
-        &format!("echo '──── Memory & Search ────' && echo '' && \
+        execute_payload(name, "Docs.1", &format!("echo '──── Memory & Search ────' && echo '' && \
                    echo '  Hybrid search pipeline:' && \
                    echo '    1. HNSW vector similarity (cosine)' && \
                    echo '    2. BM25 full-text search' && \
@@ -784,9 +654,7 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
                    echo '    OpenAI, Cohere, Voyage, Ollama,' && \
                    echo '    HuggingFace (with FTS fallback)' && echo '' && \
                    echo '  Database: SochDB @ ~/.clawdesk/sochdb/' && \
-                   echo '  Config:   {clawdesk} config get memory' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  Config:   {clawdesk} config get memory' && echo ''"))?;
     set_pane_title(name, "Docs.1", "Search & RAG")?;
 
     // ── Window 14: Runtime ───────────────────────────────────
@@ -797,37 +665,25 @@ fn launch_desktop(config: &TmuxConfig) -> Result<(), String> {
     // └──────────────────────────────────────────┘
 
     tmux_cmd(&["new-window", "-t", name, "-n", "Runtime", "-c", dir])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Runtime.0"),
-        &format!("watch -n5 -t '{clawdesk} daemon status --verbose 2>/dev/null || echo \"Daemon not running\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "Runtime.0", &format!("watch -n5 -t '{clawdesk} daemon status --verbose 2>/dev/null || echo \"Daemon not running\"'"))?;
     set_pane_title(name, "Runtime.0", "Process Status")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:Runtime.0"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Runtime.1"),
-        &format!("watch -n3 -t 'echo \"──── Resource Usage ────\" && echo \"\" && \
+        execute_payload(name, "Runtime.1", &format!("watch -n3 -t 'echo \"──── Resource Usage ────\" && echo \"\" && \
                    ps aux | head -1 && \
                    ps aux | grep -E \"(clawdesk|ollama|llama)\" | grep -v grep 2>/dev/null || \
                    echo \"  No ClawDesk processes running\" && \
                    echo \"\" && echo \"──── Memory ────\" && \
-                   {clawdesk} doctor 2>/dev/null | grep -i -E \"(memory|disk|cpu)\" || echo \"  Run gateway for diagnostics\"'"),
-        "Enter",
-    ])?;
+                   {clawdesk} doctor 2>/dev/null | grep -i -E \"(memory|disk|cpu)\" || echo \"  Run gateway for diagnostics\"'"))?;
     set_pane_title(name, "Runtime.1", "Resources")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:Runtime.0"), "-c", dir, "-p", "35"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:Runtime.2"),
-        &format!("{clawdesk} security audit 2>/dev/null || \
+        execute_payload(name, "Runtime.2", &format!("{clawdesk} security audit 2>/dev/null || \
                    echo '──── Security ────' && \
                    echo '' && \
                    echo '  Run: {clawdesk} security audit' && \
                    echo '  Deep: {clawdesk} security audit --deep' && \
-                   echo '  Fix:  {clawdesk} security audit --fix'"),
-        "Enter",
-    ])?;
+                   echo '  Fix:  {clawdesk} security audit --fix'"))?;
     set_pane_title(name, "Runtime.2", "Security")?;
 
     // ── Global configuration ─────────────────────────────────
@@ -976,41 +832,25 @@ fn launch_workspace(config: &TmuxConfig) -> Result<(), String> {
         "-x", "220", "-y", "55",
     ])?;
 
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:0.0"),
-        &format!("{clawdesk} agent run --workspace {dir}{model_flag}"),
-        "Enter",
-    ])?;
+        execute_payload(name, "0.0", &format!("{clawdesk} agent run --workspace {dir}{model_flag}"))?;
     set_pane_title(name, "0.0", "Agent REPL")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:0.0"), "-c", dir, "-p", "40"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:0.1"),
-        &format!("{clawdesk} gateway run --port 18789 2>&1"),
-        "",
-    ])?;
+        execute_payload(name, "0.1", &format!("{clawdesk} gateway run --port 18789 2>&1"))?;
     set_pane_title(name, "0.1", "Gateway")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:0.1"), "-c", dir, "-p", "35"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:0.2"),
-        &format!("watch -n5 '{clawdesk} doctor 2>/dev/null || echo \"Gateway not running\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "0.2", &format!("watch -n5 '{clawdesk} doctor 2>/dev/null || echo \"Gateway not running\"'"))?;
     set_pane_title(name, "0.2", "Health")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:0.0"), "-c", dir, "-p", "20"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:0.3"),
-        &format!("echo '──── Quick Commands ────' && echo '' && \
+        execute_payload(name, "0.3", &format!("echo '──── Quick Commands ────' && echo '' && \
                    echo '  {clawdesk} agent msg \"hello\"         — send message' && \
                    echo '  {clawdesk} skill list                — list skills' && \
                    echo '  {clawdesk} channels status           — channel health' && \
                    echo '  {clawdesk} doctor                    — diagnostics' && \
                    echo '  {clawdesk} security audit            — security scan' && \
-                   echo '  {clawdesk} tmux launch -l desktop    — full 10-screen layout' && echo ''"),
-        "Enter",
-    ])?;
+                   echo '  {clawdesk} tmux launch -l desktop    — full 10-screen layout' && echo ''"))?;
     set_pane_title(name, "0.3", "Commands")?;
 
     configure_status_bar(name, "workspace")?;
@@ -1036,27 +876,15 @@ fn launch_monitor(config: &TmuxConfig) -> Result<(), String> {
         "-x", "220", "-y", "55",
     ])?;
 
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:0.0"),
-        &format!("watch -n3 '{clawdesk} doctor --verbose 2>/dev/null || echo \"Waiting for gateway...\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "0.0", &format!("watch -n3 '{clawdesk} doctor --verbose 2>/dev/null || echo \"Waiting for gateway...\"'"))?;
     set_pane_title(name, "0.0", "Health")?;
 
     tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:0.0"), "-c", dir, "-p", "45"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:0.1"),
-        &format!("watch -n5 '{clawdesk} channels status --probe 2>/dev/null || echo \"No channels\"'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "0.1", &format!("watch -n5 '{clawdesk} channels status --probe 2>/dev/null || echo \"No channels\"'"))?;
     set_pane_title(name, "0.1", "Channels")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:0.1"), "-c", dir, "-p", "50"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:0.2"),
-        &format!("{clawdesk} daemon logs -n 100 2>/dev/null || echo 'Daemon not running — start with: {clawdesk} daemon start'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "0.2", &format!("{clawdesk} daemon logs -n 100 2>/dev/null || echo 'Daemon not running — start with: {clawdesk} daemon start'"))?;
     set_pane_title(name, "0.2", "Logs")?;
 
     configure_status_bar(name, "monitor")?;
@@ -1087,19 +915,11 @@ fn launch_chat(config: &TmuxConfig) -> Result<(), String> {
         "-x", "220", "-y", "55",
     ])?;
 
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:0.0"),
-        &format!("{clawdesk} agent run --workspace {dir}{model_flag}"),
-        "Enter",
-    ])?;
+        execute_payload(name, "0.0", &format!("{clawdesk} agent run --workspace {dir}{model_flag}"))?;
     set_pane_title(name, "0.0", "Chat")?;
 
     tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:0.0"), "-c", dir, "-p", "25"])?;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:0.1"),
-        &format!("echo '──── Chat ────  Ctrl-B + z = zoom  |  Ctrl-B + d = detach'"),
-        "Enter",
-    ])?;
+        execute_payload(name, "0.1", &format!("echo '──── Chat ────  Ctrl-B + z = zoom  |  Ctrl-B + d = detach'"))?;
     set_pane_title(name, "0.1", "Commands")?;
 
     configure_status_bar(name, "chat")?;
@@ -1133,13 +953,9 @@ pub fn launch_onboarding(config: &TmuxConfig) -> Result<(), String> {
 
     let _layout_name = config.layout.name();
     let session_name = &config.session_name;
-    tmux_cmd(&[
-        "send-keys", "-t", &format!("{name}:0.0"),
-        &format!(
+        execute_payload(&name, "0.0", &format!(
             "{clawdesk} tmux setup --session {session_name}"
-        ),
-        "Enter",
-    ])?;
+        ))?;
 
     configure_status_bar(&name, "setup")?;
 
@@ -1150,6 +966,19 @@ pub fn launch_onboarding(config: &TmuxConfig) -> Result<(), String> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────
+
+
+fn execute_payload(session: &str, pane: &str, payload: &str) -> Result<(), String> {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+    // Clean up the pane identifier for safety
+    let safe_pane = pane.replace(":", "_").replace(".", "_");
+    let path = std::env::temp_dir().join(format!("cdesk_{}_{}.sh", ts, safe_pane));
+    std::fs::write(&path, format!("clear\n{}", payload)).unwrap();
+    tmux_cmd(&[
+        "send-keys", "-t", &format!("{}:{}", session, pane),
+        &format!("sh '{}'; rm -f '{}'\n", path.display(), path.display()),
+    ])
+}
 
 fn tmux_cmd(args: &[&str]) -> Result<(), String> {
     let status = Command::new("tmux")

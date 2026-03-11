@@ -295,7 +295,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             model: "claude-sonnet-4-20250514".to_string(),
-            system_prompt: "You are a helpful assistant.".to_string(),
+            system_prompt: clawdesk_types::session::DEFAULT_SYSTEM_PROMPT.to_string(),
             max_tool_rounds: MAX_TOOL_ROUNDS,
             context_limit: 128_000,
             response_reserve: 8_192,

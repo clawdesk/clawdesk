@@ -5,6 +5,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Default system prompt used when no agent-specific persona is configured.
+/// Centralized here so all crates use the same fallback.
+pub const DEFAULT_SYSTEM_PROMPT: &str = "\
+You are a knowledgeable, capable AI assistant. You can help with \
+coding, analysis, writing, research, problem-solving, and many other tasks. \
+When tools are available, use them proactively to provide thorough, accurate \
+answers. Be precise, helpful, and take initiative.";
+
 /// Unique key identifying a conversation session.
 ///
 /// Format: `{channel}:{identifier}` — e.g., `telegram:12345` or `discord:guild:channel`.
@@ -265,7 +273,7 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            default_system_prompt: "You are a helpful assistant.".to_string(),
+            default_system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             default_model: None,
             default_history_limit: 50,
             idle_timeout_seconds: 3600,

@@ -31,3 +31,10 @@ sochdb.md
 jj.svg
 rust_coding_agent_implementation_spec_sochdb_final.md
 rust_coding_agent_sochdb_architecture_final.svg
+target_cli
+# Watch temp files
+watch_*
+
+# Bundled binaries (built from source, not tracked)
+tools/bundled/gws
+crates/clawdesk-tauri/binaries/gws-*

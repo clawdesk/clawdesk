@@ -653,12 +653,38 @@ function ModelSelector({
 // with streaming (re-renders on each chunk).
 
 interface MarkdownBlock {
-  type: "code" | "paragraph" | "heading" | "list" | "hr";
+  type: "code" | "paragraph" | "heading" | "list" | "hr" | "table";
   content: string;
   lang?: string;
   level?: number;
   ordered?: boolean;
   items?: string[];
+  headers?: string[];
+  rows?: string[][];
+}
+
+function isPipeTableRow(line: string) {
+  const trimmed = line.trim();
+  return trimmed.includes("|") && /^\|?.+\|.+\|?$/.test(trimmed);
+}
+
+function isPipeTableSeparator(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return false;
+  return trimmed
+    .split("|")
+    .map((cell) => cell.trim())
+    .filter(Boolean)
+    .every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function parsePipeTableCells(line: string) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
 }
 
 function parseMarkdownBlocks(raw: string): MarkdownBlock[] {
@@ -712,6 +738,22 @@ function parseMarkdownBlocks(raw: string): MarkdownBlock[] {
         i++;
       }
       blocks.push({ type: "list", content: "", items, ordered: true });
+      continue;
+    }
+    // GFM-style pipe table
+    if (
+      i + 1 < lines.length &&
+      isPipeTableRow(line) &&
+      isPipeTableSeparator(lines[i + 1])
+    ) {
+      const headers = parsePipeTableCells(line);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && lines[i].trim() !== "" && isPipeTableRow(lines[i])) {
+        rows.push(parsePipeTableCells(lines[i]));
+        i++;
+      }
+      blocks.push({ type: "table", content: "", headers, rows });
       continue;
     }
     // Empty line
@@ -805,6 +847,29 @@ function MarkdownContent({ content, isStreaming }: { content: string; isStreamin
               return (<ol key={i} className="md-list md-ol">{(block.items || []).map((item, j) => (<li key={j}>{renderInline(item)}</li>))}</ol>);
             }
             return (<ul key={i} className="md-list md-ul">{(block.items || []).map((item, j) => (<li key={j}>{renderInline(item)}</li>))}</ul>);
+          case "table":
+            return (
+              <div key={i} className="md-table-wrap">
+                <table className="md-table">
+                  <thead>
+                    <tr>
+                      {(block.headers || []).map((header, j) => (
+                        <th key={j}>{renderInline(header)}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(block.rows || []).map((row, rowIndex) => (
+                      <tr key={rowIndex}>
+                        {row.map((cell, cellIndex) => (
+                          <td key={cellIndex}>{renderInline(cell)}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
           case "paragraph":
           default:
             return <p key={i} className="md-paragraph">{renderInline(block.content)}</p>;

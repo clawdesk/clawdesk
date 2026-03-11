@@ -82,6 +82,12 @@ jobs:
           fi
         shell: bash
 
+      - name: Build gws binary (Google Workspace CLI)
+        if: matrix.cross != true
+        run: bash scripts/download-gws.sh --download --target ${{ matrix.target }}
+        shell: bash
+        continue-on-error: true
+
       - name: Rename binary
         shell: bash
         run: |
