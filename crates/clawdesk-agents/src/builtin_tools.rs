@@ -1852,9 +1852,16 @@ impl Tool for MessageSendTool {
         })
         .await?;
 
-        // Return a human-friendly result that the LLM can relay to the user
+        // Return structured JSON so the messaging tracker can parse it,
+        // while remaining human-readable for the LLM.
         let channel_name = channel.as_deref().unwrap_or("unknown");
-        Ok(format!("Message delivered to {} successfully.", channel_name))
+        Ok(serde_json::json!({
+            "status": "delivered",
+            "channel": channel_name,
+            "target": target,
+            "delivery_id": delivery_id,
+            "message": format!("Message delivered to {} successfully.", channel_name)
+        }).to_string())
     }
 }
 

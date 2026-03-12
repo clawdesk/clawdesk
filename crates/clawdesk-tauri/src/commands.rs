@@ -4076,6 +4076,16 @@ pub async fn run_pipeline(
                 } else {
                     "Pipeline started.".to_string()
                 };
+                // Cap predecessor output to avoid token bloat: each round
+                // re-sends the full context, so large predecessor output
+                // multiplied by many tool rounds causes massive token usage.
+                const MAX_PREV_OUTPUT_CHARS: usize = 8_000;
+                let previous_output = if previous_output.len() > MAX_PREV_OUTPUT_CHARS {
+                    let truncated = &previous_output[..MAX_PREV_OUTPUT_CHARS];
+                    format!("{}\n\n[...truncated — {} chars total]", truncated, previous_output.len())
+                } else {
+                    previous_output
+                };
                 (i, previous_output)
             })
             .collect();

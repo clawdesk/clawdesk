@@ -1868,18 +1868,25 @@ impl AgentRunner {
         // Track messaging tool sends
         for (call, result) in tool_calls.iter().zip(tool_results.iter()) {
             if result.name == "message_send" && !result.is_error {
-                if let Ok(output) = serde_json::from_str::<serde_json::Value>(&result.content) {
-                    loop_state.messaging_tracker.record(crate::builtin_tools::MessagingToolSend {
-                        target: output.get("target").and_then(|v| v.as_str()).unwrap_or("").into(),
-                        channel: output.get("channel").and_then(|v| v.as_str()).map(Into::into),
-                        content: call.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("").into(),
-                        media_urls: call.arguments.get("media_urls")
-                            .and_then(|v| v.as_array())
-                            .map(|a| a.iter().filter_map(|v| v.as_str().map(Into::into)).collect())
-                            .unwrap_or_default(),
-                        delivery_id: output.get("delivery_id").and_then(|v| v.as_str()).map(Into::into),
-                    });
-                }
+                let parsed = serde_json::from_str::<serde_json::Value>(&result.content).ok();
+                loop_state.messaging_tracker.record(crate::builtin_tools::MessagingToolSend {
+                    target: parsed.as_ref()
+                        .and_then(|o| o.get("target").and_then(|v| v.as_str()))
+                        .unwrap_or("")
+                        .into(),
+                    channel: parsed.as_ref()
+                        .and_then(|o| o.get("channel").and_then(|v| v.as_str()))
+                        .map(Into::into)
+                        .or_else(|| call.arguments.get("channel").and_then(|v| v.as_str()).map(Into::into)),
+                    content: call.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    media_urls: call.arguments.get("media_urls")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str().map(Into::into)).collect())
+                        .unwrap_or_default(),
+                    delivery_id: parsed.as_ref()
+                        .and_then(|o| o.get("delivery_id").and_then(|v| v.as_str()))
+                        .map(Into::into),
+                });
             }
         }
 

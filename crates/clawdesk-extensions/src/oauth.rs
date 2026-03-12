@@ -83,7 +83,7 @@ pub fn build_auth_url(
 ) -> String {
     let scope = scopes.join(" ");
     format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
         auth_url,
         urlencoding(client_id),
         urlencoding(redirect_uri),

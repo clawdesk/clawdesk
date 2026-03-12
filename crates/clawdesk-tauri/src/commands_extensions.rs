@@ -542,11 +542,25 @@ pub async fn vault_unlock(
     let vault = state.credential_vault.read().await;
     vault.unlock(&password).await.map_err(|e| format!("{:?}", e))?;
 
-    // After vault unlock, bridge stored Google OAuth tokens to gws CLI env var
-    // so agents can use `gws` commands immediately.
-    if let Ok(Some(token)) = vault.get("google-workspace_access_token").await {
-        std::env::set_var("GOOGLE_WORKSPACE_CLI_TOKEN", &token);
-        tracing::info!("Set GOOGLE_WORKSPACE_CLI_TOKEN from vault after unlock");
+    // Bridge Google OAuth tokens to gws CLI.
+    // Prefer credentials.json (has refresh_token, auto-refreshes) over raw
+    // access tokens (expire after 1 hour). Only fall back to the env var
+    // when credentials.json doesn't exist.
+    {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        let gws_creds = std::path::PathBuf::from(&home)
+            .join(".config/gws/credentials.json");
+        if gws_creds.exists() {
+            // credentials.json has refresh_token — gws CLI auto-refreshes.
+            // Do NOT set GOOGLE_WORKSPACE_CLI_TOKEN (it's priority-0 in the
+            // CLI and would override the auto-refresh path with a stale token).
+            tracing::info!("gws credentials.json found — CLI will auto-refresh tokens");
+        } else if let Ok(Some(token)) = vault.get("google-workspace_access_token").await {
+            std::env::set_var("GOOGLE_WORKSPACE_CLI_TOKEN", &token);
+            tracing::info!("Set GOOGLE_WORKSPACE_CLI_TOKEN from vault after unlock (no credentials.json — token expires in ~1h)");
+        }
     }
 
     Ok(true)
@@ -1243,15 +1257,27 @@ pub(crate) async fn launch_enabled_integrations(state: &AppState) {
         registry.enabled()
     };
 
-    // Bridge any previously stored Google OAuth tokens to the gws CLI env var.
-    // This ensures agents can use `gws` commands immediately after restart
-    // without re-authenticating, as long as the vault is unlocked.
+    // Bridge Google OAuth tokens to gws CLI on startup.
+    // Prefer credentials.json (has refresh_token, auto-refreshes) over raw
+    // access tokens (expire after 1 hour).
     {
-        let vault = state.credential_vault.read().await;
-        if vault.is_unlocked().await {
-            if let Ok(Some(token)) = vault.get("google-workspace_access_token").await {
-                std::env::set_var("GOOGLE_WORKSPACE_CLI_TOKEN", &token);
-                tracing::info!("Restored GOOGLE_WORKSPACE_CLI_TOKEN from vault for gws CLI");
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        let gws_creds = std::path::PathBuf::from(&home)
+            .join(".config/gws/credentials.json");
+        if gws_creds.exists() {
+            // credentials.json already present — gws CLI auto-refreshes.
+            // Remove stale env var if set from a previous session.
+            std::env::remove_var("GOOGLE_WORKSPACE_CLI_TOKEN");
+            tracing::info!("gws credentials.json found on startup — CLI will auto-refresh tokens");
+        } else {
+            let vault = state.credential_vault.read().await;
+            if vault.is_unlocked().await {
+                if let Ok(Some(token)) = vault.get("google-workspace_access_token").await {
+                    std::env::set_var("GOOGLE_WORKSPACE_CLI_TOKEN", &token);
+                    tracing::info!("Restored GOOGLE_WORKSPACE_CLI_TOKEN from vault (no credentials.json — token expires in ~1h)");
+                }
             }
         }
     }
