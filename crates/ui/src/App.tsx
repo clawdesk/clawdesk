@@ -4261,6 +4261,8 @@ export default function App() {
     );
   }
 
+  const firstStorageRecommendation = storageHealthDetail?.recommendations[0];
+
   return (
     <div style={{ width: "100%", height: "100%", overflow: "hidden", display: "flex", flexDirection: "column" }}>
       {/* Persistence health warning banner */}
@@ -4279,9 +4281,9 @@ export default function App() {
         >
           ⚠ Storage is running in ephemeral mode — your chat history will NOT survive a restart.
           Check disk permissions for <code style={{ background: "rgba(0,0,0,0.2)", padding: "1px 4px", borderRadius: 3 }}>~/.clawdesk/sochdb/</code>
-          {storageHealthDetail?.recommendations?.length > 0 && (
+          {firstStorageRecommendation && (
             <span style={{ display: "block", fontSize: 12, marginTop: 2, opacity: 0.85 }}>
-                {storageHealthDetail?.recommendations?.[0]}
+                {firstStorageRecommendation}
             </span>
           )}
         </div>
