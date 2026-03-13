@@ -412,9 +412,10 @@ export function TeamBuilderCanvas({
 
     let cursor = members.find((member) => member.id === parentId) ?? null;
     while (cursor) {
-      if (cursor.parentId === childId) return false;
-      cursor = cursor.parentId
-        ? members.find((member) => member.id === cursor.parentId) ?? null
+      const nextParentId = cursor.parentId;
+      if (nextParentId === childId) return false;
+      cursor = nextParentId
+        ? members.find((member) => member.id === nextParentId) ?? null
         : null;
     }
 

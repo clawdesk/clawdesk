@@ -4281,7 +4281,7 @@ export default function App() {
           Check disk permissions for <code style={{ background: "rgba(0,0,0,0.2)", padding: "1px 4px", borderRadius: 3 }}>~/.clawdesk/sochdb/</code>
           {storageHealthDetail?.recommendations?.length > 0 && (
             <span style={{ display: "block", fontSize: 12, marginTop: 2, opacity: 0.85 }}>
-              {storageHealthDetail.recommendations[0]}
+                {storageHealthDetail?.recommendations?.[0]}
             </span>
           )}
         </div>
