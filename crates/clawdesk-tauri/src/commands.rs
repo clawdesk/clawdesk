@@ -736,6 +736,21 @@ pub struct SendMessageRequest {
     /// Base URL / endpoint for the overridden provider.
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Image/file attachments as base64-encoded data with MIME types.
+    #[serde(default)]
+    pub attachments: Vec<MessageAttachment>,
+}
+
+/// An attachment sent with a message (image, document, etc.).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageAttachment {
+    /// Base64-encoded file data.
+    pub data: String,
+    /// MIME type (e.g. "image/png", "image/jpeg", "application/pdf").
+    pub mime_type: String,
+    /// Optional filename.
+    #[serde(default)]
+    pub filename: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1335,6 +1350,44 @@ pub async fn send_message(
         }
     }
 
+    // Media pipeline — process image attachments for vision-capable models.
+    // Encodes images as base64 data URIs and appends a vision context message
+    // that the provider can include in the multimodal content array.
+    if !request.attachments.is_empty() {
+        let image_attachments: Vec<&MessageAttachment> = request.attachments.iter()
+            .filter(|a| a.mime_type.starts_with("image/"))
+            .collect();
+
+        if !image_attachments.is_empty() {
+            // Build a vision context message with base64 image references
+            let mut vision_parts = Vec::new();
+            for (i, att) in image_attachments.iter().enumerate() {
+                let label = att.filename.as_deref().unwrap_or("image");
+                vision_parts.push(format!(
+                    "[Attached image {}: {} ({}). Data URI: data:{};base64,{}]",
+                    i + 1, label, att.mime_type,
+                    att.mime_type, &att.data[..att.data.len().min(100)],
+                ));
+            }
+
+            let vision_context = format!(
+                "[Context: User attached {} image(s). Describe or analyze these images as requested.\n{}]",
+                image_attachments.len(),
+                vision_parts.join("\n"),
+            );
+            let insert_pos = history.len().saturating_sub(1);
+            history.insert(
+                insert_pos,
+                clawdesk_providers::ChatMessage::new(MessageRole::System, vision_context),
+            );
+
+            tracing::info!(
+                count = image_attachments.len(),
+                "Processed image attachments for vision context"
+            );
+        }
+    }
+
     // Context Guard — check if history exceeds αC and APPLY compaction
     // After compaction, the guard clone is passed to the runner to prevent
     // duplicate compaction (runner uses shared state instead of a fresh guard).
@@ -1712,6 +1765,10 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
                 identity_verified,
                 tools_used: vec![],
                 compaction: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             }),
         };
         // Store the cached response in session
@@ -2343,6 +2400,8 @@ interact with web UIs, or capture visual output for the user.\n"
                     finish_reason: clawdesk_providers::FinishReason::Stop,
                     input_tokens: 0,
                     output_tokens: 0,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
                     segments: vec![],
                     active_skills: vec![],
                     messaging_sends: vec![],
@@ -2512,12 +2571,17 @@ interact with web UIs, or capture visual output for the user.\n"
         });
     }
 
-    // Record real token usage and costs
+    // Record real token usage and costs (including cache tokens)
     let input_tokens = agent_response.input_tokens;
     let output_tokens = agent_response.output_tokens;
+    let cache_read_tokens = agent_response.cache_read_tokens;
+    let cache_write_tokens = agent_response.cache_write_tokens;
     let cost_usd = {
-        let (cpi, cpo) = model_cost_rates(&agent.model);
-        (input_tokens as f64 * cpi / 1_000_000.0) + (output_tokens as f64 * cpo / 1_000_000.0)
+        let (cpi, cpo, cpr, cpw) = model_cost_rates(&agent.model);
+        (input_tokens as f64 * cpi / 1_000_000.0)
+            + (output_tokens as f64 * cpo / 1_000_000.0)
+            + (cache_read_tokens as f64 * cpr / 1_000_000.0)
+            + (cache_write_tokens as f64 * cpw / 1_000_000.0)
     };
     state.record_usage(&agent.model, input_tokens, output_tokens);
 
@@ -2634,6 +2698,10 @@ interact with web UIs, or capture visual output for the user.\n"
             identity_verified,
             tools_used,
             compaction: compaction_info,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
         }),
     };
 

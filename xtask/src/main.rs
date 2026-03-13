@@ -1,4 +1,6 @@
 mod dep_lint;
+mod quality_gate;
+mod release_check;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -24,6 +26,10 @@ enum Command {
     Fuzz,
     /// Prepare a release (version bump + changelog)
     Release,
+    /// Validate release artifacts before publishing
+    ReleaseCheck,
+    /// Run CI quality gates (file sizes, API surface, crate health)
+    QualityGate,
 }
 
 fn main() -> Result<()> {
@@ -35,6 +41,8 @@ fn main() -> Result<()> {
         Command::Docs => run_docs(),
         Command::Fuzz => run_fuzz(),
         Command::Release => run_release(),
+        Command::ReleaseCheck => release_check::run(),
+        Command::QualityGate => quality_gate::run(),
     }
 }
 
@@ -56,12 +64,40 @@ fn run_ci() -> Result<()> {
     // 5. Doc tests
     run_cmd("cargo", &["test", "--workspace", "--doc"])?;
 
+    // 6. Benchmark regression check (if baseline exists)
+    let baseline_dir = std::path::Path::new("target/criterion/main");
+    if baseline_dir.exists() {
+        eprintln!("Running benchmark regression check against baseline...");
+        run_cmd("cargo", &["bench", "--package", "clawdesk-bench", "--", "--baseline", "main"])?;
+    }
+
+    // 7. Quality gates
+    eprintln!("Running quality gates...");
+    quality_gate::run()?;
+
     eprintln!("CI pre-flight passed.");
     Ok(())
 }
 
 fn run_bench() -> Result<()> {
-    run_cmd("cargo", &["bench", "--package", "clawdesk-bench"])
+    let baseline_flag = std::env::var("BENCH_BASELINE").ok();
+
+    match baseline_flag.as_deref() {
+        Some("save") => {
+            // Save a new baseline for future comparison
+            eprintln!("Saving benchmark baseline...");
+            run_cmd("cargo", &["bench", "--package", "clawdesk-bench", "--", "--save-baseline", "main"])
+        }
+        Some(name) => {
+            // Compare against a named baseline
+            eprintln!("Comparing against baseline '{name}'...");
+            run_cmd("cargo", &["bench", "--package", "clawdesk-bench", "--", "--baseline", name])
+        }
+        None => {
+            // Default: run benchmarks normally
+            run_cmd("cargo", &["bench", "--package", "clawdesk-bench"])
+        }
+    }
 }
 
 fn run_docs() -> Result<()> {

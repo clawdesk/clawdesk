@@ -84,6 +84,7 @@ pub async fn run_tmux_onboarding(
         model,
         workspace_dir: workspace,
         attach: true,
+        if_exists: tmux::IfExistsPolicy::Replace,
     };
 
     tmux::launch(&config).map_err(|e: String| -> Box<dyn std::error::Error + Send + Sync> {

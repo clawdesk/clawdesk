@@ -335,6 +335,10 @@ pub struct ChatMessageMeta {
     pub identity_verified: bool,
     pub tools_used: Vec<ToolUsageSummary>,
     pub compaction: Option<CompactionInfo>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
 }
 
 impl Default for ChatMessageMeta {
@@ -348,6 +352,10 @@ impl Default for ChatMessageMeta {
             identity_verified: false,
             tools_used: Vec::new(),
             compaction: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         }
     }
 }
@@ -1001,6 +1009,7 @@ impl clawdesk_cron::executor::AgentExecutor for CronAgentExecutor {
             provider_override,
             api_key,
             base_url,
+            attachments: Vec::new(),
         };
 
         let response = crate::commands::send_message(
@@ -3049,8 +3058,77 @@ impl AppState {
 
         // ── Hydrate hot caches from SochDB ──────────────────────────
         info!("Starting hydration from SochDB...");
-        let agents: HashMap<String, DesktopAgent> = hydrate_map(&soch_store, "agents/");
-        info!(agents = agents.len(), "Hydrated agents");
+        let mut agents: HashMap<String, DesktopAgent> = hydrate_map(&soch_store, "agents/");
+        info!(agents = agents.len(), "Hydrated agents from SochDB");
+
+        // ── Discover folder-based agents from ~/.clawdesk/agents/ ───
+        // Each subfolder containing instructions.md or agent.toml is auto-imported.
+        {
+            let mut agents_dirs = vec![clawdesk_types::dirs::agents()];
+            // Also scan CLAWDESK_AGENTS_DIR if set (for dev/custom locations)
+            if let Ok(extra) = std::env::var("CLAWDESK_AGENTS_DIR") {
+                agents_dirs.push(std::path::PathBuf::from(extra));
+            }
+            // Also scan ./agents/ relative to the executable (bundled agents in dev)
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(parent) = exe.parent() {
+                    let local = parent.join("agents");
+                    if local.is_dir() && !agents_dirs.contains(&local) {
+                        agents_dirs.push(local);
+                    }
+                }
+            }
+
+            for agents_dir in &agents_dirs {
+                if !agents_dir.is_dir() { continue; }
+                if let Ok(entries) = std::fs::read_dir(agents_dir) {
+                    let mut discovered = 0usize;
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if !path.is_dir() { continue; }
+                        let dir_name = path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        // Skip if already loaded (SochDB or earlier dir takes priority)
+                        if agents.contains_key(&dir_name) {
+                            continue;
+                        }
+                        let md_path = path.join("instructions.md");
+                        if md_path.exists() {
+                            if let Ok(content) = std::fs::read_to_string(&md_path) {
+                                let (display_name, persona) = parse_agent_md(&content);
+                                let agent = DesktopAgent {
+                                    id: dir_name.clone(),
+                                    name: display_name,
+                                    icon: "🤖".to_string(),
+                                    color: "#6366f1".to_string(),
+                                    persona,
+                                    persona_hash: String::new(),
+                                    skills: vec![],
+                                    model: String::new(),
+                                    created: chrono::Utc::now().to_rfc3339(),
+                                    msg_count: 0,
+                                    status: "ready".to_string(),
+                                    token_budget: 128_000,
+                                    tokens_used: 0,
+                                    source: "bundled".to_string(),
+                                    template_id: None,
+                                    channels: vec![],
+                                    team_id: None,
+                                    team_role: None,
+                                };
+                                agents.insert(dir_name, agent);
+                                discovered += 1;
+                            }
+                        }
+                    }
+                    if discovered > 0 {
+                        info!(discovered, dir = %agents_dir.display(), "Discovered folder-based agents");
+                    }
+                }
+            }
+        }
+
         // Log every hydrated agent so we can trace reappearing-after-delete bugs
         for (agent_id, agent) in &agents {
             info!(
@@ -3541,7 +3619,7 @@ impl AppState {
                 // Tauri places sidecar binaries next to the main executable with a
                 // target-triple suffix (e.g., llama-server-aarch64-apple-darwin).
                 let bundled_server = {
-                    let sidecar_name = format!(
+                    let _sidecar_name = format!(
                         "llama-server-{}",
                         std::env::consts::ARCH
                     );
@@ -3698,7 +3776,7 @@ impl AppState {
             }
         }
 
-        let (cpi, cpo) = model_cost_rates(model);
+        let (cpi, cpo, _cpr, _cpw) = model_cost_rates(model);
         let cost_micro = ((input_tokens as f64 * cpi / 1_000_000.0)
             + (output_tokens as f64 * cpo / 1_000_000.0))
             * 1_000_000.0;
@@ -4553,14 +4631,146 @@ impl Default for AppState {
     fn default() -> Self { Self::new() }
 }
 
-pub fn model_cost_rates(model: &str) -> (f64, f64) {
-    match model {
-        "haiku" => (0.25, 1.25),
-        "sonnet" => (3.0, 15.0),
-        "opus" => (15.0, 75.0),
-        "local" => (0.0, 0.0),
-        _ => (3.0, 15.0),
+/// Per-1M-token rates: (input, output, cache_read, cache_write).
+///
+/// Pricing aligned with upstream provider pricing as of 2026-03.
+/// Rates sourced from openclaw reference implementation.
+pub fn model_cost_rates(model: &str) -> (f64, f64, f64, f64) {
+    let m = model.to_lowercase();
+
+    // ── Anthropic Claude ──────────────────────────────────────────
+    if m.contains("claude-opus-4") || m.contains("claude-3-opus") || m == "opus" {
+        return (15.0, 75.0, 1.5, 18.75);
     }
+    if m.contains("claude-sonnet-4") || m.contains("claude-3.5-sonnet")
+        || m.contains("claude-3-5-sonnet") || m == "sonnet"
+    {
+        return (3.0, 15.0, 0.3, 3.75);
+    }
+    if m.contains("claude-3-sonnet") {
+        return (3.0, 15.0, 0.3, 3.75);
+    }
+    if m.contains("claude-haiku-4") || m.contains("claude-3-haiku") || m == "haiku" {
+        return (0.25, 1.25, 0.025, 0.3125);
+    }
+    if m.contains("claude-2") {
+        return (8.0, 24.0, 0.0, 0.0);
+    }
+
+    // ── OpenAI GPT-5.x ───────────────────────────────────────────
+    if m.contains("gpt-5.2") {
+        return (1.75, 14.0, 0.175, 0.0);
+    }
+    if m.contains("gpt-5.1-codex-max") {
+        return (1.25, 10.0, 0.125, 0.0);
+    }
+    if m.contains("gpt-5.1-codex-mini") {
+        return (0.25, 2.0, 0.025, 0.0);
+    }
+    if m.contains("gpt-5.1-codex") {
+        return (1.07, 8.5, 0.107, 0.0);
+    }
+    if m.contains("gpt-5.1") {
+        return (1.07, 8.5, 0.107, 0.0);
+    }
+
+    // ── OpenAI GPT-4x ────────────────────────────────────────────
+    if m.contains("gpt-4o-mini") {
+        return (0.15, 0.6, 0.075, 0.0);
+    }
+    if m.contains("gpt-4o") {
+        return (2.5, 10.0, 1.25, 0.0);
+    }
+    if m.contains("gpt-4-turbo") || m.contains("gpt-4-1106") {
+        return (10.0, 30.0, 0.0, 0.0);
+    }
+    if m.contains("gpt-4") {
+        return (30.0, 60.0, 0.0, 0.0);
+    }
+    if m.contains("gpt-3.5-turbo") {
+        return (0.5, 1.5, 0.0, 0.0);
+    }
+
+    // ── Google Gemini ────────────────────────────────────────────
+    if m.contains("gemini-3-pro") {
+        return (2.0, 12.0, 0.2, 0.0);
+    }
+    if m.contains("gemini-3-flash") {
+        return (0.5, 3.0, 0.05, 0.0);
+    }
+    if m.contains("gemini-2.5-pro") || m.contains("gemini-2.0-pro") {
+        return (1.25, 10.0, 0.3125, 0.0);
+    }
+    if m.contains("gemini-2.5-flash") || m.contains("gemini-2.0-flash") {
+        return (0.15, 0.6, 0.0375, 0.0);
+    }
+    if m.contains("gemini-1.5-pro") || m.contains("gemini-pro-1.5") {
+        return (3.5, 10.5, 0.875, 0.0);
+    }
+    if m.contains("gemini-1.5-flash") || m.contains("gemini-flash-1.5") {
+        return (0.075, 0.3, 0.01875, 0.0);
+    }
+    if m.contains("gemini-pro") {
+        return (0.5, 1.5, 0.0, 0.0);
+    }
+
+    // ── DeepSeek ─────────────────────────────────────────────────
+    if m.contains("deepseek-r1") {
+        return (3.0, 7.0, 3.0, 3.0);
+    }
+    if m.contains("deepseek-v3") {
+        return (0.6, 1.25, 0.6, 0.6);
+    }
+
+    // ── GLM ──────────────────────────────────────────────────────
+    if m.contains("glm-4") {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+
+    // ── Meta Llama ───────────────────────────────────────────────
+    if m.contains("llama-4-maverick") {
+        return (0.27, 0.85, 0.27, 0.27);
+    }
+    if m.contains("llama-4-scout") {
+        return (0.18, 0.59, 0.18, 0.18);
+    }
+    if m.contains("llama-3.3-70b") || m.contains("llama-3-3-70b") {
+        return (0.88, 0.88, 0.88, 0.88);
+    }
+
+    // ── Cohere ───────────────────────────────────────────────────
+    if m.contains("command-r-plus") || m.contains("command-r+") {
+        return (3.0, 15.0, 0.0, 0.0);
+    }
+    if m.contains("command-r") {
+        return (0.5, 1.5, 0.0, 0.0);
+    }
+
+    // ── Mistral ──────────────────────────────────────────────────
+    if m.contains("mistral-large") {
+        return (8.0, 24.0, 0.0, 0.0);
+    }
+    if m.contains("mistral-medium") {
+        return (2.7, 8.1, 0.0, 0.0);
+    }
+    if m.contains("mistral-small") {
+        return (1.0, 3.0, 0.0, 0.0);
+    }
+
+    // ── Kimi ─────────────────────────────────────────────────────
+    if m.contains("kimi-k2") {
+        return (0.5, 2.8, 0.5, 2.8);
+    }
+
+    // ── Local / free ─────────────────────────────────────────────
+    if m == "local" || m.contains("llama3") || m.contains("ollama")
+        || m.contains("phi-") || m.contains("mistral-7b") || m.contains("qwen")
+    {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+
+    // ── Unknown — default to Sonnet-class pricing ────────────────
+    (3.0, 15.0, 0.3, 3.75)
 }
 
 fn default_pipeline() -> PipelineDescriptor {
@@ -4716,6 +4926,44 @@ fn hydrate_list<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Parse agent display name and persona from an instructions.md file.
+///
+/// Expects optional YAML frontmatter with `name:` field, body is the full persona.
+fn parse_agent_md(content: &str) -> (String, String) {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return ("Agent".to_string(), content.to_string());
+    }
+
+    let after_first = &trimmed[3..];
+    let Some(close_idx) = after_first.find("\n---") else {
+        return ("Agent".to_string(), content.to_string());
+    };
+
+    let yaml_str = &after_first[..close_idx];
+    let body = after_first[close_idx + 4..].trim_start_matches('\n').to_string();
+
+    let mut name = None;
+    let mut emoji = None;
+    for line in yaml_str.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("name:") {
+            name = Some(val.trim().trim_matches('"').trim_matches('\'').to_string());
+        }
+        if let Some(val) = line.strip_prefix("emoji:") {
+            emoji = Some(val.trim().to_string());
+        }
+    }
+
+    let display = match (&emoji, &name) {
+        (Some(e), Some(n)) => format!("{} {}", e, n),
+        (None, Some(n)) => n.clone(),
+        _ => "Agent".to_string(),
+    };
+
+    (display, body)
+}
+
 // ═══════════════════════════════════════════════════════════
 // E2E Smoke Tests — verify AppState construction and
 //      critical subsystem wiring without Tauri runtime.
@@ -4817,10 +5065,24 @@ mod smoke_tests {
 
     #[test]
     fn model_cost_rates_known_models() {
-        let (input, output) = model_cost_rates("sonnet");
+        let (input, output, cr, cw) = model_cost_rates("sonnet");
         assert!(input > 0.0 && output > 0.0);
+        assert!(cr >= 0.0 && cw >= 0.0);
 
-        let (input, output) = model_cost_rates("unknown-model-xyz");
+        let (input, output, cr, cw) = model_cost_rates("claude-opus-4-20250514");
+        assert_eq!(input, 15.0);
+        assert_eq!(output, 75.0);
+        assert!(cr > 0.0);
+
+        let (input, output, cr, cw) = model_cost_rates("gpt-5.1-codex");
+        assert!((input - 1.07).abs() < 0.001);
+        assert!((output - 8.5).abs() < 0.001);
+
+        let (input, output, _cr, _cw) = model_cost_rates("local");
+        assert_eq!(input, 0.0);
+        assert_eq!(output, 0.0);
+
+        let (input, output, _cr, _cw) = model_cost_rates("unknown-model-xyz");
         // Fallback should still return non-negative
         assert!(input >= 0.0 && output >= 0.0);
     }

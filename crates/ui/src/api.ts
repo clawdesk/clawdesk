@@ -661,7 +661,13 @@ export async function importOpenClawConfig(configJson: string): Promise<ImportRe
 // Chat (8)
 // ══════════════════════════════════════════════════════════════
 
-export async function sendMessage(agentId: string, content: string, modelOverride?: string, chatId?: string, providerOverride?: string, apiKey?: string, baseUrl?: string): Promise<SendMessageResponse> {
+export interface MessageAttachment {
+  data: string;       // base64-encoded
+  mime_type: string;   // e.g. "image/png"
+  filename?: string;
+}
+
+export async function sendMessage(agentId: string, content: string, modelOverride?: string, chatId?: string, providerOverride?: string, apiKey?: string, baseUrl?: string, attachments?: MessageAttachment[]): Promise<SendMessageResponse> {
   return invoke<SendMessageResponse>("send_message", {
     request: {
       agent_id: agentId,
@@ -671,6 +677,7 @@ export async function sendMessage(agentId: string, content: string, modelOverrid
       provider_override: providerOverride || null,
       api_key: apiKey || null,
       base_url: baseUrl || null,
+      attachments: attachments || [],
     },
   });
 }
@@ -1830,6 +1837,36 @@ export async function deleteWhisperModel(model: string): Promise<boolean> {
 
 export async function getVoiceInputStatus(): Promise<VoiceInputStatusResult> {
   return invoke<VoiceInputStatusResult>("get_voice_input_status");
+}
+
+// ── TTS (Text-to-Speech) ────────────────────────────────────
+
+export interface TtsSynthesizeResult {
+  audio_base64: string;
+  format: string;
+  characters: number;
+  estimated_cost_usd: number;
+}
+
+export interface TtsVoice {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export async function ttsSynthesize(text: string, provider?: string, voice?: string, speed?: number): Promise<TtsSynthesizeResult> {
+  return invoke<TtsSynthesizeResult>("tts_synthesize", {
+    request: {
+      text,
+      provider: provider || "openai",
+      voice: voice || "alloy",
+      speed: speed || 1.0,
+    },
+  });
+}
+
+export async function ttsListVoices(provider?: string): Promise<TtsVoice[]> {
+  return invoke<TtsVoice[]>("tts_list_voices", { provider: provider || null });
 }
 
 // ══════════════════════════════════════════════════════════════

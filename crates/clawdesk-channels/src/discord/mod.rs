@@ -9,8 +9,12 @@
 //! Discord's Gateway uses a WebSocket connection with:
 //! 1. Identify handshake (opcode 2)
 //! 2. Heartbeat loop (opcode 1) at the interval specified by HELLO
-//! 3. Dispatch events (opcode 0) — MESSAGE_CREATE, etc.
+//! 3. Dispatch events (opcode 0) — MESSAGE_CREATE, INTERACTION_CREATE, etc.
 //! 4. Resume on disconnect (opcode 6)
+//!
+//! ## Modules
+//!
+//! - `interactions` — Application Commands, Message Components, Modals
 //!
 //! ## Rate limits
 //!
@@ -19,6 +23,8 @@
 //! - X-RateLimit-Reset-After
 //! - Global rate limit: 50 requests/second
 //! - Message content: 2000 chars
+
+pub mod interactions;
 
 use async_trait::async_trait;
 use clawdesk_channel::{Channel, MessageSink, Reactions, StreamHandle, Streaming, Threaded};
@@ -473,6 +479,26 @@ impl DiscordChannel {
                             bot_user_id = %bot_user_id,
                             "Discord: READY — bot is online and receiving events"
                         );
+                        continue;
+                    }
+
+                    // Handle INTERACTION_CREATE (slash commands, buttons, modals)
+                    if event_type == "INTERACTION_CREATE" {
+                        if let Some(d) = event.get("d") {
+                            debug!("Discord: INTERACTION_CREATE received");
+                            let interaction_data = d.clone();
+                            let client = self.client.clone();
+                            let app_id = self.application_id.clone();
+                            let token = self.bot_token.clone();
+                            tokio::spawn(async move {
+                                let handler = interactions::InteractionHandler::new(
+                                    client, &app_id, &token,
+                                );
+                                if let Err(e) = handler.handle_event(&interaction_data).await {
+                                    warn!(error = %e, "Discord: interaction handling failed");
+                                }
+                            });
+                        }
                         continue;
                     }
 

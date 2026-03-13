@@ -196,11 +196,18 @@ impl AgentLoader {
             }
 
             let toml_path = path.join("agent.toml");
-            if !toml_path.exists() {
-                continue;
-            }
+            let md_path = path.join("instructions.md");
 
-            match self.load_agent(&toml_path) {
+            // Prefer agent.toml; fall back to instructions.md
+            let load_result = if toml_path.exists() {
+                self.load_agent(&toml_path)
+            } else if md_path.exists() {
+                self.load_agent_from_md(&md_path)
+            } else {
+                continue;
+            };
+
+            match load_result {
                 Ok(snapshot) => {
                     info!(
                         id = %snapshot.id,
@@ -271,6 +278,92 @@ impl AgentLoader {
     pub fn agents_dir(&self) -> &Path {
         &self.agents_dir
     }
+
+    /// Load an agent from an instructions.md file with YAML frontmatter.
+    ///
+    /// Expected format:
+    /// ```text
+    /// ---
+    /// name: Backend Architect
+    /// description: Senior backend architect...
+    /// color: blue
+    /// emoji: 🏗️
+    /// vibe: Designs the systems...
+    /// ---
+    ///
+    /// # Agent Persona
+    /// Full persona instructions here...
+    /// ```
+    fn load_agent_from_md(&self, md_path: &Path) -> Result<AgentSnapshot, String> {
+        let content = std::fs::read_to_string(md_path)
+            .map_err(|e| format!("read failed: {e}"))?;
+
+        // Parse YAML frontmatter (between first and second `---` lines)
+        let (frontmatter, body) = parse_md_frontmatter(&content)?;
+
+        // Derive agent ID from directory name (kebab-case)
+        let id = md_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .ok_or("cannot determine agent ID from path")?;
+
+        let display_name = frontmatter.name.unwrap_or_else(|| id.clone());
+
+        let config_hash = sha256_hex(content.as_bytes());
+
+        Ok(AgentSnapshot {
+            id,
+            display_name,
+            model: "claude-sonnet-4-20250514".to_string(),
+            system_prompt: body,
+            tools_allow: vec![],
+            tools_deny: vec![],
+            active_skills: vec![],
+            can_spawn: vec![],
+            max_depth: 2,
+            source_path: md_path.to_path_buf(),
+            config_hash,
+        })
+    }
+}
+
+/// YAML frontmatter parsed from an instructions.md file.
+#[derive(Debug, Default)]
+struct MdFrontmatter {
+    name: Option<String>,
+}
+
+/// Parse YAML frontmatter from a markdown file.
+///
+/// Returns (frontmatter, body) where body is everything after the closing `---`.
+fn parse_md_frontmatter(content: &str) -> Result<(MdFrontmatter, String), String> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        // No frontmatter — entire content is the body
+        return Ok((MdFrontmatter::default(), content.to_string()));
+    }
+
+    // Find the closing `---`
+    let after_first = &trimmed[3..];
+    let close_idx = after_first
+        .find("\n---")
+        .ok_or("unclosed YAML frontmatter (missing closing ---)")?;
+
+    let yaml_str = &after_first[..close_idx];
+    let body_start = close_idx + 4; // skip "\n---"
+    let body = after_first[body_start..].trim_start_matches('\n').to_string();
+
+    // Parse just the `name` field from YAML (avoid pulling in a full YAML parser)
+    let mut fm = MdFrontmatter::default();
+    for line in yaml_str.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("name:") {
+            fm.name = Some(value.trim().trim_matches('"').trim_matches('\'').to_string());
+        }
+    }
+
+    Ok((fm, body))
 }
 
 // ---------------------------------------------------------------------------

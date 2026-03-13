@@ -46,7 +46,7 @@ static GENERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Allocate the next generation number (thread-safe, lock-free).
 pub fn next_generation() -> u64 {
-    GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed)
+    GENERATION_COUNTER.fetch_add(1, Ordering::AcqRel)
 }
 
 // ---------------------------------------------------------------------------

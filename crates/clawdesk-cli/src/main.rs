@@ -1249,6 +1249,7 @@ async fn cmd_tmux(
                 model,
                 workspace_dir: workspace,
                 attach: !no_attach,
+                if_exists: tmux::IfExistsPolicy::Ask,
             };
             tmux::launch(&config).map_err(|e: String| -> Box<dyn std::error::Error + Send + Sync> {
                 Box::from(e)

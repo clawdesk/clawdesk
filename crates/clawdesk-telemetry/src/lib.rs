@@ -19,6 +19,7 @@
 
 pub mod economics;
 pub mod cost_tracking;
+pub mod usage_report;
 
 use opentelemetry::{
     metrics::{Counter, Histogram, Meter, MeterProvider},

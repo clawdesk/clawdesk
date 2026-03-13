@@ -64,6 +64,30 @@ impl Layout {
     }
 }
 
+/// Policy for handling existing sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IfExistsPolicy {
+    /// Attach to the existing session.
+    Attach,
+    /// Kill and recreate.
+    Replace,
+    /// Fail with an error.
+    Fail,
+    /// Ask interactively (legacy behavior).
+    Ask,
+}
+
+impl IfExistsPolicy {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "attach" => Self::Attach,
+            "replace" => Self::Replace,
+            "fail" => Self::Fail,
+            _ => Self::Ask,
+        }
+    }
+}
+
 /// Configuration for a tmux session.
 pub struct TmuxConfig {
     pub session_name: String,
@@ -72,17 +96,19 @@ pub struct TmuxConfig {
     pub model: Option<String>,
     pub workspace_dir: Option<String>,
     pub attach: bool,
+    pub if_exists: IfExistsPolicy,
 }
 
 impl Default for TmuxConfig {
     fn default() -> Self {
         Self {
             session_name: "clawdesk".to_string(),
-            layout: Layout::Desktop,
+            layout: Layout::Workspace,
             gateway_url: "http://127.0.0.1:18789".to_string(),
             model: None,
             workspace_dir: None,
             attach: true,
+            if_exists: IfExistsPolicy::Ask,
         }
     }
 }
@@ -174,21 +200,36 @@ pub fn launch(config: &TmuxConfig) -> Result<(), String> {
         );
     }
 
-    // If the session already exists, offer to attach
+    // If the session already exists, apply the configured policy
     if session_exists(&config.session_name) {
-        println!("  Session '{}' already exists.", config.session_name);
-        print!("  Attach to it? [Y/n]: ");
-        io::stdout().flush().ok();
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).ok();
-        if input.trim().is_empty()
-            || input.trim().eq_ignore_ascii_case("y")
-            || input.trim().eq_ignore_ascii_case("yes")
-        {
-            return attach_session(&config.session_name);
-        } else {
-            // Kill existing and create fresh
-            kill_session(&config.session_name).ok();
+        match config.if_exists {
+            IfExistsPolicy::Attach => {
+                return attach_session(&config.session_name);
+            }
+            IfExistsPolicy::Replace => {
+                kill_session(&config.session_name).ok();
+            }
+            IfExistsPolicy::Fail => {
+                return Err(format!(
+                    "Session '{}' already exists. Use --if-exists attach|replace",
+                    config.session_name
+                ));
+            }
+            IfExistsPolicy::Ask => {
+                println!("  Session '{}' already exists.", config.session_name);
+                print!("  Attach to it? [Y/n]: ");
+                io::stdout().flush().ok();
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).ok();
+                if input.trim().is_empty()
+                    || input.trim().eq_ignore_ascii_case("y")
+                    || input.trim().eq_ignore_ascii_case("yes")
+                {
+                    return attach_session(&config.session_name);
+                } else {
+                    kill_session(&config.session_name).ok();
+                }
+            }
         }
     }
 
@@ -806,16 +847,27 @@ fn configure_desktop_keybindings(session: &str) -> Result<(), String> {
 // ── Quick-start preset layouts ───────────────────────────────
 // ══════════════════════════════════════════════════════════════
 
-/// 4-pane workspace layout:
+/// 3-window workspace layout (the recommended default):
+///
 /// ```text
-/// ┌────────────────────┬──────────────────┐
-/// │                    │   Gateway Logs   │
-/// │   Agent REPL       │                  │
-/// │                    ├──────────────────┤
-/// │                    │   Health Monitor │
-/// ├────────────────────┴──────────────────┤
-/// │            Quick Commands             │
-/// └───────────────────────────────────────┘
+/// 0:main — chat + sidebar rail
+/// ┌──────────────────────────────────────┬───────────────┐
+/// │ Agent / Chat / active task           │ Gateway       │
+/// │                                      ├───────────────┤
+/// │                                      │ Health        │
+/// └──────────────────────────────────────┴───────────────┘
+///
+/// 1:work — editor split
+/// ┌──────────────────────────────┬─────────────────────┐
+/// │ Editor / notes / file work   │ cargo test / shell  │
+/// └──────────────────────────────┴─────────────────────┘
+///
+/// 2:monitor — ops dashboard
+/// ┌───────────────────────┬──────────────────────────┐
+/// │ Health                │ Channels                 │
+/// │                       ├──────────────────────────┤
+/// │                       │ Logs                     │
+/// └───────────────────────┴──────────────────────────┘
 /// ```
 fn launch_workspace(config: &TmuxConfig) -> Result<(), String> {
     let name = &config.session_name;
@@ -827,34 +879,76 @@ fn launch_workspace(config: &TmuxConfig) -> Result<(), String> {
         .map(|m| format!(" --model {m}"))
         .unwrap_or_default();
 
+    // ── Window 0: main (chat 72% | rail 28%) ─────────────────
     tmux_cmd(&[
         "new-session", "-d", "-s", name, "-c", dir,
         "-x", "220", "-y", "55",
+        "-n", "main",
     ])?;
 
-        execute_payload(name, "0.0", &format!("{clawdesk} agent run --workspace {dir}{model_flag}"))?;
-    set_pane_title(name, "0.0", "Agent REPL")?;
+    // Left: Agent chat (72%)
+        execute_payload(name, "main.0", &format!("{clawdesk} agent run --workspace {dir}{model_flag}"))?;
+    set_pane_title(name, "main.0", "Chat")?;
 
-    tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:0.0"), "-c", dir, "-p", "40"])?;
-        execute_payload(name, "0.1", &format!("{clawdesk} gateway run --port 18789 2>&1"))?;
-    set_pane_title(name, "0.1", "Gateway")?;
+    // Right rail (28%)
+    tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:main.0"), "-c", dir, "-p", "28"])?;
+        execute_payload(name, "main.1", &format!("{clawdesk} gateway run --port 18789 2>&1"))?;
+    set_pane_title(name, "main.1", "Gateway")?;
 
-    tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:0.1"), "-c", dir, "-p", "35"])?;
-        execute_payload(name, "0.2", &format!("watch -n5 '{clawdesk} doctor 2>/dev/null || echo \"Gateway not running\"'"))?;
-    set_pane_title(name, "0.2", "Health")?;
+    // Right bottom: Health (40% of rail)
+    tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:main.1"), "-c", dir, "-p", "40"])?;
+        execute_payload(name, "main.2", &format!("watch -n5 -t '{clawdesk} doctor 2>/dev/null || echo \"Gateway starting...\"'"))?;
+    set_pane_title(name, "main.2", "Health")?;
 
-    tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:0.0"), "-c", dir, "-p", "20"])?;
-        execute_payload(name, "0.3", &format!("echo '──── Quick Commands ────' && echo '' && \
-                   echo '  {clawdesk} agent msg \"hello\"         — send message' && \
-                   echo '  {clawdesk} skill list                — list skills' && \
-                   echo '  {clawdesk} channels status           — channel health' && \
-                   echo '  {clawdesk} doctor                    — diagnostics' && \
-                   echo '  {clawdesk} security audit            — security scan' && \
-                   echo '  {clawdesk} tmux launch -l desktop    — full 10-screen layout' && echo ''"))?;
-    set_pane_title(name, "0.3", "Commands")?;
+    // Focus on chat pane
+    tmux_cmd(&["select-pane", "-t", &format!("{name}:main.0")])?;
 
+    // ── Window 1: work (editor 65% | shell 35%) ──────────────
+    tmux_cmd(&["new-window", "-t", name, "-n", "work", "-c", dir])?;
+
+    set_pane_title(name, "work.0", "Editor")?;
+
+    tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:work.0"), "-c", dir, "-p", "35"])?;
+    set_pane_title(name, "work.1", "Shell")?;
+
+    tmux_cmd(&["select-pane", "-t", &format!("{name}:work.0")])?;
+
+    // ── Window 2: monitor (health 55% | channels+logs 45%) ───
+    tmux_cmd(&["new-window", "-t", name, "-n", "monitor", "-c", dir])?;
+
+        execute_payload(name, "monitor.0", &format!("watch -n3 -t '{clawdesk} doctor --verbose 2>/dev/null || echo \"Waiting for gateway...\"'"))?;
+    set_pane_title(name, "monitor.0", "Health")?;
+
+    tmux_cmd(&["split-window", "-h", "-t", &format!("{name}:monitor.0"), "-c", dir, "-p", "45"])?;
+        execute_payload(name, "monitor.1", &format!("watch -n5 -t '{clawdesk} channels status --probe 2>/dev/null || echo \"No channels\"'"))?;
+    set_pane_title(name, "monitor.1", "Channels")?;
+
+    tmux_cmd(&["split-window", "-v", "-t", &format!("{name}:monitor.1"), "-c", dir, "-p", "50"])?;
+        execute_payload(name, "monitor.2", &format!("{clawdesk} daemon logs -n 100 2>/dev/null || echo 'Daemon not running — start: {clawdesk} daemon start'"))?;
+    set_pane_title(name, "monitor.2", "Logs")?;
+
+    tmux_cmd(&["select-pane", "-t", &format!("{name}:monitor.0")])?;
+
+    // ── Configuration ────────────────────────────────────────
     configure_status_bar(name, "workspace")?;
-    tmux_cmd(&["select-pane", "-t", &format!("{name}:0.0")])?;
+
+    // Select main window, chat pane
+    tmux_cmd(&["select-window", "-t", &format!("{name}:main")])?;
+    tmux_cmd(&["select-pane", "-t", &format!("{name}:main.0")])?;
+
+    println!();
+    println!("  ┌─── ClawDesk Workspace ───────────────────────────────────┐");
+    println!("  │                                                          │");
+    println!("  │  3 windows:                                              │");
+    println!("  │    Ctrl-B + 0  main    — chat + gateway + health         │");
+    println!("  │    Ctrl-B + 1  work    — editor + shell                  │");
+    println!("  │    Ctrl-B + 2  monitor — health + channels + logs        │");
+    println!("  │                                                          │");
+    println!("  │  Ctrl-B + z  zoom pane    Ctrl-B + d  detach             │");
+    println!("  │  Ctrl-B + o  next pane    Ctrl-B + ;  last pane          │");
+    println!("  │                                                          │");
+    println!("  └──────────────────────────────────────────────────────────┘");
+    println!();
 
     if config.attach {
         attach_session(name)?;
@@ -1040,20 +1134,18 @@ fn find_clawdesk_binary() -> String {
 /// Print available layouts with descriptions.
 pub fn print_layouts() {
     println!();
-    println!("  Available tmux layouts:");
+    println!("  Available tmux layouts (recommended order):");
     println!();
-    println!("  {:<15} {}", "desktop", "Full 15-window experience mirroring the Tauri desktop app");
-    println!("  {:<15} {}", "", "  MAIN:      Overview, Chat");
-    println!("  {:<15} {}", "", "  CLUSTER:   A2A Directory");
-    println!("  {:<15} {}", "", "  BUILD:     Skills, Automations");
-    println!("  {:<15} {}", "", "  WORKSPACE: Agents, Channels, Files");
-    println!("  {:<15} {}", "", "  CONNECT:   Extensions, MCP");
-    println!("  {:<15} {}", "", "  SYSTEM:    Settings, Logs, Models, Docs, Runtime");
+    println!("  {:<15} {}", "workspace", "3-window daily driver (RECOMMENDED)");
+    println!("  {:<15} {}", "", "  0:main     — chat (72%) + gateway/health rail (28%)");
+    println!("  {:<15} {}", "", "  1:work     — editor (65%) + shell (35%)");
+    println!("  {:<15} {}", "", "  2:monitor  — health + channels + logs");
+    println!();
+    println!("  {:<15} {}", "chat", "2-pane focused: Agent Chat + status");
+    println!("  {:<15} {}", "monitor", "3-pane ops: Health + Channels + Logs");
+    println!("  {:<15} {}", "desktop", "Full 15-window experience (advanced)");
+    println!("  {:<15} {}", "", "  Mirrors the Tauri desktop app — every screen has a window");
     println!("  {:<15} {}", "", "  Navigate: Ctrl-B + 0..9, Ctrl-B + n/p for 10+");
-    println!();
-    println!("  {:<15} {}", "workspace", "4-pane dev layout: Agent REPL + Gateway + Health + Commands");
-    println!("  {:<15} {}", "monitor", "3-pane ops layout: Health + Channels + Logs");
-    println!("  {:<15} {}", "chat", "2-pane focused: Agent Chat + Quick Commands");
     println!();
     println!("  Aliases:");
     println!("    desktop   = full, app");
@@ -1068,38 +1160,34 @@ pub fn print_keybindings() {
     println!();
     println!("  ┌─── tmux Key Bindings ────────────────────────────────────┐");
     println!("  │                                                          │");
-    println!("  │  Navigation (Desktop mode — 15 screens):                 │");
+    println!("  │  Window Navigation (workspace layout):                   │");
     println!("  │                                                          │");
-    println!("  │  MAIN        Ctrl-B + 0  Overview                        │");
-    println!("  │              Ctrl-B + 1  Chat (Agent REPL)               │");
-    println!("  │  CLUSTER     Ctrl-B + 2  A2A Directory                   │");
-    println!("  │  BUILD       Ctrl-B + 3  Skills                          │");
-    println!("  │              Ctrl-B + 4  Automations                     │");
-    println!("  │  WORKSPACE   Ctrl-B + 5  Agents                          │");
-    println!("  │              Ctrl-B + 6  Channels                        │");
-    println!("  │              Ctrl-B + 7  Files                           │");
-    println!("  │  CONNECT     Ctrl-B + 8  Extensions                      │");
-    println!("  │              Ctrl-B + 9  MCP                             │");
-    println!("  │  SYSTEM      Ctrl-B + n  → 10:Settings                   │");
-    println!("  │              Ctrl-B + n  → 11:Logs                       │");
-    println!("  │              Ctrl-B + n  → 12:Models                     │");
-    println!("  │              Ctrl-B + n  → 13:Docs                       │");
-    println!("  │              Ctrl-B + n  → 14:Runtime                    │");
+    println!("  │    Ctrl-B + 0   main    (chat + gateway + health)        │");
+    println!("  │    Ctrl-B + 1   work    (editor + shell)                 │");
+    println!("  │    Ctrl-B + 2   monitor (health + channels + logs)       │");
     println!("  │                                                          │");
-    println!("  │  General:                                                │");
-    println!("  │  Ctrl-B + n/p   Next/previous screen                    │");
-    println!("  │  Ctrl-B + d     Detach (session stays alive)            │");
-    println!("  │  Ctrl-B + z     Zoom/unzoom current pane                │");
-    println!("  │  Ctrl-B + arrow Switch between panes                    │");
-    println!("  │  Ctrl-B + [     Scroll mode (q to exit)                 │");
-    println!("  │  Ctrl-B + c     New window (tab)                        │");
-    println!("  │  Ctrl-B + s     Session picker                          │");
-    println!("  │  Ctrl-B + w     Window picker                           │");
-    println!("  │  Ctrl-B + x     Kill current pane                       │");
-    println!("  │  Ctrl-B + %     Split pane vertically                   │");
-    println!("  │  Ctrl-B + \"     Split pane horizontally                 │");
+    println!("  │  Pane Navigation:                                        │");
     println!("  │                                                          │");
-    println!("  │  Mouse is enabled — click, drag, scroll                 │");
+    println!("  │    Ctrl-B + o       Next pane                            │");
+    println!("  │    Ctrl-B + ;       Last pane                            │");
+    println!("  │    Ctrl-B + z       Zoom/unzoom current pane             │");
+    println!("  │    Ctrl-B + arrow   Switch pane by direction             │");
+    println!("  │                                                          │");
+    println!("  │  Session:                                                │");
+    println!("  │                                                          │");
+    println!("  │    Ctrl-B + d       Detach (session stays alive)         │");
+    println!("  │    Ctrl-B + s       Session picker                       │");
+    println!("  │    Ctrl-B + w       Window picker                        │");
+    println!("  │    Ctrl-B + [       Scroll mode (q to exit)              │");
+    println!("  │                                                          │");
+    println!("  │  Inside TUI:                                             │");
+    println!("  │                                                          │");
+    println!("  │    Tab / Shift-Tab  Cycle sessions                       │");
+    println!("  │    i                Enter input mode                     │");
+    println!("  │    Esc              Leave input mode                     │");
+    println!("  │    j / k            Scroll up / down                     │");
+    println!("  │                                                          │");
+    println!("  │  Mouse is enabled — click, drag, scroll                  │");
     println!("  │                                                          │");
     println!("  └──────────────────────────────────────────────────────────┘");
     println!();

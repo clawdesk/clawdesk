@@ -34,6 +34,9 @@ pub struct ModelServerConfig {
     pub threads: Option<u32>,
     /// Auto-unload after this many seconds of inactivity (0 = never).
     pub ttl_secs: u64,
+    /// Optional path to a draft model for speculative decoding (llama.cpp --draft).
+    #[serde(default)]
+    pub draft_model_path: Option<PathBuf>,
 }
 
 /// A running inference server process.
@@ -164,6 +167,7 @@ impl ServerManager {
             gpu_layers,
             threads: Some(std::cmp::min(self.system.total_cpu_cores as u32, 8)),
             ttl_secs: *self.default_ttl_secs.read().await,
+            draft_model_path: None,
         };
 
         // Stop any existing process for this model
@@ -199,6 +203,9 @@ impl ServerManager {
         }
         if let Some(threads) = config.threads {
             cmd.arg("--threads").arg(threads.to_string());
+        }
+        if let Some(ref draft_path) = config.draft_model_path {
+            cmd.arg("--draft").arg(draft_path);
         }
 
         // Enable flash attention if GPU

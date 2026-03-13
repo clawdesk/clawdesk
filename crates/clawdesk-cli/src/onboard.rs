@@ -67,32 +67,43 @@ pub async fn run_onboarding() -> Result<(), Box<dyn std::error::Error + Send + S
 
 /// Setup the data directory.
 fn setup_data_dir() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let default_dir = default_data_dir();
+    let data_dir = clawdesk_types::dirs::data();
+    let dot_dir = clawdesk_types::dirs::dot_clawdesk();
+    let sochdb_dir = clawdesk_types::dirs::sochdb();
+    let threads_dir = clawdesk_types::dirs::threads();
+    let agents_dir = clawdesk_types::dirs::agents();
+    let skills_dir = clawdesk_types::dirs::skills();
+
     println!("  [1/4] Data Directory");
-    println!("  Default: {}", default_dir.display());
-    print!("  Use this location? [Y/n]: ");
+    println!("  Platform data: {}", data_dir.display());
+    println!("  Config/state:  {}", dot_dir.display());
+    print!("  Use these locations? [Y/n]: ");
     io::stdout().flush()?;
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     let input = input.trim();
 
-    let data_dir = if input.is_empty() || input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes") {
-        default_dir
-    } else {
-        print!("  Enter custom path: ");
-        io::stdout().flush()?;
-        let mut custom = String::new();
-        io::stdin().read_line(&mut custom)?;
-        PathBuf::from(custom.trim())
-    };
+    if !input.is_empty() && !input.eq_ignore_ascii_case("y") && !input.eq_ignore_ascii_case("yes") {
+        println!("  Using default locations.");
+    }
 
+    // Create platform data dir and its subdirs
     std::fs::create_dir_all(&data_dir)?;
-    std::fs::create_dir_all(data_dir.join("data"))?;
     std::fs::create_dir_all(data_dir.join("credentials"))?;
-    std::fs::create_dir_all(data_dir.join("skills"))?;
+    std::fs::create_dir_all(&skills_dir)?;
     std::fs::create_dir_all(data_dir.join("plugins"))?;
+
+    // Create dot-clawdesk dir and subdirs used by Tauri desktop
+    std::fs::create_dir_all(&dot_dir)?;
+    std::fs::create_dir_all(&sochdb_dir)?;
+    std::fs::create_dir_all(&threads_dir)?;
+    std::fs::create_dir_all(&agents_dir)?;
+    std::fs::create_dir_all(dot_dir.join("logs"))?;
+    std::fs::create_dir_all(dot_dir.join("workspace"))?;
+
     println!("  ✓ Created {}", data_dir.display());
+    println!("  ✓ Created {}", dot_dir.display());
 
     Ok(data_dir)
 }
@@ -108,22 +119,26 @@ async fn setup_providers(data_dir: &PathBuf) -> Result<Vec<String>, Box<dyn std:
     std::fs::create_dir_all(&creds_dir)?;
 
     let mut configured = Vec::new();
+    let mut env_lines: Vec<String> = Vec::new();
 
     // Anthropic
     if let Some(key) = prompt_api_key("Anthropic", "ANTHROPIC_API_KEY", "sk-ant-")? {
         save_credential(&creds_dir, "anthropic", &key)?;
+        env_lines.push(format!("ANTHROPIC_API_KEY={}", key));
         configured.push("anthropic".to_string());
     }
 
     // OpenAI
     if let Some(key) = prompt_api_key("OpenAI", "OPENAI_API_KEY", "sk-")? {
         save_credential(&creds_dir, "openai", &key)?;
+        env_lines.push(format!("OPENAI_API_KEY={}", key));
         configured.push("openai".to_string());
     }
 
     // Gemini
     if let Some(key) = prompt_api_key("Google Gemini", "GEMINI_API_KEY", "AI")? {
         save_credential(&creds_dir, "gemini", &key)?;
+        env_lines.push(format!("GEMINI_API_KEY={}", key));
         configured.push("gemini".to_string());
     }
 
@@ -137,6 +152,32 @@ async fn setup_providers(data_dir: &PathBuf) -> Result<Vec<String>, Box<dyn std:
     } else {
         println!("not found");
         println!("    Install: https://ollama.com/download");
+    }
+
+    // Write ~/.clawdesk/.env so the desktop app also picks up the keys
+    if !env_lines.is_empty() {
+        let dot_env_path = clawdesk_types::dirs::dot_clawdesk().join(".env");
+        let mut contents = String::new();
+        // Preserve existing .env entries
+        if dot_env_path.exists() {
+            if let Ok(existing) = std::fs::read_to_string(&dot_env_path) {
+                for line in existing.lines() {
+                    let key = line.split_once('=').map(|(k, _)| k.trim());
+                    // Skip lines we're about to overwrite
+                    let dominated = key.map(|k| env_lines.iter().any(|e| e.starts_with(&format!("{}=", k)))).unwrap_or(false);
+                    if !dominated {
+                        contents.push_str(line);
+                        contents.push('\n');
+                    }
+                }
+            }
+        }
+        for line in &env_lines {
+            contents.push_str(line);
+            contents.push('\n');
+        }
+        std::fs::write(&dot_env_path, contents)?;
+        println!("  ✓ Wrote {} (shared with desktop app)", dot_env_path.display());
     }
 
     if configured.is_empty() {
@@ -347,44 +388,15 @@ fn setup_channels(data_dir: &PathBuf) -> Result<Vec<String>, Box<dyn std::error:
     Ok(configured)
 }
 
-/// Get the default data directory for the current platform.
-fn default_data_dir() -> PathBuf {
-    if cfg!(target_os = "macos") {
-        dirs_home()
-            .join("Library")
-            .join("Application Support")
-            .join("clawdesk")
-    } else if cfg!(target_os = "linux") {
-        std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| dirs_home().join(".local").join("share"))
-            .join("clawdesk")
-    } else if cfg!(target_os = "windows") {
-        std::env::var("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| dirs_home().join("AppData").join("Roaming"))
-            .join("clawdesk")
-    } else {
-        dirs_home().join(".clawdesk")
-    }
-}
-
-fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-}
+// Removed: duplicated default_data_dir() and dirs_home().
+// All path resolution now uses clawdesk_types::dirs.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn default_data_dir_is_absolute_or_dot() {
-        let dir = default_data_dir();
-        let s = dir.to_string_lossy();
-        // Should contain "clawdesk" somewhere in the path
+    fn canonical_dirs_available() {
+        let d = clawdesk_types::dirs::data();
+        let s = d.to_string_lossy();
         assert!(s.contains("clawdesk"), "data dir should contain 'clawdesk': {}", s);
     }
 }

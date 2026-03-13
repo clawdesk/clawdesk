@@ -407,6 +407,8 @@ pub struct AgentResponse {
     pub total_rounds: usize,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
     pub finish_reason: FinishReason,
     /// Intermediate messages from tool rounds (assistant tool_use + tool results).
     /// Empty if no tool calls occurred. Ordered chronologically.
@@ -1391,6 +1393,8 @@ impl AgentRunner {
         let mut loop_state = LoopState {
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_read_tokens: 0,
+            total_cache_write_tokens: 0,
             messaging_tracker: crate::builtin_tools::MessagingToolTracker::new(),
             loop_guard: LoopGuard::new(LoopGuardConfig::default()),
             initial_msg_count: request.messages.len(),
@@ -1670,6 +1674,8 @@ impl AgentRunner {
 
         loop_state.total_input_tokens += stream_usage.input_tokens;
         loop_state.total_output_tokens += stream_usage.output_tokens;
+        loop_state.total_cache_read_tokens += stream_usage.cache_read_tokens.unwrap_or(0);
+        loop_state.total_cache_write_tokens += stream_usage.cache_write_tokens.unwrap_or(0);
         guard.record_tokens(&streamed_content);
 
         let _after_llm = self.dispatch_hook(
@@ -1959,6 +1965,8 @@ impl AgentRunner {
             total_rounds,
             input_tokens: loop_state.total_input_tokens,
             output_tokens: loop_state.total_output_tokens,
+            cache_read_tokens: loop_state.total_cache_read_tokens,
+            cache_write_tokens: loop_state.total_cache_write_tokens,
             finish_reason,
             tool_messages,
             segments,

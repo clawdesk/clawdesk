@@ -228,79 +228,139 @@ pub struct LLMResponse {
 
 /// Per-model cost calculator.
 ///
-/// Pricing is per-1K tokens. Call [`CostCalculator::for_model`] to auto-detect.
+/// Pricing is per-1M tokens. Call [`CostCalculator::for_model`] to auto-detect.
+/// Rates aligned with upstream provider pricing as of 2026-03.
 pub struct CostCalculator {
-    input_cost_per_1k: f64,
-    output_cost_per_1k: f64,
+    input_cost_per_1m: f64,
+    output_cost_per_1m: f64,
+    cache_read_cost_per_1m: f64,
+    cache_write_cost_per_1m: f64,
 }
 
 impl CostCalculator {
     /// Auto-detect pricing from model name.
     ///
-    /// Covers OpenAI, Anthropic, Google Gemini, Cohere, and Mistral families.
+    /// Covers OpenAI (GPT-4x/5.x), Anthropic Claude, Google Gemini,
+    /// DeepSeek, Meta Llama, Cohere, Mistral, and local models.
     pub fn for_model(model: &str) -> Self {
         let m = model.to_lowercase();
 
-        match () {
-            // ── OpenAI ──────────────────────────────────────────────
-            _ if m.contains("gpt-4o-mini") => Self { input_cost_per_1k: 0.000_15, output_cost_per_1k: 0.000_6 },
-            _ if m.contains("gpt-4o")      => Self { input_cost_per_1k: 0.002_5,  output_cost_per_1k: 0.01  },
-            _ if m.contains("gpt-4-turbo") || m.contains("gpt-4-1106") =>
-                Self { input_cost_per_1k: 0.01, output_cost_per_1k: 0.03 },
-            _ if m.contains("gpt-4")       => Self { input_cost_per_1k: 0.03, output_cost_per_1k: 0.06 },
-            _ if m.contains("gpt-3.5-turbo") => Self { input_cost_per_1k: 0.000_5, output_cost_per_1k: 0.001_5 },
-
-            // ── Anthropic Claude ────────────────────────────────────
-            _ if m.contains("claude-opus-4") || m.contains("claude-3-opus") =>
-                Self { input_cost_per_1k: 0.015, output_cost_per_1k: 0.075 },
-            _ if m.contains("claude-sonnet-4.5") || m.contains("claude-sonnet-4")
-              || m.contains("claude-3.5-sonnet") || m.contains("claude-3-5-sonnet") =>
-                Self { input_cost_per_1k: 0.003, output_cost_per_1k: 0.015 },
-            _ if m.contains("claude-3-sonnet") =>
-                Self { input_cost_per_1k: 0.003, output_cost_per_1k: 0.015 },
-            _ if m.contains("claude-haiku-4") || m.contains("claude-3-haiku") =>
-                Self { input_cost_per_1k: 0.000_25, output_cost_per_1k: 0.001_25 },
-            _ if m.contains("claude-2") =>
-                Self { input_cost_per_1k: 0.008, output_cost_per_1k: 0.024 },
-
-            // ── Google Gemini ───────────────────────────────────────
-            _ if m.contains("gemini-1.5-pro") || m.contains("gemini-pro-1.5") =>
-                Self { input_cost_per_1k: 0.003_5, output_cost_per_1k: 0.010_5 },
-            _ if m.contains("gemini-1.5-flash") || m.contains("gemini-flash-1.5") =>
-                Self { input_cost_per_1k: 0.000_075, output_cost_per_1k: 0.000_3 },
-            _ if m.contains("gemini-pro") =>
-                Self { input_cost_per_1k: 0.000_5, output_cost_per_1k: 0.001_5 },
-
-            // ── Cohere ──────────────────────────────────────────────
-            _ if m.contains("command-r-plus") || m.contains("command-r+") =>
-                Self { input_cost_per_1k: 0.003, output_cost_per_1k: 0.015 },
-            _ if m.contains("command-r") =>
-                Self { input_cost_per_1k: 0.000_5, output_cost_per_1k: 0.001_5 },
-
-            // ── Mistral ─────────────────────────────────────────────
-            _ if m.contains("mistral-large")  => Self { input_cost_per_1k: 0.008,   output_cost_per_1k: 0.024  },
-            _ if m.contains("mistral-medium") => Self { input_cost_per_1k: 0.002_7, output_cost_per_1k: 0.008_1 },
-            _ if m.contains("mistral-small")  => Self { input_cost_per_1k: 0.001,   output_cost_per_1k: 0.003  },
-
-            // ── Unknown ─────────────────────────────────────────────
-            _ => {
-                tracing::warn!(model = %model, "Unknown model for cost calculation, using $0");
-                Self { input_cost_per_1k: 0.0, output_cost_per_1k: 0.0 }
-            }
+        // ── Anthropic Claude ────────────────────────────────────
+        if m.contains("claude-opus-4") || m.contains("claude-3-opus") {
+            return Self { input_cost_per_1m: 15.0, output_cost_per_1m: 75.0, cache_read_cost_per_1m: 1.5, cache_write_cost_per_1m: 18.75 };
         }
+        if m.contains("claude-sonnet-4") || m.contains("claude-3.5-sonnet") || m.contains("claude-3-5-sonnet") {
+            return Self { input_cost_per_1m: 3.0, output_cost_per_1m: 15.0, cache_read_cost_per_1m: 0.3, cache_write_cost_per_1m: 3.75 };
+        }
+        if m.contains("claude-3-sonnet") {
+            return Self { input_cost_per_1m: 3.0, output_cost_per_1m: 15.0, cache_read_cost_per_1m: 0.3, cache_write_cost_per_1m: 3.75 };
+        }
+        if m.contains("claude-haiku-4") || m.contains("claude-3-haiku") {
+            return Self { input_cost_per_1m: 0.25, output_cost_per_1m: 1.25, cache_read_cost_per_1m: 0.025, cache_write_cost_per_1m: 0.3125 };
+        }
+        if m.contains("claude-2") {
+            return Self { input_cost_per_1m: 8.0, output_cost_per_1m: 24.0, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 };
+        }
+
+        // ── OpenAI GPT-5.x ──────────────────────────────────────
+        if m.contains("gpt-5.2") {
+            return Self { input_cost_per_1m: 1.75, output_cost_per_1m: 14.0, cache_read_cost_per_1m: 0.175, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gpt-5.1-codex-max") {
+            return Self { input_cost_per_1m: 1.25, output_cost_per_1m: 10.0, cache_read_cost_per_1m: 0.125, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gpt-5.1-codex-mini") {
+            return Self { input_cost_per_1m: 0.25, output_cost_per_1m: 2.0, cache_read_cost_per_1m: 0.025, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gpt-5.1-codex") || m.contains("gpt-5.1") {
+            return Self { input_cost_per_1m: 1.07, output_cost_per_1m: 8.5, cache_read_cost_per_1m: 0.107, cache_write_cost_per_1m: 0.0 };
+        }
+
+        // ── OpenAI GPT-4x ───────────────────────────────────────
+        if m.contains("gpt-4o-mini") {
+            return Self { input_cost_per_1m: 0.15, output_cost_per_1m: 0.6, cache_read_cost_per_1m: 0.075, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gpt-4o") {
+            return Self { input_cost_per_1m: 2.5, output_cost_per_1m: 10.0, cache_read_cost_per_1m: 1.25, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gpt-4-turbo") || m.contains("gpt-4-1106") {
+            return Self { input_cost_per_1m: 10.0, output_cost_per_1m: 30.0, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gpt-4") {
+            return Self { input_cost_per_1m: 30.0, output_cost_per_1m: 60.0, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gpt-3.5-turbo") {
+            return Self { input_cost_per_1m: 0.5, output_cost_per_1m: 1.5, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 };
+        }
+
+        // ── Google Gemini ───────────────────────────────────────
+        if m.contains("gemini-3-pro") {
+            return Self { input_cost_per_1m: 2.0, output_cost_per_1m: 12.0, cache_read_cost_per_1m: 0.2, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gemini-3-flash") {
+            return Self { input_cost_per_1m: 0.5, output_cost_per_1m: 3.0, cache_read_cost_per_1m: 0.05, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gemini-1.5-pro") || m.contains("gemini-pro-1.5") {
+            return Self { input_cost_per_1m: 3.5, output_cost_per_1m: 10.5, cache_read_cost_per_1m: 0.875, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gemini-1.5-flash") || m.contains("gemini-flash-1.5") {
+            return Self { input_cost_per_1m: 0.075, output_cost_per_1m: 0.3, cache_read_cost_per_1m: 0.01875, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("gemini-pro") {
+            return Self { input_cost_per_1m: 0.5, output_cost_per_1m: 1.5, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 };
+        }
+
+        // ── DeepSeek ────────────────────────────────────────────
+        if m.contains("deepseek-r1") {
+            return Self { input_cost_per_1m: 3.0, output_cost_per_1m: 7.0, cache_read_cost_per_1m: 3.0, cache_write_cost_per_1m: 3.0 };
+        }
+        if m.contains("deepseek-v3") {
+            return Self { input_cost_per_1m: 0.6, output_cost_per_1m: 1.25, cache_read_cost_per_1m: 0.6, cache_write_cost_per_1m: 0.6 };
+        }
+
+        // ── Cohere ──────────────────────────────────────────────
+        if m.contains("command-r-plus") || m.contains("command-r+") {
+            return Self { input_cost_per_1m: 3.0, output_cost_per_1m: 15.0, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("command-r") {
+            return Self { input_cost_per_1m: 0.5, output_cost_per_1m: 1.5, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 };
+        }
+
+        // ── Mistral ─────────────────────────────────────────────
+        if m.contains("mistral-large") {
+            return Self { input_cost_per_1m: 8.0, output_cost_per_1m: 24.0, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("mistral-medium") {
+            return Self { input_cost_per_1m: 2.7, output_cost_per_1m: 8.1, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 };
+        }
+        if m.contains("mistral-small") {
+            return Self { input_cost_per_1m: 1.0, output_cost_per_1m: 3.0, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 };
+        }
+
+        // ── Unknown ─────────────────────────────────────────────
+        tracing::warn!(model = %model, "Unknown model for cost calculation, using $0");
+        Self { input_cost_per_1m: 0.0, output_cost_per_1m: 0.0, cache_read_cost_per_1m: 0.0, cache_write_cost_per_1m: 0.0 }
     }
 
     /// Calculate total cost for a given usage.
     pub fn calculate(&self, input_tokens: u32, output_tokens: u32) -> f64 {
-        (input_tokens as f64 / 1000.0) * self.input_cost_per_1k
-            + (output_tokens as f64 / 1000.0) * self.output_cost_per_1k
+        (input_tokens as f64 * self.input_cost_per_1m / 1_000_000.0)
+            + (output_tokens as f64 * self.output_cost_per_1m / 1_000_000.0)
+    }
+
+    /// Calculate total cost including cache tokens.
+    pub fn calculate_with_cache(&self, input_tokens: u32, output_tokens: u32, cache_read: u32, cache_write: u32) -> f64 {
+        (input_tokens as f64 * self.input_cost_per_1m / 1_000_000.0)
+            + (output_tokens as f64 * self.output_cost_per_1m / 1_000_000.0)
+            + (cache_read as f64 * self.cache_read_cost_per_1m / 1_000_000.0)
+            + (cache_write as f64 * self.cache_write_cost_per_1m / 1_000_000.0)
     }
 
     /// Human-readable pricing string.
     pub fn pricing_info(&self) -> String {
         format!(
-            "${:.6}/1K input, ${:.6}/1K output",
-            self.input_cost_per_1k, self.output_cost_per_1k
+            "${:.4}/1M input, ${:.4}/1M output",
+            self.input_cost_per_1m, self.output_cost_per_1m
         )
     }
 }
@@ -491,17 +551,31 @@ mod tests {
     #[test]
     fn test_cost_calculator_claude() {
         let calc = CostCalculator::for_model("claude-sonnet-4.5");
+        // per-1M: input=3.0, output=15.0
+        // 1000 tokens each: (1000 * 3.0 / 1M) + (1000 * 15.0 / 1M) = 0.003 + 0.015 = 0.018
         let cost = calc.calculate(1000, 1000);
-        // $0.003 + $0.015 = $0.018
         assert!((cost - 0.018).abs() < 0.001);
     }
 
     #[test]
     fn test_cost_calculator_gpt4o() {
         let calc = CostCalculator::for_model("gpt-4o");
+        // per-1M: input=2.5, output=10.0
+        // 1000 tokens each: (1000 * 2.5 / 1M) + (1000 * 10.0 / 1M) = 0.0025 + 0.01 = 0.0125
         let cost = calc.calculate(1000, 1000);
-        // $0.0025 + $0.01 = $0.0125
         assert!((cost - 0.0125).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cost_calculator_with_cache() {
+        let calc = CostCalculator::for_model("claude-opus-4-20250514");
+        // per-1M: input=15, output=75, cache_read=1.5, cache_write=18.75
+        let cost = calc.calculate_with_cache(1000, 500, 2000, 100);
+        let expected = (1000.0 * 15.0 / 1_000_000.0)
+            + (500.0 * 75.0 / 1_000_000.0)
+            + (2000.0 * 1.5 / 1_000_000.0)
+            + (100.0 * 18.75 / 1_000_000.0);
+        assert!((cost - expected).abs() < 0.0001);
     }
 
     #[test]

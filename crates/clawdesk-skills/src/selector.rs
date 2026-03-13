@@ -21,6 +21,7 @@
 //! instances (skills are approximately unit-size relative to budget).
 
 use crate::definition::{Skill, SkillId};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// A skill selected for inclusion in the agent's system prompt.
@@ -57,6 +58,17 @@ pub enum ExclusionReason {
 
 /// Token-budgeted skill selector using greedy knapsack.
 pub struct SkillSelector;
+
+/// Structural properties of the skill dependency graph.
+#[derive(Debug, Clone)]
+pub struct DagAnalysis {
+    /// True if the dependency graph is a forest (each node has at most one parent).
+    pub is_forest: bool,
+    /// Skills with multiple parents (shared dependencies / diamond patterns).
+    pub shared_deps: Vec<SkillId>,
+    /// True if the graph contains cycles (should never happen for valid configs).
+    pub has_cycles: bool,
+}
 
 impl SkillSelector {
     /// Select skills for inclusion in the system prompt within a token budget.
@@ -193,6 +205,81 @@ impl SkillSelector {
 
         buf
     }
+
+    /// Analyze the dependency DAG structure of a set of skills.
+    ///
+    /// Returns whether the DAG forms a forest (tree DP viable) or has
+    /// shared dependencies (diamond patterns requiring general DAG algorithms).
+    ///
+    /// This informs algorithm selection:
+    /// - **Forest**: Tree DP in O(N·B) is applicable.
+    /// - **General DAG**: Requires branch-and-bound or Woeginger's FPTAS (1999)
+    ///   for precedence-constrained knapsack. For N<100, branch-and-bound with
+    ///   memoization is practical.
+    pub fn analyze_dag(candidates: &[Arc<Skill>]) -> DagAnalysis {
+        // Count in-degree from *reverse* edges: how many skills depend on each skill.
+        // A forest requires each skill to be depended upon by at most one other skill
+        // AND each skill to have at most one dependency (for tree-child structure).
+        // More precisely: a forest means each node has at most one parent.
+        let mut parent_count: HashMap<&str, usize> = HashMap::new();
+        let skill_ids: HashSet<&str> = candidates.iter().map(|s| s.manifest.id.as_str()).collect();
+
+        for skill in candidates {
+            for dep in &skill.manifest.dependencies {
+                if skill_ids.contains(dep.as_str()) {
+                    *parent_count.entry(dep.as_str()).or_default() += 1;
+                }
+            }
+        }
+
+        let shared_deps: Vec<SkillId> = parent_count
+            .iter()
+            .filter(|(_, &count)| count > 1)
+            .map(|(&id, _)| SkillId::from(id))
+            .collect();
+
+        // Cycle detection via Kahn's algorithm (topological sort)
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+        for skill in candidates {
+            in_degree.entry(skill.manifest.id.as_str()).or_default();
+            for dep in &skill.manifest.dependencies {
+                if skill_ids.contains(dep.as_str()) {
+                    adj.entry(dep.as_str()).or_default().push(skill.manifest.id.as_str());
+                    *in_degree.entry(skill.manifest.id.as_str()).or_default() += 1;
+                }
+            }
+        }
+
+        let mut queue: Vec<&str> = in_degree
+            .iter()
+            .filter(|(_, &d)| d == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        let mut visited = 0usize;
+        while let Some(node) = queue.pop() {
+            visited += 1;
+            if let Some(children) = adj.get(node) {
+                for &child in children {
+                    if let Some(d) = in_degree.get_mut(child) {
+                        *d -= 1;
+                        if *d == 0 {
+                            queue.push(child);
+                        }
+                    }
+                }
+            }
+        }
+
+        let has_cycles = visited < candidates.len();
+        let is_forest = shared_deps.is_empty() && !has_cycles;
+
+        DagAnalysis {
+            is_forest,
+            shared_deps,
+            has_cycles,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -265,5 +352,72 @@ mod tests {
         assert!(prompt.ends_with("</skills>"));
         assert!(prompt.contains("## search"));
         assert!(prompt.contains("You can search the web."));
+    }
+
+    fn make_skill_with_deps(id: &str, priority: f64, prompt: &str, deps: Vec<&str>) -> Arc<Skill> {
+        Arc::new(Skill {
+            manifest: SkillManifest {
+                id: SkillId::from(id),
+                display_name: id.to_string(),
+                description: format!("Test skill: {}", id),
+                version: "0.1.0".into(),
+                author: None,
+                dependencies: deps.into_iter().map(SkillId::from).collect(),
+                required_tools: vec![],
+                parameters: vec![],
+                triggers: vec![SkillTrigger::Always],
+                estimated_tokens: 100,
+                priority_weight: priority,
+                tags: vec![],
+                signature: None,
+                publisher_key: None,
+                content_hash: None,
+                schema_version: 1,
+            },
+            prompt_fragment: prompt.to_string(),
+            provided_tools: vec![],
+            parameter_values: serde_json::Value::Null,
+            source_path: None,
+        })
+    }
+
+    #[test]
+    fn dag_analysis_forest() {
+        // A → B, C → D — two independent chains = forest
+        let skills = vec![
+            make_skill("a", 1.0, "a"),
+            make_skill_with_deps("b", 1.0, "b", vec!["a"]),
+            make_skill("c", 1.0, "c"),
+            make_skill_with_deps("d", 1.0, "d", vec!["c"]),
+        ];
+        let analysis = SkillSelector::analyze_dag(&skills);
+        assert!(analysis.is_forest);
+        assert!(analysis.shared_deps.is_empty());
+        assert!(!analysis.has_cycles);
+    }
+
+    #[test]
+    fn dag_analysis_diamond() {
+        // Diamond: A → B, A → C, B → D, C → D
+        // D is depended on by both B and C (but actually A is depended on by B and C)
+        let skills = vec![
+            make_skill("a", 1.0, "a"),
+            make_skill_with_deps("b", 1.0, "b", vec!["a"]),
+            make_skill_with_deps("c", 1.0, "c", vec!["a"]),
+            make_skill_with_deps("d", 1.0, "d", vec!["b", "c"]),
+        ];
+        let analysis = SkillSelector::analyze_dag(&skills);
+        assert!(!analysis.is_forest, "diamond pattern should not be a forest");
+        // "a" has two children (b and c), making it a shared dep
+        assert!(!analysis.shared_deps.is_empty());
+        assert!(!analysis.has_cycles);
+    }
+
+    #[test]
+    fn dag_analysis_no_skills() {
+        let skills: Vec<Arc<Skill>> = vec![];
+        let analysis = SkillSelector::analyze_dag(&skills);
+        assert!(analysis.is_forest);
+        assert!(!analysis.has_cycles);
     }
 }

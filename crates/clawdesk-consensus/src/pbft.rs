@@ -526,3 +526,76 @@ mod tests {
         assert!(!result.reached);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Strategy: generate a set of agent votes for a PBFT round.
+    /// The safety property is: if consensus is reached with decision D,
+    /// then at least (2f+1) agents voted for D (i.e., no two honest
+    /// quorums can commit different values).
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1000))]
+
+        #[test]
+        fn pbft_safety_no_conflicting_commits(
+            f in 1usize..=3,
+            votes in prop::collection::vec(
+                (0.0f64..=1.0, prop::bool::ANY),
+                4..=10,
+            ),
+        ) {
+            let n = 3 * f + 1;
+            let config = PbftConfig::from_fault_tolerance(f);
+            let mut pbft = PbftConsensus::new(config.clone()).unwrap();
+
+            pbft.propose("leader", "decision-X").unwrap();
+
+            let effective_votes = votes.iter().take(n).enumerate();
+            for (i, &(confidence, agrees)) in effective_votes {
+                let agent = format!("agent-{i}");
+                let _ = pbft.prepare(&agent, agrees, confidence);
+            }
+
+            let result = pbft.evaluate();
+
+            // Safety property: if consensus reached, the number of agreeing
+            // votes must be at least the quorum size (2f+1).
+            if result.reached {
+                prop_assert!(
+                    result.agree_votes >= config.quorum(),
+                    "Consensus reached with {} agrees < quorum {}",
+                    result.agree_votes,
+                    config.quorum(),
+                );
+            }
+        }
+
+        #[test]
+        fn pbft_accuracy_bounded(
+            rounds in 1usize..=20,
+        ) {
+            let config = PbftConfig::from_fault_tolerance(1);
+            let mut pbft = PbftConsensus::new(config).unwrap();
+
+            for r in 0..rounds {
+                pbft.propose("leader", &format!("d-{r}")).unwrap();
+                pbft.prepare("a1", true, 0.9).unwrap();
+                pbft.prepare("a2", true, 0.8).unwrap();
+                pbft.prepare("a3", true, 0.7).unwrap();
+                pbft.prepare("a4", r % 2 == 0, 0.6).unwrap();
+                pbft.evaluate();
+            }
+
+            // Accuracy must always be in [0, 1]
+            for agent in ["a1", "a2", "a3", "a4"] {
+                if let Some(acc) = pbft.agent_accuracy(agent) {
+                    prop_assert!(acc.accuracy >= 0.0 && acc.accuracy <= 1.0,
+                        "Accuracy out of bounds: {}", acc.accuracy);
+                }
+            }
+        }
+    }
+}

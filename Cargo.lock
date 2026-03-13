@@ -1374,6 +1374,7 @@ dependencies = [
  "clawdesk-types",
  "dashmap",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "uuid",
@@ -1452,6 +1453,7 @@ name = "clawdesk-consensus"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1579,6 +1581,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "proptest",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2009,6 +2012,7 @@ name = "clawdesk-telemetry"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clawdesk-types",
  "opentelemetry",
  "opentelemetry-http",
@@ -10577,6 +10581,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 0.8.2",
+ "walkdir",
 ]
 
 [[package]]

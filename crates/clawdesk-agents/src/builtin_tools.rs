@@ -932,46 +932,69 @@ impl Tool for FileEditTool {
 
         let resolved = self.resolve_path(path_str);
 
-        // Read the file
-        let content = tokio::fs::read_to_string(&resolved)
+        // Read the file as bytes to handle BOM
+        let raw_bytes = tokio::fs::read(&resolved)
             .await
             .map_err(|e| format!("failed to read file '{}': {}", path_str, e))?;
 
-        // Normalize line endings for matching
-        let normalized = content.replace("\r\n", "\n");
-        let old_normalized = old_text.replace("\r\n", "\n");
+        // Strip UTF-8 BOM if present (LLMs won't include it in old_text)
+        let content_str = if raw_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            String::from_utf8_lossy(&raw_bytes[3..]).into_owned()
+        } else {
+            String::from_utf8_lossy(&raw_bytes).into_owned()
+        };
 
-        // Count matches
+        // Detect line endings for preservation
+        let uses_crlf = content_str.contains("\r\n");
+
+        // Normalize to LF for matching
+        let normalized = content_str.replace("\r\n", "\n");
+        let old_normalized = old_text.replace("\r\n", "\n");
+        let new_normalized = new_text.replace("\r\n", "\n");
+
+        // Try exact match first
         let match_count = normalized.matches(&old_normalized).count();
 
-        if match_count == 0 {
-            // Try a more flexible match — strip leading/trailing whitespace on each line
-            let old_lines: Vec<&str> = old_normalized.lines().map(|l| l.trim()).collect();
-            let content_lines: Vec<&str> = normalized.lines().collect();
+        if match_count == 1 {
+            // Exact match — perform replacement
+            let new_content = normalized.replacen(&old_normalized, &new_normalized, 1);
 
-            // Try to find a fuzzy match position
-            let mut found = false;
-            for window_start in 0..content_lines.len().saturating_sub(old_lines.len().saturating_sub(1)) {
-                let window = &content_lines[window_start..std::cmp::min(window_start + old_lines.len(), content_lines.len())];
-                let trimmed_window: Vec<&str> = window.iter().map(|l| l.trim()).collect();
-                if trimmed_window == old_lines {
-                    found = true;
-                    break;
-                }
-            }
+            // Generate unified diff before writing
+            let diff_output = generate_unified_diff(&normalized, &new_content, path_str);
 
-            if found {
-                return Err(format!(
-                    "old_text not found as exact match in '{}'. A similar block exists but whitespace/indentation differs. \
-                    Make sure old_text matches the file content exactly, including leading spaces and tabs.",
-                    path_str
-                ));
-            }
+            // Restore original line endings if file used CRLF
+            let final_content = if uses_crlf {
+                new_content.replace('\n', "\r\n")
+            } else {
+                new_content
+            };
 
-            return Err(format!(
-                "old_text not found in '{}'. The text you're trying to replace does not exist in the file. \
-                Use file_read to check the current file content first.",
-                path_str
+            // Restore BOM if original had one
+            let write_bytes = if raw_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                let mut bom = vec![0xEF, 0xBB, 0xBF];
+                bom.extend(final_content.as_bytes());
+                bom
+            } else {
+                final_content.into_bytes()
+            };
+
+            tokio::fs::write(&resolved, &write_bytes)
+                .await
+                .map_err(|e| format!("failed to write file: {e}"))?;
+
+            let old_lines = old_normalized.lines().count();
+            let new_lines = new_normalized.lines().count();
+            let diff_info = if new_text.is_empty() {
+                format!("Deleted {} lines", old_lines)
+            } else if old_text.is_empty() {
+                format!("Inserted {} lines", new_lines)
+            } else {
+                format!("Replaced {} lines with {} lines", old_lines, new_lines)
+            };
+
+            return Ok(format!(
+                "Successfully edited '{}': {}\n\n{}",
+                path_str, diff_info, diff_output
             ));
         }
 
@@ -983,29 +1006,185 @@ impl Tool for FileEditTool {
             ));
         }
 
-        // Perform the replacement
-        let new_content = normalized.replacen(&old_normalized, &new_text.replace("\r\n", "\n"), 1);
+        // match_count == 0 — try fuzzy matching
+        // Normalize Unicode: smart quotes → ASCII, dashes → hyphen, special spaces → space
+        let fuzzy_content = normalize_for_fuzzy_match(&normalized);
+        let fuzzy_old = normalize_for_fuzzy_match(&old_normalized);
 
-        tokio::fs::write(&resolved, new_content.as_bytes())
-            .await
-            .map_err(|e| format!("failed to write file: {e}"))?;
+        let fuzzy_count = fuzzy_content.matches(&fuzzy_old).count();
 
-        // Report what changed
-        let old_lines = old_normalized.lines().count();
-        let new_lines = new_text.lines().count();
-        let diff_info = if new_text.is_empty() {
-            format!("Deleted {} lines", old_lines)
-        } else if old_text.is_empty() {
-            format!("Inserted {} lines", new_lines)
-        } else {
-            format!("Replaced {} lines with {} lines", old_lines, new_lines)
-        };
+        if fuzzy_count == 1 {
+            // Fuzzy match found — perform replacement in fuzzy-normalized space
+            let fuzzy_new = normalize_for_fuzzy_match(&new_normalized);
+            let new_content = fuzzy_content.replacen(&fuzzy_old, &fuzzy_new, 1);
 
-        Ok(format!(
-            "Successfully edited '{}': {}",
-            path_str, diff_info
+            let diff_output = generate_unified_diff(&fuzzy_content, &new_content, path_str);
+
+            let final_content = if uses_crlf {
+                new_content.replace('\n', "\r\n")
+            } else {
+                new_content
+            };
+
+            let write_bytes = if raw_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                let mut bom = vec![0xEF, 0xBB, 0xBF];
+                bom.extend(final_content.as_bytes());
+                bom
+            } else {
+                final_content.into_bytes()
+            };
+
+            tokio::fs::write(&resolved, &write_bytes)
+                .await
+                .map_err(|e| format!("failed to write file: {e}"))?;
+
+            let old_lines = old_normalized.lines().count();
+            let new_lines = new_normalized.lines().count();
+
+            return Ok(format!(
+                "Successfully edited '{}' (fuzzy match — whitespace/Unicode normalized): Replaced {} lines with {} lines\n\n{}",
+                path_str, old_lines, new_lines, diff_output
+            ));
+        }
+
+        if fuzzy_count > 1 {
+            return Err(format!(
+                "old_text fuzzy-matches {} locations in '{}'. Include more surrounding context \
+                (2-3 lines before and after) to make the match unique.",
+                fuzzy_count, path_str
+            ));
+        }
+
+        // Try whitespace-trimmed line matching for a helpful error
+        let old_lines: Vec<&str> = old_normalized.lines().map(|l| l.trim()).collect();
+        let content_lines: Vec<&str> = normalized.lines().collect();
+
+        let mut found = false;
+        for window_start in 0..content_lines.len().saturating_sub(old_lines.len().saturating_sub(1)) {
+            let window = &content_lines[window_start..std::cmp::min(window_start + old_lines.len(), content_lines.len())];
+            let trimmed_window: Vec<&str> = window.iter().map(|l| l.trim()).collect();
+            if trimmed_window == old_lines {
+                found = true;
+                break;
+            }
+        }
+
+        if found {
+            return Err(format!(
+                "old_text not found as exact match in '{}'. A similar block exists but whitespace/indentation differs. \
+                Make sure old_text matches the file content exactly, including leading spaces and tabs.",
+                path_str
+            ));
+        }
+
+        Err(format!(
+            "old_text not found in '{}'. The text you're trying to replace does not exist in the file. \
+            Use file_read to check the current file content first.",
+            path_str
         ))
     }
+}
+
+/// Normalize text for fuzzy matching — strip trailing whitespace, normalize
+/// Unicode quotes/dashes/spaces to their ASCII equivalents.
+fn normalize_for_fuzzy_match(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    for line in text.split('\n') {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(line.trim_end());
+    }
+    result
+        // Smart single quotes → '
+        .replace('\u{2018}', "'")
+        .replace('\u{2019}', "'")
+        .replace('\u{201A}', "'")
+        .replace('\u{201B}', "'")
+        // Smart double quotes → "
+        .replace('\u{201C}', "\"")
+        .replace('\u{201D}', "\"")
+        .replace('\u{201E}', "\"")
+        .replace('\u{201F}', "\"")
+        // Various dashes/hyphens → -
+        .replace('\u{2010}', "-")
+        .replace('\u{2011}', "-")
+        .replace('\u{2012}', "-")
+        .replace('\u{2013}', "-")
+        .replace('\u{2014}', "-")
+        .replace('\u{2015}', "-")
+        .replace('\u{2212}', "-")
+        // Special spaces → regular space
+        .replace('\u{00A0}', " ")
+        .replace('\u{202F}', " ")
+        .replace('\u{205F}', " ")
+        .replace('\u{3000}', " ")
+}
+
+/// Generate a minimal unified diff between old and new content.
+fn generate_unified_diff(old_content: &str, new_content: &str, filename: &str) -> String {
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+
+    let mut diff = String::new();
+    diff.push_str(&format!("--- a/{}\n", filename));
+    diff.push_str(&format!("+++ b/{}\n", filename));
+
+    // Find first and last changed line
+    let mut first_change = None;
+    let mut last_change = 0;
+    let max_len = old_lines.len().max(new_lines.len());
+
+    for i in 0..max_len {
+        let old_line = old_lines.get(i).copied();
+        let new_line = new_lines.get(i).copied();
+        if old_line != new_line {
+            if first_change.is_none() {
+                first_change = Some(i);
+            }
+            last_change = i;
+        }
+    }
+
+    let Some(first) = first_change else {
+        return String::from("(no changes)");
+    };
+
+    // Show 3 lines of context
+    let ctx = 3;
+    let start = first.saturating_sub(ctx);
+    let end = (last_change + ctx + 1).min(max_len);
+
+    diff.push_str(&format!(
+        "@@ -{},{} +{},{} @@\n",
+        start + 1,
+        (end).min(old_lines.len()).saturating_sub(start),
+        start + 1,
+        (end).min(new_lines.len()).saturating_sub(start),
+    ));
+
+    for i in start..end {
+        let old_line = old_lines.get(i).copied();
+        let new_line = new_lines.get(i).copied();
+        match (old_line, new_line) {
+            (Some(o), Some(n)) if o == n => {
+                diff.push_str(&format!(" {}\n", o));
+            }
+            (Some(o), Some(n)) => {
+                diff.push_str(&format!("-{}\n", o));
+                diff.push_str(&format!("+{}\n", n));
+            }
+            (Some(o), None) => {
+                diff.push_str(&format!("-{}\n", o));
+            }
+            (None, Some(n)) => {
+                diff.push_str(&format!("+{}\n", n));
+            }
+            (None, None) => {}
+        }
+    }
+
+    diff
 }
 
 // ─── Grep Search Tool ───────────────────────────────────────────────────────

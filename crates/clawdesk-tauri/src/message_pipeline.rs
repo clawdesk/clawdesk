@@ -916,6 +916,10 @@ pub(crate) async fn check_semantic_cache(
                 identity_verified,
                 tools_used: vec![],
                 compaction: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             }),
         };
 
@@ -1046,12 +1050,17 @@ pub(crate) async fn finalize_response(
         trace.insert(0, TraceEntry { timestamp: ts.clone(), event: "IdentityVerified".into(), detail: format!("hash_match={} version=1", identity_verified) });
     }
 
-    // ── Token usage + costs ──
+    // ── Token usage + costs (including cache tokens) ──
     let input_tokens = agent_response.input_tokens;
     let output_tokens = agent_response.output_tokens;
+    let cache_read_tokens = agent_response.cache_read_tokens;
+    let cache_write_tokens = agent_response.cache_write_tokens;
     let cost_usd = {
-        let (cpi, cpo) = model_cost_rates(&agent.model);
-        (input_tokens as f64 * cpi / 1_000_000.0) + (output_tokens as f64 * cpo / 1_000_000.0)
+        let (cpi, cpo, cpr, cpw) = model_cost_rates(&agent.model);
+        (input_tokens as f64 * cpi / 1_000_000.0)
+            + (output_tokens as f64 * cpo / 1_000_000.0)
+            + (cache_read_tokens as f64 * cpr / 1_000_000.0)
+            + (cache_write_tokens as f64 * cpw / 1_000_000.0)
     };
     state.record_usage(&agent.model, input_tokens, output_tokens);
 
@@ -1137,6 +1146,10 @@ pub(crate) async fn finalize_response(
             identity_verified,
             tools_used,
             compaction: compaction_info,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
         }),
     };
 

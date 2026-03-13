@@ -18,6 +18,8 @@ pub mod channel_bridge;
 pub mod channel_dock;
 pub mod health;
 pub mod inbound_adapter;
+pub mod interactive;
+pub mod monitor;
 pub mod rate_limit;
 pub mod registry;
 pub mod reply_formatter;

@@ -34,6 +34,8 @@ use clawdesk_providers::{FinishReason, ToolCall};
 pub(crate) struct LoopState {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    pub total_cache_read_tokens: u64,
+    pub total_cache_write_tokens: u64,
     pub messaging_tracker: MessagingToolTracker,
     pub loop_guard: LoopGuard,
     pub initial_msg_count: usize,

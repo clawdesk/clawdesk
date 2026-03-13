@@ -4279,7 +4279,7 @@ export default function App() {
         >
           ⚠ Storage is running in ephemeral mode — your chat history will NOT survive a restart.
           Check disk permissions for <code style={{ background: "rgba(0,0,0,0.2)", padding: "1px 4px", borderRadius: 3 }}>~/.clawdesk/sochdb/</code>
-          {storageHealthDetail && storageHealthDetail.recommendations.length > 0 && (
+          {storageHealthDetail?.recommendations?.length > 0 && (
             <span style={{ display: "block", fontSize: 12, marginTop: 2, opacity: 0.85 }}>
               {storageHealthDetail.recommendations[0]}
             </span>

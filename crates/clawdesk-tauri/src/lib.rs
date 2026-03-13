@@ -145,6 +145,8 @@ pub fn run() {
             // ── Media pipeline ────────────────────────────
             commands_media::get_media_pipeline_status,
             commands_media::get_link_preview,
+            commands_media::tts_synthesize,
+            commands_media::tts_list_voices,
             // ── Plugin system ─────────────────────────────
             commands_plugin::list_plugins,
             commands_plugin::get_plugin_info,

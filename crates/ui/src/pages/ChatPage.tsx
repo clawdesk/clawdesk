@@ -80,6 +80,10 @@ interface ThreadMessage {
   tokens?: number;
   cost?: number;
   duration?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   toolCalls?: ToolCallInfo[];
   isStreaming?: boolean;
   retryStatus?: string;
@@ -1205,6 +1209,10 @@ export function ChatPage({
       cost: m.metadata?.cost_usd,
       duration: m.metadata?.duration_ms,
       skills: m.metadata?.skills_activated,
+      inputTokens: m.metadata?.input_tokens,
+      outputTokens: m.metadata?.output_tokens,
+      cacheReadTokens: m.metadata?.cache_read_tokens,
+      cacheWriteTokens: m.metadata?.cache_write_tokens,
       agent: m.role === "assistant" ? agent?.name : undefined,
     }));
   }, [agent?.name]);
@@ -1896,6 +1904,10 @@ export function ChatPage({
               cost: response.message.metadata?.cost_usd ?? m.cost,
               duration: response.message.metadata?.duration_ms,
               skills: response.message.metadata?.skills_activated ?? m.skills,
+              inputTokens: response.message.metadata?.input_tokens,
+              outputTokens: response.message.metadata?.output_tokens,
+              cacheReadTokens: response.message.metadata?.cache_read_tokens,
+              cacheWriteTokens: response.message.metadata?.cache_write_tokens,
               isStreaming: false,
               retryStatus: undefined,
             };
@@ -1914,6 +1926,10 @@ export function ChatPage({
           cost: response.message.metadata?.cost_usd,
           duration: response.message.metadata?.duration_ms,
           skills: response.message.metadata?.skills_activated,
+          inputTokens: response.message.metadata?.input_tokens,
+          outputTokens: response.message.metadata?.output_tokens,
+          cacheReadTokens: response.message.metadata?.cache_read_tokens,
+          cacheWriteTokens: response.message.metadata?.cache_write_tokens,
           isStreaming: false,
         });
         return newMsgs;
@@ -2414,7 +2430,19 @@ export function ChatPage({
 
                       {m.role === "assistant" && (m.tokens || m.cost || m.duration || (m.skills && m.skills.length > 0)) && (
                         <div className="chat-msg-meta">
-                          {m.tokens != null && <span className="meta-badge">{m.tokens.toLocaleString()} tokens</span>}
+                          {m.tokens != null && (
+                            <span
+                              className="meta-badge"
+                              title={[
+                                m.inputTokens != null ? `Input: ${m.inputTokens.toLocaleString()}` : null,
+                                m.outputTokens != null ? `Output: ${m.outputTokens.toLocaleString()}` : null,
+                                m.cacheReadTokens ? `Cache read: ${m.cacheReadTokens.toLocaleString()}` : null,
+                                m.cacheWriteTokens ? `Cache write: ${m.cacheWriteTokens.toLocaleString()}` : null,
+                              ].filter(Boolean).join("\n")}
+                            >
+                              {m.tokens.toLocaleString()} tokens
+                            </span>
+                          )}
                           {m.cost != null && <span className="meta-badge">${m.cost.toFixed(4)}</span>}
                           {m.duration != null && <span className="meta-badge">{(m.duration / 1000).toFixed(1)}s</span>}
                           {m.skills?.map((s) => (

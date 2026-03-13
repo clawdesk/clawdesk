@@ -348,15 +348,9 @@ impl ReplayWindow {
         let max = self.counter_max.load(Ordering::Acquire);
 
         if counter == 0 && max == 0 {
-            // First packet ever — set the bit and advance counter
+            // First packet ever — set the bit
             let bit = Self::bit_position(0);
             self.bitmap_l0[bit.0].fetch_or(bit.1, Ordering::AcqRel);
-            let _ = self.counter_max.compare_exchange(
-                0,
-                0,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            );
             return true;
         }
 
@@ -650,6 +644,86 @@ mod tests {
         // Recent packets within window should be accepted
         assert!(rw.check_and_accept(9999));
         assert!(rw.check_and_accept(9500));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(500))]
+
+        /// Property: a capacity-N rate limiter allows exactly N requests
+        /// per key when refill_per_sec is 0 (no replenishment).
+        #[test]
+        fn rate_limiter_capacity_exact(
+            capacity in 1u32..=50,
+            extra in 1u32..=20,
+        ) {
+            let limiter = ShardedRateLimiter::new(capacity, 0.0);
+            let mut allowed = 0u32;
+            for _ in 0..(capacity + extra) {
+                if limiter.check("test-key") {
+                    allowed += 1;
+                }
+            }
+            prop_assert_eq!(allowed, capacity);
+        }
+
+        /// Property: replay window never accepts the same counter twice.
+        #[test]
+        fn replay_window_no_duplicates(
+            counters in prop::collection::vec(0u64..500, 1..100),
+        ) {
+            let rw = ReplayWindow::new();
+            let mut accepted = std::collections::HashSet::new();
+
+            for &counter in &counters {
+                let result = rw.check_and_accept(counter);
+                if accepted.contains(&counter) {
+                    prop_assert!(!result,
+                        "counter {counter} accepted twice");
+                }
+                if result {
+                    accepted.insert(counter);
+                }
+            }
+        }
+
+        /// Property: replay window accepts monotonically increasing counters.
+        #[test]
+        fn replay_window_monotonic_accepted(
+            start in 0u64..1000,
+            count in 1usize..200,
+        ) {
+            let rw = ReplayWindow::new();
+            for i in 0..(count as u64) {
+                let counter = start + i;
+                prop_assert!(rw.check_and_accept(counter),
+                    "monotonic counter {counter} should be accepted");
+            }
+        }
+
+        /// Property: replay window feasibility — accepted set never
+        /// contains counters outside the window.
+        #[test]
+        fn replay_window_budget_sound(
+            high in 2048u64..10000,
+        ) {
+            let rw = ReplayWindow::new();
+            // Accept the high counter to advance the window
+            rw.check_and_accept(0);
+            rw.check_and_accept(high);
+
+            // Anything older than high - 2048 should be rejected
+            if high >= 2048 {
+                let old = high - 2048;
+                prop_assert!(!rw.check_and_accept(old),
+                    "counter {old} should be outside window (max={high})");
+            }
+        }
     }
 }
 

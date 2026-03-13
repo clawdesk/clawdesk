@@ -78,15 +78,58 @@ impl AdaptiveSelector {
         best_name
     }
 
-    /// Simple Beta distribution sampling approximation.
-    /// Uses mean + scaled random noise for a fast approximation.
+    /// Sample from the Beta(alpha, beta) distribution.
+    ///
+    /// Uses the Gamma ratio method: Beta(a,b) = X/(X+Y) where X~Gamma(a),
+    /// Y~Gamma(b). Gamma sampling uses Marsaglia & Tsang (2000) for shape≥1
+    /// and Ahrens–Dieter (1974) for shape<1.
     fn sample_beta(alpha: f64, beta: f64) -> f64 {
-        let mean = alpha / (alpha + beta);
-        let total = alpha + beta;
-        // Use a deterministic-ish noise based on alpha*beta product.
-        let noise_scale = 1.0 / (total + 1.0);
-        let pseudo_random = ((alpha * 7.0 + beta * 13.0) % 1.0) - 0.5;
-        (mean + pseudo_random * noise_scale).clamp(0.0, 1.0)
+        let x = Self::sample_gamma(alpha);
+        let y = Self::sample_gamma(beta);
+        if x + y == 0.0 {
+            // Degenerate case — fall back to mean
+            alpha / (alpha + beta)
+        } else {
+            x / (x + y)
+        }
+    }
+
+    /// Sample from Gamma(shape, scale=1) using Marsaglia & Tsang's method.
+    fn sample_gamma(shape: f64) -> f64 {
+        assert!(shape > 0.0, "Gamma shape must be positive");
+
+        if shape < 1.0 {
+            // Ahrens–Dieter: Gamma(a) = Gamma(a+1) * U^(1/a)
+            let g = Self::sample_gamma(shape + 1.0);
+            let u: f64 = fastrand::f64().max(f64::MIN_POSITIVE);
+            return g * u.powf(1.0 / shape);
+        }
+
+        // Marsaglia & Tsang (2000)
+        let d = shape - 1.0 / 3.0;
+        let c = 1.0 / (9.0 * d).sqrt();
+        loop {
+            let x = Self::standard_normal();
+            let v = (1.0 + c * x).powi(3);
+            if v <= 0.0 {
+                continue;
+            }
+            let u: f64 = fastrand::f64().max(f64::MIN_POSITIVE);
+            let x2 = x * x;
+            if u < 1.0 - 0.0331 * x2 * x2 {
+                return d * v;
+            }
+            if u.ln() < 0.5 * x2 + d * (1.0 - v + v.ln()) {
+                return d * v;
+            }
+        }
+    }
+
+    /// Box-Muller transform for standard normal samples.
+    fn standard_normal() -> f64 {
+        let u1: f64 = fastrand::f64().max(f64::MIN_POSITIVE);
+        let u2: f64 = fastrand::f64();
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
     }
 
     /// Record a successful call.

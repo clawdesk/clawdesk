@@ -90,6 +90,13 @@ pub fn skills() -> PathBuf {
     data().join("skills")
 }
 
+/// Agents directory for agent definitions (TOML + instruction.md).
+///
+/// Resolves to `~/.clawdesk/agents/`.
+pub fn agents() -> PathBuf {
+    dot_clawdesk().join("agents")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

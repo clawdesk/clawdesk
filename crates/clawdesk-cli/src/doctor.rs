@@ -133,10 +133,14 @@ fn check_platform() -> DiagCheck {
 }
 
 fn check_data_dir() -> DiagCheck {
-    let data_dir = default_data_dir();
+    let data_dir = clawdesk_types::dirs::data();
+    let dot_dir = clawdesk_types::dirs::dot_clawdesk();
     let start = Instant::now();
 
-    if !data_dir.exists() {
+    let data_exists = data_dir.exists();
+    let dot_exists = dot_dir.exists();
+
+    if !data_exists && !dot_exists {
         return DiagCheck {
             name: "Data directory".to_string(),
             status: CheckStatus::Warn,
@@ -145,12 +149,18 @@ fn check_data_dir() -> DiagCheck {
         };
     }
 
-    // Check subdirs
-    let subdirs = ["data", "credentials", "skills", "plugins"];
+    // Check expected subdirs across both locations
     let mut missing = Vec::new();
-    for sub in &subdirs {
+    // Platform data dir subdirs
+    for sub in &["skills"] {
         if !data_dir.join(sub).exists() {
-            missing.push(*sub);
+            missing.push(format!("data/{}", sub));
+        }
+    }
+    // Dot-dir subdirs (used by Tauri desktop)
+    for sub in &["sochdb", "threads", "agents"] {
+        if !dot_dir.join(sub).exists() {
+            missing.push(format!(".clawdesk/{}", sub));
         }
     }
 
@@ -158,13 +168,14 @@ fn check_data_dir() -> DiagCheck {
         DiagCheck {
             name: "Data directory".to_string(),
             status: CheckStatus::Ok,
-            detail: data_dir.display().to_string(),
+            detail: format!("{} + {}", data_dir.display(), dot_dir.display()),
             duration_ms: start.elapsed().as_millis() as u64,
         }
     } else {
+        let status = if dot_exists || data_exists { CheckStatus::Warn } else { CheckStatus::Fail };
         DiagCheck {
             name: "Data directory".to_string(),
-            status: CheckStatus::Warn,
+            status,
             detail: format!("{} (missing: {})", data_dir.display(), missing.join(", ")),
             duration_ms: start.elapsed().as_millis() as u64,
         }
@@ -172,23 +183,23 @@ fn check_data_dir() -> DiagCheck {
 }
 
 async fn check_sochdb() -> DiagCheck {
-    let data_dir = default_data_dir().join("data");
+    let sochdb_dir = clawdesk_types::dirs::sochdb();
     let start = Instant::now();
 
-    if !data_dir.exists() {
+    if !sochdb_dir.exists() {
         return DiagCheck {
             name: "SochDB".to_string(),
             status: CheckStatus::Skip,
-            detail: "data dir not created".to_string(),
+            detail: format!("{} (not created — run 'clawdesk init')", sochdb_dir.display()),
             duration_ms: start.elapsed().as_millis() as u64,
         };
     }
 
-    match clawdesk_sochdb::SochStore::open(data_dir.to_str().unwrap_or(".")) {
+    match clawdesk_sochdb::SochStore::open(sochdb_dir.to_str().unwrap_or(".")) {
         Ok(_store) => DiagCheck {
             name: "SochDB".to_string(),
             status: CheckStatus::Ok,
-            detail: "healthy".to_string(),
+            detail: format!("healthy ({})", sochdb_dir.display()),
             duration_ms: start.elapsed().as_millis() as u64,
         },
         Err(e) => DiagCheck {
@@ -239,7 +250,27 @@ async fn check_gateway() -> DiagCheck {
 }
 
 async fn check_providers() -> Vec<DiagCheck> {
-    let creds_dir = default_data_dir().join("credentials");
+    let creds_dir = clawdesk_types::dirs::data().join("credentials");
+    let dot_env_path = clawdesk_types::dirs::dot_clawdesk().join(".env");
+
+    // Load .env from ~/.clawdesk/.env so doctor sees what the desktop app will see
+    if dot_env_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&dot_env_path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim().trim_matches('"').trim_matches('\'');
+                    if std::env::var(key).is_err() {
+                        std::env::set_var(key, value);
+                    }
+                }
+            }
+        }
+    }
     let mut checks = Vec::new();
 
     let providers = [
@@ -319,10 +350,11 @@ async fn check_ollama() -> DiagCheck {
 }
 
 fn check_disk_usage() -> DiagCheck {
-    let data_dir = default_data_dir();
+    let data_dir = clawdesk_types::dirs::data();
+    let dot_dir = clawdesk_types::dirs::dot_clawdesk();
     let start = Instant::now();
 
-    if !data_dir.exists() {
+    if !data_dir.exists() && !dot_dir.exists() {
         return DiagCheck {
             name: "Disk usage".to_string(),
             status: CheckStatus::Skip,
@@ -331,7 +363,13 @@ fn check_disk_usage() -> DiagCheck {
         };
     }
 
-    let size = dir_size(&data_dir);
+    let mut size = 0u64;
+    if data_dir.exists() {
+        size += dir_size(&data_dir);
+    }
+    if dot_dir.exists() && dot_dir != data_dir {
+        size += dir_size(&dot_dir);
+    }
     let human = format_bytes(size);
 
     DiagCheck {
@@ -397,30 +435,8 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn default_data_dir() -> PathBuf {
-    if cfg!(target_os = "macos") {
-        dirs_home().join("Library").join("Application Support").join("clawdesk")
-    } else if cfg!(target_os = "linux") {
-        std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| dirs_home().join(".local").join("share"))
-            .join("clawdesk")
-    } else if cfg!(target_os = "windows") {
-        std::env::var("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| dirs_home().join("AppData").join("Roaming"))
-            .join("clawdesk")
-    } else {
-        dirs_home().join(".clawdesk")
-    }
-}
-
-fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-}
+// Removed: duplicated default_data_dir() and dirs_home().
+// All path resolution now uses clawdesk_types::dirs::{data, dot_clawdesk, sochdb, threads, agents}.
 
 #[cfg(test)]
 mod tests {
