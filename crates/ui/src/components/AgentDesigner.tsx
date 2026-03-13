@@ -115,81 +115,124 @@ function draftFromAgent(agent: DesktopAgent): AgentDraft {
 }
 
 function draftToToml(draft: AgentDraft): string {
+  const id = draft.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   const lines: string[] = [];
   lines.push("[agent]");
-  lines.push(`id = "${draft.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}"`);
-  lines.push(`display_name = "${draft.name}"`);
-  lines.push(`model = "${draft.model || "default"}"`);
-  lines.push(`token_budget = ${draft.tokenBudget}`);
+  lines.push(`name = "${id}"`);
+  lines.push(`description = "${draft.name}"`);
+  lines.push(`version = "1.0.0"`);
+  lines.push(`author = "User"`);
+  const tags = draft.skills.length > 0 ? draft.skills.map((s) => `"${s}"`).join(", ") : '"general"';
+  lines.push(`tags = [${tags}]`);
   lines.push("");
-  lines.push("[agent.persona]");
-  lines.push(`role = "${draft.name}"`);
-  lines.push(`tone = "professional"`);
-
-  // Multi-line TOML string for goal
-  const goalLines = draft.persona.split("\n");
-  if (goalLines.length > 1) {
-    lines.push(`goal = """`);
-    for (const l of goalLines) lines.push(l);
+  lines.push("[model]");
+  lines.push(`model = "${draft.model || "default"}"`);
+  lines.push(`max_tokens = ${draft.tokenBudget}`);
+  lines.push("");
+  lines.push("[system_prompt]");
+  const personaLines = draft.persona.split("\n");
+  if (personaLines.length > 1) {
+    lines.push(`content = """`);
+    for (const l of personaLines) lines.push(l);
     lines.push(`"""`);
   } else {
-    lines.push(`goal = "${draft.persona.replace(/"/g, '\\"')}"`);
+    lines.push(`content = "${draft.persona.replace(/"/g, '\\"')}"`);
   }
-
-  if (draft.skills.length > 0) {
-    lines.push("");
-    lines.push("[agent.skills]");
-    lines.push(`allowed = [${draft.skills.map((s) => `"${s}"`).join(", ")}]`);
-  }
-
+  lines.push("");
+  lines.push("[capabilities]");
+  // Map UI skill IDs to tool names
+  const skillToTools: Record<string, string[]> = {
+    "files": ["read_file", "write_file", "list_directory", "search_files"],
+    "code-exec": ["execute_command"],
+    "web-search": ["web_search"],
+    "markdown": [],
+    "citations": [],
+    "email": [],
+    "calendar": [],
+    "cron": [],
+    "alerts": [],
+    "image-gen": [],
+  };
+  const tools = [...new Set(draft.skills.flatMap((s) => skillToTools[s] || []))];
+  lines.push(`tools = [${tools.map((t) => `"${t}"`).join(", ")}]`);
+  lines.push("");
+  lines.push("[resources]");
+  lines.push(`max_tokens_per_hour = 300000`);
+  lines.push(`max_tool_iterations = 15`);
+  lines.push(`timeout_seconds = 300`);
   if (draft.channels.length > 0) {
     lines.push("");
-    lines.push("[agent.bindings]");
     for (const ch of draft.channels) {
-      lines.push(`"${ch}:*:*" = true`);
+      lines.push(`[channels.${ch}]`);
+      lines.push(`max_message_length = 4000`);
     }
   }
-
   if (draft.subagents.length > 0) {
     lines.push("");
-    lines.push("[agent.subagents]");
-    lines.push(`can_spawn = [${draft.subagents.map((s) => `"${s.id}"`).join(", ")}]`);
-    lines.push("shared_memory = true");
+    lines.push("[orchestration]");
+    lines.push(`subagents = [${draft.subagents.map((s) => `"${s.id}"`).join(", ")}]`);
   }
-
   return lines.join("\n");
 }
 
 function parseTomlToDraft(toml: string): Partial<AgentDraft> {
   const draft: Partial<AgentDraft> = {};
 
-  // Simple TOML parser for agent definitions
-  const nameMatch = toml.match(/display_name\s*=\s*"([^"]+)"/);
+  // Parse standard agent TOML format: [agent], [model], [system_prompt], [capabilities]
+  // Also supports the legacy UI format for backwards compatibility
+  const nameMatch = toml.match(/^name\s*=\s*"([^"]+)"/m)
+    || toml.match(/display_name\s*=\s*"([^"]+)"/);
   if (nameMatch) draft.name = nameMatch[1];
 
-  const modelMatch = toml.match(/model\s*=\s*"([^"]+)"/);
+  // [model] section
+  const modelMatch = toml.match(/^model\s*=\s*"([^"]+)"/m);
   if (modelMatch) draft.model = modelMatch[1];
 
-  const budgetMatch = toml.match(/token_budget\s*=\s*(\d+)/);
-  if (budgetMatch) draft.tokenBudget = parseInt(budgetMatch[1]);
+  const maxTokensMatch = toml.match(/max_tokens\s*=\s*(\d+)/);
+  if (maxTokensMatch) draft.tokenBudget = parseInt(maxTokensMatch[1]);
 
-  const goalMatch = toml.match(/goal\s*=\s*"""([\s\S]*?)"""/);
-  if (goalMatch) {
-    draft.persona = goalMatch[1].trim();
+  // [system_prompt] content
+  const promptMulti = toml.match(/content\s*=\s*"""([\s\S]*?)"""/);
+  if (promptMulti) {
+    draft.persona = promptMulti[1].trim();
   } else {
-    const goalSingle = toml.match(/goal\s*=\s*"([^"]+)"/);
-    if (goalSingle) draft.persona = goalSingle[1];
+    const promptSingle = toml.match(/content\s*=\s*"([^"]+)"/);
+    if (promptSingle) draft.persona = promptSingle[1];
+    // Legacy format fallback
+    if (!draft.persona) {
+      const goalMulti = toml.match(/goal\s*=\s*"""([\s\S]*?)"""/);
+      if (goalMulti) draft.persona = goalMulti[1].trim();
+      else {
+        const goalSingle = toml.match(/goal\s*=\s*"([^"]+)"/);
+        if (goalSingle) draft.persona = goalSingle[1];
+      }
+    }
   }
 
-  const skillsMatch = toml.match(/allowed\s*=\s*\[([^\]]+)\]/);
-  if (skillsMatch) {
-    draft.skills = skillsMatch[1]
-      .split(",")
-      .map((s) => s.trim().replace(/"/g, ""))
-      .filter(Boolean);
+  // [capabilities] tools
+  const toolsMatch = toml.match(/tools\s*=\s*\[([^\]]+)\]/);
+  if (toolsMatch) {
+    const rawTools = toolsMatch[1].split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
+    // Map tool names to UI skill IDs
+    const toolToSkill: Record<string, string> = {
+      read_file: "files", write_file: "files", list_directory: "files",
+      search_files: "files", file_read: "files", file_write: "files",
+      file_list: "files", grep: "files",
+      execute_command: "code-exec", shell_exec: "code-exec",
+      web_search: "web-search", http_fetch: "web-search",
+    };
+    draft.skills = [...new Set(rawTools.map((t) => toolToSkill[t] || t))];
+  } else {
+    // Legacy format: allowed = [...]
+    const allowedMatch = toml.match(/allowed\s*=\s*\[([^\]]+)\]/);
+    if (allowedMatch) {
+      draft.skills = allowedMatch[1].split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
+    }
   }
 
-  const spawnMatch = toml.match(/can_spawn\s*=\s*\[([^\]]+)\]/);
+  // Subagents / orchestration
+  const spawnMatch = toml.match(/subagents\s*=\s*\[([^\]]+)\]/)
+    || toml.match(/can_spawn\s*=\s*\[([^\]]+)\]/);
   if (spawnMatch) {
     draft.subagents = spawnMatch[1]
       .split(",")

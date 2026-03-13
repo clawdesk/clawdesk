@@ -62,7 +62,7 @@ use clawdesk_tunnel::peer::PeerManager;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -581,6 +581,9 @@ impl std::fmt::Debug for SessionCache {
 // Application State with real backend services
 
 pub struct AppState {
+    // ── Deferred persist: coalesces bulk persist into background checkpoint ──
+    pub persist_pending: Arc<AtomicBool>,
+
     // ── SochDB: single ACID store for all durable state ──
     pub soch_store: Arc<SochStore>,
 
@@ -3061,6 +3064,19 @@ impl AppState {
         let mut agents: HashMap<String, DesktopAgent> = hydrate_map(&soch_store, "agents/");
         info!(agents = agents.len(), "Hydrated agents from SochDB");
 
+        // ── Load deletion blacklist ─────────────────────────────────
+        // Agents in this set were explicitly deleted by the user and should
+        // NOT be re-discovered from folder scanning.
+        let deleted_agents: std::collections::HashSet<String> = match soch_store.scan("deleted_agents/") {
+            Ok(entries) => entries.into_iter()
+                .map(|(key, _)| key.strip_prefix("deleted_agents/").unwrap_or(&key).to_string())
+                .collect(),
+            Err(_) => std::collections::HashSet::new(),
+        };
+        if !deleted_agents.is_empty() {
+            info!(count = deleted_agents.len(), "Loaded agent deletion blacklist");
+        }
+
         // ── Discover folder-based agents from ~/.clawdesk/agents/ ───
         // Each subfolder containing instructions.md or agent.toml is auto-imported.
         {
@@ -3085,12 +3101,35 @@ impl AppState {
                     let mut discovered = 0usize;
                     for entry in entries.flatten() {
                         let path = entry.path();
+
+                        // ── Flat .toml agent files (e.g. coder.toml) ──
+                        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                            let stem = path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            if agents.contains_key(&stem) { continue; }
+                            if deleted_agents.contains(&stem) { continue; }
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                if let Some(agent) = parse_agent_toml_to_desktop(&stem, &content) {
+                                    agents.insert(stem, agent);
+                                    discovered += 1;
+                                }
+                            }
+                            continue;
+                        }
+
+                        // ── Subdirectory agents with instructions.md ──
                         if !path.is_dir() { continue; }
                         let dir_name = path.file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
                         // Skip if already loaded (SochDB or earlier dir takes priority)
                         if agents.contains_key(&dir_name) {
+                            continue;
+                        }
+                        // Skip if user explicitly deleted this agent
+                        if deleted_agents.contains(&dir_name) {
                             continue;
                         }
                         let md_path = path.join("instructions.md");
@@ -3123,7 +3162,7 @@ impl AppState {
                         }
                     }
                     if discovered > 0 {
-                        info!(discovered, dir = %agents_dir.display(), "Discovered folder-based agents");
+                        info!(discovered, dir = %agents_dir.display(), "Discovered agents (TOML + folder-based)");
                     }
                 }
             }
@@ -3325,6 +3364,7 @@ impl AppState {
         let (orch_tx, orch_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Self {
+            persist_pending: Arc::new(AtomicBool::new(false)),
             soch_store: soch_store.clone(),
             thread_store,
             semantic_cache,
@@ -3819,6 +3859,17 @@ impl AppState {
     ///
     /// After this, the WAL only contains live data — no stale
     /// put entries for deleted keys.
+    /// Schedule a bulk persist to run during the next background checkpoint
+    /// instead of blocking the current thread.
+    ///
+    /// Individual agent/session writes (via `persist_agent` / `persist_session`)
+    /// already go through durable write-through, so data is safe immediately.
+    /// The bulk persist only matters for WAL compaction and tombstone cleanup.
+    pub fn persist_deferred(&self) {
+        self.persist_pending.store(true, Ordering::Release);
+        tracing::debug!("persist_deferred: flagged for next checkpoint cycle");
+    }
+
     pub fn persist(&self) {
         let session_count = self.sessions.len();
         let agent_count = self.agents.read().map(|a| a.len()).unwrap_or(0);
@@ -4200,6 +4251,30 @@ impl AppState {
             Err(e) => {
                 tracing::error!(key = %key, agent_id = %id, error = %e, "delete_agent_from_store: delete_durable FAILED — agent will reappear on restart!");
             }
+        }
+    }
+
+    /// Record that an agent was explicitly deleted by the user.
+    /// This prevents folder-scanned agents from reappearing after restart.
+    pub fn record_agent_deletion(&self, id: &str) {
+        let key = format!("deleted_agents/{}", id);
+        let ts = chrono::Utc::now().to_rfc3339();
+        if let Err(e) = self.soch_store.put_durable(&key, ts.as_bytes()) {
+            tracing::error!(key = %key, error = %e, "Failed to record agent deletion — agent may reappear");
+        } else {
+            tracing::info!(key = %key, "Recorded agent deletion in blacklist");
+        }
+    }
+
+    /// Load the set of agent IDs that were explicitly deleted by the user.
+    pub fn load_deleted_agents(&self) -> std::collections::HashSet<String> {
+        match self.soch_store.scan("deleted_agents/") {
+            Ok(entries) => {
+                entries.into_iter()
+                    .map(|(key, _)| key.strip_prefix("deleted_agents/").unwrap_or(&key).to_string())
+                    .collect()
+            }
+            Err(_) => std::collections::HashSet::new(),
         }
     }
 
@@ -4962,6 +5037,92 @@ fn parse_agent_md(content: &str) -> (String, String) {
     };
 
     (display, body)
+}
+
+/// Parse a flat .toml agent definition file into a DesktopAgent.
+///
+/// Reads the standard agent TOML schema: [agent], [model], [system_prompt],
+/// [capabilities], [resources], [traits], [metadata].
+fn parse_agent_toml_to_desktop(id: &str, content: &str) -> Option<DesktopAgent> {
+    let table: toml::Value = toml::from_str(content).ok()?;
+
+    let agent_section = table.get("agent")?;
+    let name = agent_section.get("name")?.as_str()?.to_string();
+
+    let system_prompt = table.get("system_prompt")
+        .and_then(|s| s.get("content"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let model = table.get("model")
+        .and_then(|m| m.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Map TOML tool names to UI skill IDs
+    let tools: Vec<String> = table.get("capabilities")
+        .and_then(|c| c.get("tools"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).flat_map(|t| {
+            // Map capability names to UI skill IDs
+            match t {
+                "web_search" | "web-search" => vec!["web-search".to_string()],
+                "read_file" | "file_read" => vec!["files".to_string()],
+                "write_file" | "file_write" => vec!["files".to_string()],
+                "execute_command" | "shell_exec" => vec!["code-exec".to_string()],
+                "search_files" | "grep" => vec!["files".to_string()],
+                "list_directory" | "file_list" => vec!["files".to_string()],
+                _ => vec![],
+            }
+        }).collect::<std::collections::HashSet<_>>().into_iter().collect())
+        .unwrap_or_default();
+
+    let tags: Vec<String> = agent_section.get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let token_budget = table.get("model")
+        .and_then(|m| m.get("max_tokens"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(128_000) as usize;
+
+    // Pick an icon based on the first tag or the agent name
+    let icon = match tags.first().map(|t| t.as_str()) {
+        Some("coding" | "programming") => "💻",
+        Some("research") => "🔍",
+        Some("writing" | "documentation") => "✍️",
+        Some("security") => "🛡️",
+        Some("devops" | "infrastructure") => "🔧",
+        Some("data" | "analytics") => "📊",
+        Some("design" | "ui" | "frontend") => "🎨",
+        Some("multi-agent" | "orchestration") => "🎯",
+        Some("testing" | "qa") => "🧪",
+        _ => "🤖",
+    }.to_string();
+
+    Some(DesktopAgent {
+        id: id.to_string(),
+        name,
+        icon,
+        color: "#6366f1".to_string(),
+        persona: system_prompt,
+        persona_hash: String::new(),
+        skills: tools,
+        model,
+        created: chrono::Utc::now().to_rfc3339(),
+        msg_count: 0,
+        status: "ready".to_string(),
+        token_budget,
+        tokens_used: 0,
+        source: "catalog".to_string(),
+        template_id: None,
+        channels: vec![],
+        team_id: None,
+        team_role: None,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════

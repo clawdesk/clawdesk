@@ -441,6 +441,12 @@ enum AgentAction {
         #[arg(long, short = 'o')]
         output: Option<String>,
     },
+    /// Delete an agent by ID
+    #[command(name = "delete", alias = "rm")]
+    Delete {
+        /// Agent ID to delete
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -520,12 +526,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 };
 
                 // Initialize storage — use canonical SochDB path
+                // If the desktop app holds an exclusive lock, fall back to ephemeral mode.
                 let sochdb_dir = clawdesk_types::dirs::sochdb();
                 std::fs::create_dir_all(&sochdb_dir)?;
 
-                let store = clawdesk_sochdb::SochStore::open(
+                let store = match clawdesk_sochdb::SochStore::open(
                     sochdb_dir.to_str().unwrap(),
-                ).map_err(|e| format!("failed to open database: {e}"))?;
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("⚠ SochDB locked (desktop app running?): {e}");
+                        eprintln!("  Falling back to ephemeral in-memory storage.");
+                        eprintln!("  Sessions and agent state won't persist until the desktop is closed.");
+                        clawdesk_sochdb::SochStore::open_in_memory()
+                            .map_err(|e2| format!("failed to open in-memory database: {e2}"))?
+                    }
+                };
 
                 // Build registries
                 let channels = clawdesk_channel::registry::ChannelRegistry::new();
@@ -789,6 +805,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             AgentAction::Export { id, output } => {
                 agent_compose::cmd_agent_export(&id, output.as_deref()).await?;
+            }
+            AgentAction::Delete { id } => {
+                agent_compose::cmd_agent_delete(&id).await?;
             }
         },
         Commands::Login => {

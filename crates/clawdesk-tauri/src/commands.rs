@@ -265,6 +265,182 @@ pub async fn list_agents(state: State<'_, AppState>) -> Result<Vec<DesktopAgent>
     Ok(result)
 }
 
+/// Agent catalog entry parsed from a .toml agent definition file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentCatalogEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub category: String,
+    pub model: String,
+    pub provider: String,
+    pub system_prompt: String,
+    pub tools: Vec<String>,
+    pub temperature: f64,
+    pub max_tokens: u64,
+    pub max_tokens_per_hour: u64,
+    pub max_tool_iterations: u64,
+    pub timeout_seconds: u64,
+    pub example_prompts: Vec<String>,
+}
+
+/// List all available agent definitions from the agents/ catalog (TOML files).
+///
+/// These are reference definitions that users can pick from when designing
+/// teams or creating agents. Unlike `list_agents` which returns live instances,
+/// this returns the template catalog.
+#[tauri::command]
+pub async fn list_agent_catalog() -> Result<Vec<AgentCatalogEntry>, String> {
+    let mut catalog = Vec::new();
+
+    // Scan directories for .toml agent files
+    let mut scan_dirs = Vec::new();
+
+    // Bundled agents next to executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            scan_dirs.push(parent.join("agents"));
+            // Also check parent's parent (for dev: target/debug -> project root)
+            if let Some(grandparent) = parent.parent() {
+                scan_dirs.push(grandparent.join("agents"));
+                if let Some(ggparent) = grandparent.parent() {
+                    scan_dirs.push(ggparent.join("agents"));
+                }
+            }
+        }
+    }
+
+    // CWD/agents for dev
+    scan_dirs.push(std::path::PathBuf::from("agents"));
+
+    // User agents dir
+    scan_dirs.push(clawdesk_types::dirs::agents());
+
+    // Env override
+    if let Ok(extra) = std::env::var("CLAWDESK_AGENTS_DIR") {
+        scan_dirs.push(std::path::PathBuf::from(extra));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+
+    for dir in &scan_dirs {
+        if !dir.is_dir() { continue; }
+        let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let stem = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            if seen.contains(&stem) { continue; }
+            seen.insert(stem.clone());
+
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Some(entry) = parse_agent_toml(&stem, &content) {
+                    catalog.push(entry);
+                }
+            }
+        }
+    }
+
+    catalog.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(catalog)
+}
+
+/// Parse an agent TOML file into a catalog entry.
+fn parse_agent_toml(id: &str, content: &str) -> Option<AgentCatalogEntry> {
+    let table: toml::Value = toml::from_str(content).ok()?;
+
+    let agent = table.get("agent")?;
+    let name = agent.get("name")?.as_str()?.to_string();
+    let description = agent.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let tags: Vec<String> = agent.get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let model_section = table.get("model");
+    let model = model_section
+        .and_then(|m| m.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
+    let provider = model_section
+        .and_then(|m| m.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let temperature = model_section
+        .and_then(|m| m.get("temperature"))
+        .and_then(|v| v.as_float())
+        .unwrap_or(0.3);
+    let max_tokens = model_section
+        .and_then(|m| m.get("max_tokens"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(8192) as u64;
+
+    let system_prompt = table.get("system_prompt")
+        .and_then(|s| s.get("content"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let caps = table.get("capabilities");
+    let tools: Vec<String> = caps
+        .and_then(|c| c.get("tools"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let resources = table.get("resources");
+    let max_tokens_per_hour = resources
+        .and_then(|r| r.get("max_tokens_per_hour"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(300_000) as u64;
+    let max_tool_iterations = resources
+        .and_then(|r| r.get("max_tool_iterations"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(15) as u64;
+    let timeout_seconds = resources
+        .and_then(|r| r.get("timeout_seconds"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(300) as u64;
+
+    let metadata = table.get("metadata");
+    let category = metadata
+        .and_then(|m| m.get("category"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("general")
+        .to_string();
+    let example_prompts: Vec<String> = metadata
+        .and_then(|m| m.get("example_prompts"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    Some(AgentCatalogEntry {
+        id: id.to_string(),
+        name,
+        description,
+        tags,
+        category,
+        model,
+        provider,
+        system_prompt,
+        tools,
+        temperature,
+        max_tokens,
+        max_tokens_per_hour,
+        max_tool_iterations,
+        timeout_seconds,
+        example_prompts,
+    })
+}
+
 /// Request to update an existing agent's properties.
 #[derive(Debug, Deserialize)]
 pub struct UpdateAgentRequest {
@@ -412,6 +588,9 @@ pub async fn delete_agent(agent_id: String, state: State<'_, AppState>, app: App
         let sochdb_key = format!("agents/{}", agent_id);
         tracing::info!(agent_id = %agent_id, key = %sochdb_key, "delete_agent: deleting from SochDB");
         state.delete_agent_from_store(&agent_id);
+
+        // Record in deletion blacklist so folder-scanned agents don't reappear
+        state.record_agent_deletion(&agent_id);
 
         // Verify the deletion actually stuck in SochDB
         match state.soch_store.get(&sochdb_key) {
@@ -2931,7 +3110,7 @@ interact with web UIs, or capture visual output for the user.\n"
         }
     }
 
-    state.persist();
+    state.persist_deferred();
     emit_metrics_updated(&app, &state);
     emit_security_changed(&app, &state).await;
 

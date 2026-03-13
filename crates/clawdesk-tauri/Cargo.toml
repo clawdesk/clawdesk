@@ -82,6 +82,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+toml = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

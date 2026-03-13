@@ -1160,15 +1160,6 @@ export function ChatPage({
       if (gen === sessionsGenRef.current) setSessions(s);
     }).catch(() => { });
 
-    // Diagnostic: dump SochDB session state to DevTools console on mount
-    api.debugSessionStorage().then((dump) => {
-      console.log("[DIAGNOSTIC] SochDB session storage dump:", JSON.stringify(dump, null, 2));
-      console.log("[DIAGNOSTIC] Total sessions in SochDB:", dump.length);
-      dump.forEach((s, i) => {
-        console.log(`  [${i}] chat_id=${s.chat_id} agent=${s.agent_id} title="${s.title}" created=${s.created_at} updated=${s.updated_at} msgs=${s.message_count} in_cache=${s.in_lru_cache}`);
-      });
-    }).catch((e) => console.warn("[DIAGNOSTIC] debug_session_storage failed:", e));
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1965,11 +1956,6 @@ export function ChatPage({
           return [newSession, ...prev];
         });
       }
-      // Also refresh from backend (authoritative) with generation guard
-      const sessGen = ++sessionsGenRef.current;
-      api.listSessions().then((s) => {
-        if (sessGen === sessionsGenRef.current) setSessions(s);
-      }).catch(() => { });
     } catch (err) {
       console.error("[SEND] invoke REJECTED:", err);
       const errMsg = err instanceof Error ? err.message : String(err || "Failed to get response.");

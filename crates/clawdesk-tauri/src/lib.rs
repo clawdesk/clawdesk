@@ -88,6 +88,7 @@ pub fn run() {
             commands::get_health,
             commands::create_agent,
             commands::list_agents,
+            commands::list_agent_catalog,
             commands::update_agent,
             commands::delete_agent,
             commands::import_openclaw_config,
@@ -747,16 +748,28 @@ pub fn run() {
                     .ok();
             }
 
-            // Periodic SochDB + ThreadStore checkpoint every 30 seconds.
-            // Reduced from 60s to 30s for better crash safety.
-            // Protects against data loss from crashes or force-quit by ensuring
-            // WAL entries are checkpointed regularly, not just on message send.
+            // Periodic SochDB + ThreadStore checkpoint every 120 seconds.
+            // Also drains any deferred persist() requests so bulk WAL compaction
+            // happens in the background, not on the Tauri command thread.
             {
                 let soch_store = std::sync::Arc::clone(&state.soch_store);
                 let thread_store = std::sync::Arc::clone(&state.thread_store);
+                let persist_flag = std::sync::Arc::clone(&state.persist_pending);
                 std::thread::spawn(move || {
                     loop {
-                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        std::thread::sleep(std::time::Duration::from_secs(120));
+
+                        // Drain deferred persist if flagged
+                        if persist_flag.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                            tracing::info!("background checkpoint: running deferred WAL compaction");
+                            // Lightweight: just commit + checkpoint, skip full WAL rewrite.
+                            // The write-through puts from persist_agent/persist_session
+                            // already made the data durable.
+                            if let Err(e) = soch_store.commit() {
+                                tracing::warn!(error = %e, "background persist commit failed");
+                            }
+                        }
+
                         match soch_store.checkpoint_and_gc() {
                             Ok(seq) => tracing::debug!(seq, "Periodic SochDB checkpoint complete"),
                             Err(e) => tracing::warn!(error = %e, "Periodic SochDB checkpoint failed"),
@@ -767,7 +780,7 @@ pub fn run() {
                         }
                     }
                 });
-                info!("Periodic SochDB + ThreadStore checkpoint thread started (30s interval)");
+                info!("Periodic SochDB + ThreadStore checkpoint thread started (120s interval)");
             }
 
             // ── Initialize deferred AppHandle for CronAgentExecutor ───

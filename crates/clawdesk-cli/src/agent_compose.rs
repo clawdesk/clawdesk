@@ -747,6 +747,55 @@ pub async fn cmd_agent_export(
     Ok(())
 }
 
+/// Delete an agent by marking it in the SochDB deletion blacklist.
+///
+/// This prevents the agent from being re-discovered from folder scanning.
+/// Works even when the desktop app has the SochDB locked (records deletion
+/// in a local marker file as fallback).
+pub async fn cmd_agent_delete(
+    id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let sochdb_dir = clawdesk_types::dirs::sochdb();
+    std::fs::create_dir_all(&sochdb_dir)?;
+
+    // Try to open SochDB directly
+    match clawdesk_sochdb::SochStore::open(sochdb_dir.to_str().unwrap_or(".")) {
+        Ok(store) => {
+            // Delete the agent entry
+            let agent_key = format!("agents/{}", id);
+            let _ = store.delete_durable(&agent_key);
+
+            // Record in deletion blacklist
+            let del_key = format!("deleted_agents/{}", id);
+            let ts = chrono::Utc::now().to_rfc3339();
+            store.put_durable(&del_key, ts.as_bytes())
+                .map_err(|e| format!("Failed to record deletion: {e}"))?;
+            println!("✓ Deleted agent '{}' (won't reappear on restart)", id);
+        }
+        Err(_) => {
+            // SochDB locked by desktop — use HTTP API if gateway is running
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()?;
+            match client.delete(format!("http://127.0.0.1:18789/api/v1/agents/{}", id))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    println!("✓ Deleted agent '{}' via gateway API", id);
+                }
+                _ => {
+                    eprintln!("⚠ SochDB is locked (desktop running) and gateway is not reachable.");
+                    eprintln!("  Delete the agent from the desktop app, or stop the desktop first.");
+                    return Err("Cannot delete: SochDB locked and gateway unreachable".into());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

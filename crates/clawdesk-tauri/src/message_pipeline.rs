@@ -1289,7 +1289,7 @@ pub(crate) async fn finalize_response(
         }
     }
 
-    state.persist();
+    state.persist_deferred();
     crate::commands::emit_metrics_updated(app, state);
     crate::commands::emit_security_changed(app, state).await;
 

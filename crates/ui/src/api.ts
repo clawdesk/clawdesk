@@ -641,6 +641,28 @@ export async function listAgents(): Promise<DesktopAgent[]> {
   return invoke<DesktopAgent[]>("list_agents");
 }
 
+export interface AgentCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  category: string;
+  model: string;
+  provider: string;
+  system_prompt: string;
+  tools: string[];
+  temperature: number;
+  max_tokens: number;
+  max_tokens_per_hour: number;
+  max_tool_iterations: number;
+  timeout_seconds: number;
+  example_prompts: string[];
+}
+
+export async function listAgentCatalog(): Promise<AgentCatalogEntry[]> {
+  return invoke<AgentCatalogEntry[]>("list_agent_catalog");
+}
+
 export async function updateAgent(agentId: string, request: UpdateAgentRequest): Promise<DesktopAgent> {
   return invoke<DesktopAgent>("update_agent", { agentId, request });
 }
