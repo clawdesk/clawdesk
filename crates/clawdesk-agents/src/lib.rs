@@ -79,6 +79,12 @@ pub mod shell_hooks;
 pub mod canvas_tools;
 pub mod node_tools;
 pub mod token_budget;
+pub mod intent;
+pub mod eval_loop;
+pub mod coherence;
+pub mod cli_orchestration;
+pub mod a2ui;
+pub mod auto_compose;
 
 pub use agent_backend_bridge::{RunnerBackend, PipelineAgentConfig};
 pub use context::ContextAssembler;

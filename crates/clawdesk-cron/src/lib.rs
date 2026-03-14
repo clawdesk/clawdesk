@@ -16,6 +16,7 @@ pub mod persistence;
 pub mod dep_resolver;
 pub mod proactive;
 pub mod webhook;
+pub mod heartbeat_schedule;
 
 pub use executor::CronExecutor;
 pub use heartbeat::{Heartbeat, HeartbeatConfig, HeartbeatDecision, HEARTBEAT_SKIP};

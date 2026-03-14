@@ -8,6 +8,7 @@ members = [
     "crates/clawdesk-channels",
     "crates/clawdesk-agents",
     "crates/clawdesk-providers",
+    "crates/clawdesk-core",
     "crates/clawdesk-gateway",
     "crates/clawdesk-cli",
     "crates/clawdesk-tauri",

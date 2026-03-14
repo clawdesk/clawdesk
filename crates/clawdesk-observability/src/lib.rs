@@ -25,6 +25,7 @@ pub mod slo;
 pub mod span_mapper;
 pub mod storage_metrics;
 pub mod tracer;
+pub mod provider_usage;
 
 pub use agent_spans::{AgentSpanBuilder, ToolSpanBuilder, record_agent_completion, record_tool_result};
 pub use metrics::{MetricKey, MetricValue, MetricsAggregator};

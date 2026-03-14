@@ -2,7 +2,7 @@ import { useCallback, useState, type CSSProperties } from "react";
 import { Icon } from "../components/Icon";
 import type { DesktopAgent } from "../types";
 
-export type ShellNavKey = "chat" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "files" | "settings" | "logs" | "extensions" | "mcp" | "local-models" | "documents";
+export type ShellNavKey = "chat" | "ide" | "overview" | "a2a" | "runtime" | "skills" | "automations" | "agents" | "channels" | "files" | "settings" | "logs" | "extensions" | "mcp" | "local-models" | "documents";
 
 export type GatewayStatus = "connected" | "degraded" | "offline";
 
@@ -114,7 +114,18 @@ export function AppShell({
 
   const [showAgentDropdown, setShowAgentDropdown] = useState(false);
   const [showStatusPopover, setShowStatusPopover] = useState(false);
+  const [cliAgents, setCliAgents] = useState<{id: string; name: string; command: string; installed: boolean}[]>([]);
   const selectedAgent = agents?.find((a) => a.id === selectedAgentId);
+  const isDelegateMode = selectedAgentId?.startsWith("delegate:");
+
+  // Detect CLI agents when dropdown opens
+  const loadCliAgents = useCallback(async () => {
+    try {
+      const { detectCliAgents } = await import("../api");
+      const detected = await detectCliAgents();
+      setCliAgents(detected.filter((a) => a.installed));
+    } catch { /* ignore */ }
+  }, []);
 
   // Status pulse animation class
   const statusClass = status?.gateway === "connected" ? "status-ok"
@@ -249,11 +260,11 @@ export function AppShell({
               <div className="top-agent-selector" data-no-drag>
                 <button
                   className="tb-agent-picker"
-                  onClick={() => setShowAgentDropdown(!showAgentDropdown)}
-                  title={selectedAgent ? selectedAgent.name : "Select agent"}
+                  onClick={() => { setShowAgentDropdown(!showAgentDropdown); if (!showAgentDropdown) loadCliAgents(); }}
+                  title={selectedAgent ? selectedAgent.name : isDelegateMode ? selectedAgentId?.replace("delegate:", "") : "Auto Mode"}
                 >
-                  <span className="tb-agent-avatar">{selectedAgent?.icon || "⚡"}</span>
-                  <span className="tb-agent-name">{selectedAgent?.name || "Select Agent"}</span>
+                  <span className="tb-agent-avatar">{selectedAgent?.icon || (isDelegateMode ? "⚡" : "✦")}</span>
+                  <span className="tb-agent-name">{selectedAgent?.name || (isDelegateMode ? cliAgents.find((c) => selectedAgentId === `delegate:${c.id}`)?.name || "Delegate" : "Auto")}</span>
                   <Icon name="chevron-down" className="tb-agent-chevron" />
                 </button>
                 {showAgentDropdown && (
@@ -279,6 +290,58 @@ export function AppShell({
 
                         return (
                           <>
+                            {/* Auto Mode */}
+                            <button
+                              className={`top-agent-option ${!selectedAgentId ? "active" : ""}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onSelectAgent(null as unknown as string);
+                                setShowAgentDropdown(false);
+                              }}
+                            >
+                              <span className="top-agent-option-icon">✦</span>
+                              <div className="top-agent-option-info">
+                                <span className="top-agent-option-name">Auto</span>
+                                <span className="top-agent-option-model">Best agent selected per message</span>
+                              </div>
+                              {!selectedAgentId && <span className="top-agent-active-dot" />}
+                            </button>
+
+                            {/* Delegate to CLI agents */}
+                            {cliAgents.length > 0 && (
+                              <div className="top-agent-team-group">
+                                <div className="top-agent-option" style={{ opacity: 0.6, cursor: "default", paddingBottom: 4 }}>
+                                  <span className="top-agent-option-icon">⚡</span>
+                                  <div className="top-agent-option-info">
+                                    <span className="top-agent-option-name" style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" as const }}>Delegate to CLI</span>
+                                  </div>
+                                </div>
+                                {cliAgents.map((cli) => (
+                                  <button
+                                    key={cli.id}
+                                    className={`top-agent-option top-agent-team-member ${selectedAgentId === `delegate:${cli.id}` ? "active" : ""}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onSelectAgent(`delegate:${cli.id}` as string);
+                                      setShowAgentDropdown(false);
+                                    }}
+                                  >
+                                    <span className="top-agent-option-icon">{cli.id === "claude-code" ? "🟠" : cli.id === "codex" ? "🟢" : cli.id === "gemini-cli" ? "🔵" : "⚫"}</span>
+                                    <div className="top-agent-option-info">
+                                      <span className="top-agent-option-name">{cli.name}</span>
+                                      <span className="top-agent-option-model">{cli.command} CLI</span>
+                                    </div>
+                                    {selectedAgentId === `delegate:${cli.id}` && <span className="top-agent-active-dot" />}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Separator */}
+                            {(soloAgents.length > 0 || teamMap.size > 0) && (
+                              <div style={{ borderTop: "1px solid var(--line)", margin: "4px 0" }} />
+                            )}
+
                             {soloAgents.map((a) => (
                               <button
                                 key={a.id}
@@ -366,7 +429,28 @@ export function AppShell({
             )}
           </div>
 
-          <div className="tb-center" aria-hidden="true" />
+          <div className="tb-center" style={noDragStyle}>
+            <div className="mode-toggle" data-no-drag>
+              <button
+                className={`mode-toggle-btn ${activeNav === "chat" ? "active" : ""}`}
+                onClick={() => onNavigate("chat")}
+                title="Switch to chat mode"
+                aria-pressed={activeNav === "chat"}
+              >
+                <Icon name="ask" />
+                <span>Chat</span>
+              </button>
+              <button
+                className={`mode-toggle-btn ${activeNav === "ide" ? "active" : ""}`}
+                onClick={() => onNavigate("ide")}
+                title="Switch to IDE mode"
+                aria-pressed={activeNav === "ide"}
+              >
+                <Icon name="terminal" />
+                <span>IDE</span>
+              </button>
+            </div>
+          </div>
 
           {/* ── RIGHT: Toggles + Search + Actions ── */}
           <div className="tb-right" style={noDragStyle}>
@@ -432,7 +516,7 @@ export function AppShell({
         </header>
 
         <div className={`workspace ${!inspectorOpen ? "inspector-closed" : ""}`}>
-          <main className={`main-content ${activeNav === "chat" ? "chat-mode" : ""}`}>
+          <main className={`main-content ${activeNav === "chat" ? "chat-mode" : ""} ${activeNav === "ide" ? "ide-mode" : ""}`}>
             {children}
           </main>
 

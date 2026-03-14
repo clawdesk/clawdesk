@@ -229,3 +229,69 @@ pub async fn record_activity(
     }
     Ok(true)
 }
+
+// ═══════════════════════════════════════════════════════════
+// Session Cost Summary (tray / status bar display)
+// ═══════════════════════════════════════════════════════════
+
+/// Cost summary for display in the system tray / status bar.
+/// Mirrors the macOS app's cost-in-menu-bar feature.
+#[derive(Debug, Serialize)]
+pub struct SessionCostSummary {
+    /// Total cost today in USD.
+    pub cost_today_usd: f64,
+    /// Total cost this month in USD.
+    pub cost_month_usd: f64,
+    /// Total input tokens today.
+    pub input_tokens_today: u64,
+    /// Total output tokens today.
+    pub output_tokens_today: u64,
+    /// Most expensive model today.
+    pub top_model: Option<String>,
+    /// Number of active sessions.
+    pub active_sessions: usize,
+    /// Formatted string for tray display.
+    pub tray_label: String,
+}
+
+#[tauri::command]
+pub async fn get_session_cost_summary(
+    state: State<'_, AppState>,
+) -> Result<SessionCostSummary, String> {
+    use std::sync::atomic::Ordering;
+
+    let cost_micro = state.total_cost_today.load(Ordering::Relaxed);
+    let cost_today = cost_micro as f64 / 1_000_000.0;
+    let input = state.total_input_tokens.load(Ordering::Relaxed);
+    let output = state.total_output_tokens.load(Ordering::Relaxed);
+
+    // Get most expensive model from model costs map
+    let top_model = state.model_costs.read()
+        .map(|costs| {
+            costs.iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(model, _)| model.clone())
+        })
+        .ok()
+        .flatten();
+
+    let active = state.sessions.len();
+
+    let tray_label = if cost_today < 0.01 {
+        "< $0.01".to_string()
+    } else if cost_today < 1.0 {
+        format!("${:.2}", cost_today)
+    } else {
+        format!("${:.1}", cost_today)
+    };
+
+    Ok(SessionCostSummary {
+        cost_today_usd: cost_today,
+        cost_month_usd: cost_today, // Approximation until monthly tracking
+        input_tokens_today: input,
+        output_tokens_today: output,
+        top_model,
+        active_sessions: active,
+        tray_label,
+    })
+}

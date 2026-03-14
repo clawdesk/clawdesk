@@ -23,6 +23,7 @@ pub mod file_memory;
 pub mod fts_fallback;
 pub mod generation;
 pub mod hierarchical;
+pub mod episodic_timeline;
 pub mod hybrid;
 pub mod ingest;
 pub mod manager;

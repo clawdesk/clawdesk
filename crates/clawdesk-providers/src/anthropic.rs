@@ -15,6 +15,16 @@ use crate::{
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// Extract an attribute value from an XML-like tag.
+/// e.g., `extract_attr(r#"<tag key="value" />"#, "key")` → `Some("value")`
+fn extract_attr(tag: &str, attr: &str) -> Option<String> {
+    let needle = format!("{}=\"", attr);
+    let start = tag.find(&needle)? + needle.len();
+    let rest = &tag[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
 /// Anthropic Claude provider.
 pub struct AnthropicProvider {
     client: Client,
@@ -61,7 +71,7 @@ struct AnthropicToolDef {
 #[derive(Debug, Serialize)]
 struct AnthropicMessage {
     role: String,
-    content: String,
+    content: serde_json::Value,
 }
 
 /// Anthropic API response body.
@@ -147,9 +157,56 @@ impl Provider for AnthropicProvider {
             messages: request
                 .messages
                 .iter()
-                .map(|m| AnthropicMessage {
-                    role: m.role.as_str().to_string(),
-                    content: m.content.to_string(),
+                .map(|m| {
+                    // Check if message has image attachments (base64 data in metadata)
+                    let has_images = m.content.contains("<image_attachment ");
+                    if has_images {
+                        // Parse multimodal: extract image blocks + text
+                        let mut blocks: Vec<serde_json::Value> = Vec::new();
+                        let mut remaining = m.content.as_ref();
+                        while let Some(start) = remaining.find("<image_attachment ") {
+                            // Add text before the image tag
+                            let text_before = &remaining[..start].trim();
+                            if !text_before.is_empty() {
+                                blocks.push(serde_json::json!({"type": "text", "text": text_before}));
+                            }
+                            // Extract image data
+                            if let Some(end) = remaining[start..].find("/>") {
+                                let tag = &remaining[start..start + end + 2];
+                                let media_type = extract_attr(tag, "media_type").unwrap_or("image/png".into());
+                                let data = extract_attr(tag, "data").unwrap_or_default();
+                                blocks.push(serde_json::json!({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": data,
+                                    }
+                                }));
+                                remaining = &remaining[start + end + 2..];
+                            } else {
+                                break;
+                            }
+                        }
+                        // Add remaining text after last image
+                        let tail = remaining.trim();
+                        if !tail.is_empty() {
+                            blocks.push(serde_json::json!({"type": "text", "text": tail}));
+                        }
+                        if blocks.is_empty() {
+                            blocks.push(serde_json::json!({"type": "text", "text": m.content.as_ref()}));
+                        }
+                        AnthropicMessage {
+                            role: m.role.as_str().to_string(),
+                            content: serde_json::Value::Array(blocks),
+                        }
+                    } else {
+                        // Plain text message (most common path)
+                        AnthropicMessage {
+                            role: m.role.as_str().to_string(),
+                            content: serde_json::Value::String(m.content.to_string()),
+                        }
+                    }
                 })
                 .collect(),
             system: request.system_prompt.clone(),

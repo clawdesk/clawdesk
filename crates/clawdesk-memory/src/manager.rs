@@ -544,6 +544,18 @@ impl<S: MemoryBackend> MemoryManager<S> {
                 });
             }
 
+            // Also link from the global user identity node so this memory
+            // is reachable across sessions (yesterday, last week, etc.).
+            ops.push(MemoryWriteOp::CreateEdge {
+                namespace: "clawdesk".to_string(),
+                from_id: "user:global".to_string(),
+                edge_type: "has_memory".to_string(),
+                to_id: id.clone(),
+                properties: HashMap::from([
+                    ("timestamp".into(), serde_json::json!(&now_str)),
+                ]),
+            });
+
             match self.store.write_atomic(&id, ops) {
                 Ok(_) => {
                     debug!(id = %id, "batch memory stored atomically");
@@ -638,6 +650,19 @@ impl<S: MemoryBackend> MemoryManager<S> {
             }
         });
 
+        // Also try the global user identity node for cross-session recall.
+        // This ensures memories from previous sessions (yesterday, last week)
+        // are still findable even when the graph filter scopes to today's session.
+        let cross_session_ids: Option<Vec<String>> = {
+            match self.store.graph_reachable_memory_ids("user:global", "has_memory", 2) {
+                Ok(ids) if !ids.is_empty() => {
+                    debug!(reachable = ids.len(), "cross-session memory nodes found");
+                    Some(ids)
+                }
+                _ => None,
+            }
+        };
+
         let mut results = self
             .searcher
             .search(
@@ -652,15 +677,28 @@ impl<S: MemoryBackend> MemoryManager<S> {
         // Filter to graph-reachable memories if available
         if let Some(ref reachable) = reachable_ids {
             let before = results.len();
-            results.retain(|r| reachable.contains(&r.id));
+
+            // Merge session-scoped + cross-session IDs for broader recall
+            let mut all_reachable = reachable.clone();
+            if let Some(ref cross) = cross_session_ids {
+                for id in cross {
+                    if !all_reachable.contains(id) {
+                        all_reachable.push(id.clone());
+                    }
+                }
+            }
+
+            results.retain(|r| all_reachable.contains(&r.id));
             debug!(
                 before,
                 after = results.len(),
-                "graph-contextual filter applied"
+                session_ids = reachable.len(),
+                cross_session_ids = cross_session_ids.as_ref().map(|v| v.len()).unwrap_or(0),
+                "graph-contextual filter applied (session + cross-session)"
             );
             // If filtering removed everything, fall back to unfiltered results
             if results.is_empty() {
-                debug!("graph filter removed all results, using unfiltered");
+                debug!("graph filter removed all results, using unfiltered global search");
                 results = self
                     .searcher
                     .search(
@@ -671,6 +709,13 @@ impl<S: MemoryBackend> MemoryManager<S> {
                         self.config.search_strategy,
                     )
                     .await?;
+            }
+        } else if let Some(ref cross) = cross_session_ids {
+            // No session scope but we have cross-session IDs — boost them
+            for result in &mut results {
+                if cross.contains(&result.id) {
+                    result.score *= 1.1; // slight boost for known memories
+                }
             }
         }
 

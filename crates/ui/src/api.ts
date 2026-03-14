@@ -1772,6 +1772,23 @@ export async function getDlq(): Promise<DlqEntry[]> {
   return invoke<DlqEntry[]>("get_dlq");
 }
 
+// ── CLI Agent Detection ──
+export interface DetectedCliAgent {
+  id: string;
+  name: string;
+  command: string;
+  path: string;
+  installed: boolean;
+}
+
+export async function detectCliAgents(): Promise<DetectedCliAgent[]> {
+  if (isBrowserDev) return [
+    { id: "claude-code", name: "Claude Code", command: "claude", path: "/usr/local/bin/claude", installed: true },
+    { id: "codex", name: "OpenAI Codex", command: "codex", path: "/usr/local/bin/codex", installed: true },
+  ];
+  return invoke<DetectedCliAgent[]>("detect_cli_agents");
+}
+
 // ══════════════════════════════════════════════════════════════
 // A2A Protocol Tasks
 // ══════════════════════════════════════════════════════════════
@@ -2297,6 +2314,23 @@ export async function readWorkspaceFile(relativePath: string): Promise<string> {
 export async function getWorkspaceRoot(): Promise<string> {
   if (isBrowserDev) return "/mock/workspace";
   return invoke<string>("get_workspace_root");
+}
+
+// ── Per-chat project workspace ────────────────────────────────
+
+export async function getChatWorkspace(chatId: string): Promise<string> {
+  if (isBrowserDev) return `/mock/workspace/projects/${chatId}`;
+  return invoke<string>("get_chat_workspace", { chatId });
+}
+
+export async function listChatProjectFiles(chatId: string, relativePath?: string): Promise<WorkspaceFileEntry[]> {
+  if (isBrowserDev) return [];
+  return invoke<WorkspaceFileEntry[]>("list_chat_project_files", { chatId, relativePath: relativePath ?? null });
+}
+
+export async function readChatProjectFile(chatId: string, relativePath: string): Promise<string> {
+  if (isBrowserDev) return "// browser-dev mock file content";
+  return invoke<string>("read_chat_project_file", { chatId, relativePath });
 }
 
 // ── Local Models: built-in LLM management ─────────────────────

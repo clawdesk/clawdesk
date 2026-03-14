@@ -29,6 +29,7 @@ pub mod scanner;
 pub mod secret_ref;
 pub mod skill_verify;
 pub mod tokens;
+pub mod obfuscation;
 
 pub use acl::AclManager;
 pub use audit::AuditLogger;

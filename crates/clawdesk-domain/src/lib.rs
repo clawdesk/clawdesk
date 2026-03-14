@@ -32,3 +32,8 @@ pub mod prompt_builder;
 pub mod routing;
 pub mod send_policy;
 pub mod system_prompt;
+pub mod prompt_trace;
+pub mod proactive_compaction;
+pub mod policy_dsl;
+pub mod workflow_templates;
+pub mod system_events;

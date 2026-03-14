@@ -56,6 +56,19 @@ const CHANNEL_OPTIONS = [
   { id: "email", label: "Email", icon: "📧" },
 ];
 
+// External CLI agents that can be added to flows.
+// These run outside ClawDesk (as separate processes) and communicate
+// via shell_exec or MCP bridges.
+const EXTERNAL_CLI_AGENTS = [
+  { id: "codex", name: "OpenAI Codex CLI", icon: "🟢", model: "codex", description: "OpenAI Codex CLI agent — autonomous coding via `codex`", tools: ["code-exec", "files"] },
+  { id: "claude-code", name: "Claude Code", icon: "🟠", model: "claude-code", description: "Anthropic Claude Code CLI — `claude` command-line agent", tools: ["code-exec", "files"] },
+  { id: "gemini-cli", name: "Gemini CLI", icon: "🔵", model: "gemini-cli", description: "Google Gemini CLI agent — `gemini` command-line agent", tools: ["code-exec", "files", "web-search"] },
+  { id: "copilot-cli", name: "GitHub Copilot CLI", icon: "⚫", model: "copilot", description: "GitHub Copilot in the terminal — `gh copilot`", tools: ["code-exec", "files"] },
+  { id: "aider", name: "Aider", icon: "🟡", model: "aider", description: "Aider pair programming CLI — `aider`", tools: ["code-exec", "files"] },
+  { id: "cursor-agent", name: "Cursor Agent", icon: "🟣", model: "cursor", description: "Cursor IDE's agent mode via CLI", tools: ["code-exec", "files"] },
+  { id: "ollama-agent", name: "Ollama Local", icon: "🦙", model: "ollama", description: "Local Ollama model as a CLI agent", tools: ["code-exec", "files"] },
+];
+
 // ── Templates ─────────────────────────────────────────────────
 
 const TEAM_TEMPLATES: TeamTemplate[] = [
@@ -539,6 +552,25 @@ export function TeamBuilderCanvas({
     setMembers((prev) => autoLayout([...prev, newMember], CANVAS_W));
   }, [CANVAS_W]);
 
+  const importExternalCli = useCallback((cli: typeof EXTERNAL_CLI_AGENTS[number], parentId: string | null) => {
+    const newMember: TeamMember = {
+      id: `cli_${Date.now()}_${cli.id}`,
+      name: cli.name,
+      icon: cli.icon,
+      color: "#f59e0b",
+      role: cli.description,
+      persona: `You delegate tasks to the ${cli.name} CLI tool via shell_exec. Run the CLI command, capture output, and return results. The CLI is already installed and available in the system PATH.`,
+      model: cli.model,
+      skills: [...cli.tools],
+      channels: [],
+      tokenBudget: 128000,
+      x: 0,
+      y: 0,
+      parentId,
+    };
+    setMembers((prev) => autoLayout([...prev, newMember], CANVAS_W));
+  }, [CANVAS_W]);
+
   const updateMemberPosition = useCallback((memberId: string, x: number, y: number) => {
     setMembers((prev) => prev.map((member) => (
       member.id === memberId
@@ -825,6 +857,28 @@ export function TeamBuilderCanvas({
                     Connecting from {members.find((member) => member.id === linkingFromId)?.name || "selected agent"}. Click another card or its top dot to complete the link.
                   </div>
                 )}
+
+                <div className="tb-sidebar-group">
+                  <div className="tb-sidebar-group-head">
+                    <span>External CLI Agents</span>
+                    <span>{EXTERNAL_CLI_AGENTS.length}</span>
+                  </div>
+                  <div className="tb-sidebar-list tb-sidebar-list--stack">
+                    {EXTERNAL_CLI_AGENTS.filter((cli) => !members.some((m) => m.name === cli.name)).map((cli) => (
+                      <button
+                        type="button"
+                        key={cli.id}
+                        className="tb-palette-btn"
+                        onClick={() => importExternalCli(cli, insertionParentId)}
+                        title={cli.description}
+                      >
+                        <span className="tb-palette-btn__title">{cli.icon} {cli.name}</span>
+                        <span className="tb-palette-btn__meta">CLI · {cli.model}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 {linkingFromId && (
                   <button type="button" className="tb-btn tb-btn--subtle" onClick={() => setLinkingFromId(null)}>
                     Cancel Link
@@ -898,9 +952,17 @@ export function TeamBuilderCanvas({
             onPointerDown={(event) => {
               if (event.target === event.currentTarget) {
                 setSelectedId(null);
+                if (linkingFromId) setLinkingFromId(null);
               }
             }}
           >
+            {/* Linking mode banner */}
+            {linkingFromId && (
+              <div className="tb-link-banner">
+                <span>🔗 Click on another agent card to connect from <strong>{members.find((m) => m.id === linkingFromId)?.name || "agent"}</strong></span>
+                <button type="button" className="tb-btn tb-btn--subtle" onClick={() => setLinkingFromId(null)} style={{ marginLeft: 12, padding: "2px 10px", fontSize: 11 }}>Cancel</button>
+              </div>
+            )}
             <svg className="tb-svg-layer" width={canvasExtent.width} height={canvasExtent.height}>
               <defs>
                 <marker

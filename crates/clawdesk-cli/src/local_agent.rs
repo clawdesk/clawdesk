@@ -189,8 +189,28 @@ fn resolve_provider(model: &str) -> Result<Arc<dyn Provider>, String> {
         )));
     }
 
+    // Ollama (local models — always available if Ollama is running)
+    {
+        let host = std::env::var("OLLAMA_HOST")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        // Quick TCP check to see if Ollama is listening
+        let check_addr = host
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        if let Ok(_) = std::net::TcpStream::connect_timeout(
+            &check_addr.parse().unwrap_or_else(|_| "127.0.0.1:11434".parse().unwrap()),
+            std::time::Duration::from_secs(2),
+        ) {
+            info!(provider = "ollama", host = %host, model = %model, "using Ollama (local)");
+            return Ok(Arc::new(clawdesk_providers::ollama::OllamaProvider::new(
+                Some(host),
+                Some(model.to_string()),
+            )));
+        }
+    }
+
     Err(
-        "No API key found. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, AZURE_OPENAI_API_KEY, OPENROUTER_API_KEY"
+        "No API key found and Ollama is not running. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, AZURE_OPENAI_API_KEY, OPENROUTER_API_KEY — or start Ollama"
             .to_string(),
     )
 }

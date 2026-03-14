@@ -143,6 +143,7 @@ pub fn run() {
             commands_runtime::list_durable_runs,
             commands_runtime::list_checkpoints,
             commands_runtime::get_dlq,
+            commands_runtime::detect_cli_agents,
             // ── Media pipeline ────────────────────────────
             commands_media::get_media_pipeline_status,
             commands_media::get_link_preview,
@@ -194,6 +195,7 @@ pub fn run() {
             commands_infra::get_voice_wake_status,
             commands_infra::get_idle_status,
             commands_infra::record_activity,
+            commands_infra::get_session_cost_summary,
             // ── Tasks 23,24: ACL + scoped tokens ───────────────────
             commands_security::add_acl_rule,
             commands_security::check_permission,
@@ -451,6 +453,9 @@ pub fn run() {
             commands_files::get_workspace_root,
             commands_files::list_workspace_files,
             commands_files::read_workspace_file,
+            commands_files::get_chat_workspace,
+            commands_files::list_chat_project_files,
+            commands_files::read_chat_project_file,
             // ── Local Models: manage local LLMs ───────────────────────
             commands_local_models::local_models_status,
             commands_local_models::local_models_system_info,

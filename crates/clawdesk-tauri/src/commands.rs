@@ -963,16 +963,48 @@ pub(crate) fn build_skill_tool_registry(
     _skills: &[clawdesk_skills::definition::Skill],
     base_registry: &clawdesk_agents::tools::ToolRegistry,
 ) -> clawdesk_agents::tools::ToolRegistry {
+    build_skill_tool_registry_scoped(_skills, base_registry, None)
+}
+
+/// Build a per-request tool registry. When `workspace_override` is provided,
+/// file-system and shell tools are re-created with the per-chat project directory
+/// instead of using the global workspace. This ensures each chat session's tools
+/// are scoped to its own project folder.
+pub(crate) fn build_skill_tool_registry_scoped(
+    _skills: &[clawdesk_skills::definition::Skill],
+    base_registry: &clawdesk_agents::tools::ToolRegistry,
+    workspace_override: Option<std::path::PathBuf>,
+) -> clawdesk_agents::tools::ToolRegistry {
     use clawdesk_agents::tools::ToolRegistry;
 
     let mut registry = ToolRegistry::new();
 
-    // Copy all builtin tools from the base registry.
-    // Skills teach the LLM which tools to call via prompt fragments —
-    // no additional tool registrations needed.
-    for schema in base_registry.schemas() {
-        if let Some(tool) = base_registry.get(&schema.name) {
-            registry.register(tool);
+    if let Some(ref ws) = workspace_override {
+        // Re-register file/shell tools scoped to the per-chat workspace.
+        // Non-filesystem tools are copied from the base registry.
+        let scoped_tool_names: std::collections::HashSet<&str> = [
+            "shell_exec", "file_read", "file_write", "file_edit", "file_list", "grep",
+            "process_start",
+        ].iter().cloned().collect();
+
+        clawdesk_agents::builtin_tools::register_builtin_tools(&mut registry, Some(ws.clone()));
+
+        // Copy non-filesystem tools from the base registry that aren't already registered
+        for schema in base_registry.schemas() {
+            if !scoped_tool_names.contains(schema.name.as_str()) {
+                if let Some(tool) = base_registry.get(&schema.name) {
+                    if registry.get(&schema.name).is_none() {
+                        registry.register(tool);
+                    }
+                }
+            }
+        }
+    } else {
+        // No override — copy all builtin tools from the base registry.
+        for schema in base_registry.schemas() {
+            if let Some(tool) = base_registry.get(&schema.name) {
+                registry.register(tool);
+            }
         }
     }
 
@@ -1998,6 +2030,12 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
     // Configure the agent runner
     let model_id = AppState::resolve_model_id(&agent.model);
     let parent_model_id_for_spawn = model_id.clone();
+
+    // Use per-chat project directory for workspace isolation.
+    // Each chat session gets its own folder under workspace/projects/{chat_id}/
+    // so that different coding projects don't overwrite each other's files.
+    let chat_project_dir = state.project_dir_for_chat(&chat_id);
+
     let config = AgentConfig {
         model: model_id,
         system_prompt: system_prompt.clone(),
@@ -2005,11 +2043,9 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
         context_limit: agent.token_budget,
         response_reserve: 8_192,
         failover: Some(clawdesk_types::failover::FailoverConfig::default()),
-        // Wire workspace path so bootstrap context, tool scoping,
-        // and skill file discovery all activate. Without this, ShellTool
-        // runs unconfined and bootstrap files (CLAUDE.md, README.md) are
-        // never discovered.
-        workspace_path: Some(state.workspace_root.to_string_lossy().into_owned()),
+        // Wire workspace path to per-chat project directory so bootstrap context,
+        // tool scoping, and skill file discovery are isolated per conversation.
+        workspace_path: Some(chat_project_dir.to_string_lossy().into_owned()),
         ..Default::default()
     };
 
@@ -2031,14 +2067,17 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
     // Per-run cancellation token for this chat request.
     let run_cancel = state.cancel.child_token();
 
-    // Build per-request ToolRegistry with skill-provided tools
+    // Build per-request ToolRegistry with tools scoped to the per-chat project directory.
+    // This ensures file operations (read, write, edit, list, shell) are confined to the
+    // project folder for this chat session, preventing cross-project file collisions.
     let deref_skills: Vec<clawdesk_skills::definition::Skill> = active_skills
         .iter()
         .map(|s| (**s).clone())
         .collect();
-    let mut request_tool_registry = build_skill_tool_registry(
+    let mut request_tool_registry = build_skill_tool_registry_scoped(
         &deref_skills,
         &state.tool_registry,
+        Some(chat_project_dir.clone()),
     );
 
     // Register the sub-agent spawn tool per-request so the callback
@@ -3315,6 +3354,12 @@ pub async fn create_chat(agent_id: String, state: State<'_, AppState>) -> Result
 
     let chat_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+
+    // Create an isolated project directory for this chat session.
+    // Each chat gets its own folder under workspace/projects/{chat_id}/
+    // so that different coding projects don't collide.
+    let _project_dir = state.project_dir_for_chat(&chat_id);
+
     let session = ChatSession {
         id: chat_id.clone(),
         agent_id: agent_id.clone(),

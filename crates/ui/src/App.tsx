@@ -35,6 +35,7 @@ import { translateRisk } from "./lib/risk-translator";
 import { AppShell, type ShellNavGroup, type TopBarStatus, type GatewayStatus } from "./shell/AppShell";
 import { getActiveProvider, createProviderConfig, saveProviders, setActiveProviderId } from "./providerConfig";
 import { ChatPage } from "./pages/ChatPage";
+import { IdePage } from "./pages/IdePage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { SkillsPage } from "./pages/SkillsPage";
 import { AutomationsPage } from "./pages/AutomationsPage";
@@ -53,7 +54,7 @@ import { ExecutionProgress, type ExecutionEvent, type EventKind } from "./compon
 import { AgentJourneyWizard } from "./components/AgentJourneyWizard";
 import { TeamBuilderCanvas } from "./components/TeamBuilderCanvas";
 
-type NavKey = "chat" | "overview" | "a2a" | "skills" | "automations" | "agents" | "channels" | "files" | "settings" | "logs" | "extensions" | "mcp" | "local-models" | "documents";
+type NavKey = "chat" | "ide" | "overview" | "a2a" | "skills" | "automations" | "agents" | "channels" | "files" | "settings" | "logs" | "extensions" | "mcp" | "local-models" | "documents";
 type RiskLevel = "low" | "medium" | "high";
 type StatusLevel = "ok" | "warn" | "error";
 type InspectorTab = "plan" | "approvals" | "proof" | "undo" | "trace" | "memory" | "graph";
@@ -269,7 +270,8 @@ interface IncomingMessagePayload {
 
 const NAV_ITEMS: { key: NavKey; label: string; shortcut: string; icon: string }[] = [
   { key: "chat", label: "Chat", shortcut: "1", icon: "ask" },
-  { key: "overview", label: "Overview", shortcut: "2", icon: "bar-chart" },
+  { key: "ide", label: "IDE", shortcut: "2", icon: "terminal" },
+  { key: "overview", label: "Overview", shortcut: "3", icon: "bar-chart" },
   { key: "a2a", label: "A2A Directory", shortcut: "3", icon: "users" },
   { key: "skills", label: "Skills", shortcut: "4", icon: "library" },
   { key: "automations", label: "Scheduled Jobs", shortcut: "5", icon: "clock" },
@@ -285,12 +287,12 @@ const NAV_ITEMS: { key: NavKey; label: string; shortcut: string; icon: string }[
 ];
 
 const NAV_GROUPS: ShellNavGroup[] = [
-  { label: "", items: [NAV_ITEMS[0], NAV_ITEMS[1]] },
-  { label: "Cluster", items: [NAV_ITEMS[2]] },
-  { label: "Build", items: [NAV_ITEMS[3], NAV_ITEMS[4]] },
-  { label: "Workspace", items: [NAV_ITEMS[5], NAV_ITEMS[6], NAV_ITEMS[9]] },
-  { label: "Connect", items: [NAV_ITEMS[7], NAV_ITEMS[8]] },
-  { label: "System", items: [NAV_ITEMS[10], NAV_ITEMS[11], NAV_ITEMS[12]] },
+  { label: "", items: [NAV_ITEMS[0], NAV_ITEMS[1], NAV_ITEMS[2]] },
+  { label: "Cluster", items: [NAV_ITEMS[3]] },
+  { label: "Build", items: [NAV_ITEMS[4], NAV_ITEMS[5]] },
+  { label: "Workspace", items: [NAV_ITEMS[6], NAV_ITEMS[7], NAV_ITEMS[10]] },
+  { label: "Connect", items: [NAV_ITEMS[8], NAV_ITEMS[9]] },
+  { label: "System", items: [NAV_ITEMS[11], NAV_ITEMS[12], NAV_ITEMS[13]] },
 ];
 
 const INITIAL_THREADS: ThreadItem[] = [];
@@ -1107,7 +1109,7 @@ export default function App() {
         if (health.status === "fulfilled") setBackendHealth(health.value);
         if (agents.status === "fulfilled") {
           setBackendAgents(agents.value);
-          setSelectedAgentId((prev) => prev ?? agents.value[0]?.id ?? null);
+          // Don't auto-select — null means "Auto" mode (default)
         }
         if (skills.status === "fulfilled") {
           setBackendSkills(skills.value);
@@ -4332,6 +4334,15 @@ export default function App() {
             pushToast={pushToast}
             showTerminal={showTerminal}
             setShowTerminal={setShowTerminal}
+          />
+        )}
+        {activeNav === "ide" && (
+          <IdePage
+            agents={backendAgents}
+            skills={backendSkills}
+            selectedAgentId={selectedAgentId}
+            onSelectAgent={(id) => setSelectedAgentId(id || null)}
+            pushToast={pushToast}
           />
         )}
         {activeNav === "overview" && (

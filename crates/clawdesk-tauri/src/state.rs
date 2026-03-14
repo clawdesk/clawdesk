@@ -2150,8 +2150,6 @@ impl clawdesk_agents::runner::ApprovalGate for TauriApprovalGate {
             Ok(status) => {
                 use clawdesk_security::ApprovalStatus;
                 match status {
-                    // TODO: When the UI supports richer approval options,
-                    // map them to AllowForSession / DenyForSession / EditAndRerun.
                     ApprovalStatus::Approved { .. } => Ok(ApprovalDecision::Allow),
                     ApprovalStatus::Denied { .. } => Ok(ApprovalDecision::Deny),
                     ApprovalStatus::TimedOut { .. } => Ok(ApprovalDecision::Deny),
@@ -3801,6 +3799,24 @@ impl AppState {
         }
     }
 
+    /// Resolve a per-chat project directory under the workspace root.
+    ///
+    /// Each chat session gets its own isolated project folder at
+    /// `{workspace_root}/projects/{chat_id}/`. This prevents multiple
+    /// projects from colliding in the same directory when the coder
+    /// agent generates files across different conversations.
+    ///
+    /// The directory is created on-demand if it doesn't exist.
+    pub fn project_dir_for_chat(&self, chat_id: &str) -> std::path::PathBuf {
+        let dir = self.workspace_root.join("projects").join(chat_id);
+        if !dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                tracing::error!(path = ?dir, error = %e, "Failed to create project directory for chat");
+            }
+        }
+        dir
+    }
+
     pub fn record_usage(&self, model: &str, input_tokens: u64, output_tokens: u64) {
         // Check for day boundary and reset daily counters
         let today = Utc::now().format("%Y-%m-%d").to_string();
@@ -4709,7 +4725,7 @@ impl Default for AppState {
 /// Per-1M-token rates: (input, output, cache_read, cache_write).
 ///
 /// Pricing aligned with upstream provider pricing as of 2026-03.
-/// Rates sourced from openclaw reference implementation.
+/// Rates sourced from provider pricing pages.
 pub fn model_cost_rates(model: &str) -> (f64, f64, f64, f64) {
     let m = model.to_lowercase();
 

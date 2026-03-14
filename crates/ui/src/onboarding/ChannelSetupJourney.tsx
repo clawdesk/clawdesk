@@ -9,7 +9,7 @@ import type { ChannelConfigField, ChannelTypeSpec } from "../types";
 //   - configure: the actual config fields
 //   - verify: validation / confirmation
 //
-// Modelled after openclaw's per-channel ChannelOnboardingAdapter
+// Per-channel onboarding adapter pattern
 // but rendered as a React step-by-step journey in the ClawDesk UI.
 // ═══════════════════════════════════════════════════════════════
 

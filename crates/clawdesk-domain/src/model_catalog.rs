@@ -239,6 +239,111 @@ impl ModelCatalog {
                 avg_latency_ms: 400.0,
                 max_output_tokens: 16_384,
             },
+            // ── Gemini ──
+            ModelEntry {
+                id: "gemini-2.5-pro".into(),
+                provider: "gemini".into(),
+                display_name: "Gemini 2.5 Pro".into(),
+                capabilities: ModelCapabilities::TEXT
+                    .union(ModelCapabilities::VISION)
+                    .union(ModelCapabilities::TOOLS)
+                    .union(ModelCapabilities::THINKING)
+                    .union(ModelCapabilities::STREAMING)
+                    .union(ModelCapabilities::CODE)
+                    .union(ModelCapabilities::LONG_CONTEXT),
+                context_window: 1_048_576,
+                cost_per_m_input: 1.25,
+                cost_per_m_output: 10.0,
+                avg_latency_ms: 700.0,
+                max_output_tokens: 65_536,
+            },
+            // ── DeepSeek ──
+            ModelEntry {
+                id: "deepseek-r1".into(),
+                provider: "deepseek".into(),
+                display_name: "DeepSeek R1".into(),
+                capabilities: ModelCapabilities::TEXT
+                    .union(ModelCapabilities::TOOLS)
+                    .union(ModelCapabilities::THINKING)
+                    .union(ModelCapabilities::STREAMING)
+                    .union(ModelCapabilities::CODE),
+                context_window: 128_000,
+                cost_per_m_input: 0.55,
+                cost_per_m_output: 2.19,
+                avg_latency_ms: 500.0,
+                max_output_tokens: 32_768,
+            },
+            // ── Chinese Providers ──
+            ModelEntry {
+                id: "qwen-max".into(),
+                provider: "qwen".into(),
+                display_name: "Qwen Max (Alibaba)".into(),
+                capabilities: ModelCapabilities::TEXT
+                    .union(ModelCapabilities::TOOLS)
+                    .union(ModelCapabilities::STREAMING)
+                    .union(ModelCapabilities::CODE)
+                    .union(ModelCapabilities::LONG_CONTEXT),
+                context_window: 128_000,
+                cost_per_m_input: 2.4,
+                cost_per_m_output: 9.6,
+                avg_latency_ms: 600.0,
+                max_output_tokens: 16_384,
+            },
+            ModelEntry {
+                id: "qwen-plus".into(),
+                provider: "qwen".into(),
+                display_name: "Qwen Plus (Alibaba)".into(),
+                capabilities: ModelCapabilities::TEXT
+                    .union(ModelCapabilities::TOOLS)
+                    .union(ModelCapabilities::STREAMING),
+                context_window: 128_000,
+                cost_per_m_input: 0.8,
+                cost_per_m_output: 2.0,
+                avg_latency_ms: 400.0,
+                max_output_tokens: 16_384,
+            },
+            ModelEntry {
+                id: "abab7-chat".into(),
+                provider: "minimax".into(),
+                display_name: "MiniMax abab7".into(),
+                capabilities: ModelCapabilities::TEXT
+                    .union(ModelCapabilities::TOOLS)
+                    .union(ModelCapabilities::STREAMING)
+                    .union(ModelCapabilities::LONG_CONTEXT),
+                context_window: 245_760,
+                cost_per_m_input: 1.0,
+                cost_per_m_output: 1.0,
+                avg_latency_ms: 500.0,
+                max_output_tokens: 16_384,
+            },
+            ModelEntry {
+                id: "doubao-pro-256k".into(),
+                provider: "doubao".into(),
+                display_name: "Doubao Pro 256K (ByteDance)".into(),
+                capabilities: ModelCapabilities::TEXT
+                    .union(ModelCapabilities::TOOLS)
+                    .union(ModelCapabilities::STREAMING)
+                    .union(ModelCapabilities::LONG_CONTEXT),
+                context_window: 256_000,
+                cost_per_m_input: 0.7,
+                cost_per_m_output: 0.9,
+                avg_latency_ms: 450.0,
+                max_output_tokens: 16_384,
+            },
+            ModelEntry {
+                id: "moonshot-v1-128k".into(),
+                provider: "moonshot".into(),
+                display_name: "Moonshot v1 128K (Kimi)".into(),
+                capabilities: ModelCapabilities::TEXT
+                    .union(ModelCapabilities::TOOLS)
+                    .union(ModelCapabilities::STREAMING)
+                    .union(ModelCapabilities::LONG_CONTEXT),
+                context_window: 128_000,
+                cost_per_m_input: 0.8,
+                cost_per_m_output: 0.8,
+                avg_latency_ms: 500.0,
+                max_output_tokens: 16_384,
+            },
         ];
 
         catalog.register_batch(models);

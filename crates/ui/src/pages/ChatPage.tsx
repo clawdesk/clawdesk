@@ -9,6 +9,7 @@ import type {
   AgentEventEnvelope,
   AgentEventPayload,
   SessionSummary,
+  WorkspaceFileEntry,
 } from "../types";
 import { AGENT_TEMPLATES } from "../types";
 import { Icon } from "../components/Icon";
@@ -942,6 +943,15 @@ export function ChatPage({
   // The active chat ID (null = new thread, not yet created)
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const activeChatIdRef = useRef<string | null>(null);
+
+  // Per-chat project workspace state
+  const [showProjectFiles, setShowProjectFiles] = useState(false);
+  const [projectFiles, setProjectFiles] = useState<WorkspaceFileEntry[]>([]);
+  const [projectWorkspacePath, setProjectWorkspacePath] = useState<string>("");
+  const [projectFilePath, setProjectFilePath] = useState<string[]>([""]);
+  const [projectFileContent, setProjectFileContent] = useState<string | null>(null);
+  const [selectedProjectFile, setSelectedProjectFile] = useState<string | null>(null);
+
   // Flag: skip the next activeChatId-driven message reload (set when
   // sendMessage adopts a new chat_id to avoid overwriting streaming state)
   const skipNextLoadRef = useRef(false);
@@ -1132,7 +1142,8 @@ export function ChatPage({
     ].join("\n\n");
   }, [uploadedContextDocs]);
 
-  const agent = agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? null;
+  const agent = selectedAgentId ? (agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? null) : null;
+  const isAutoMode = !selectedAgentId;
   const isNew = messages.length === 0;
   const currentSession = activeChatId ? sessions.find((session) => session.chat_id === activeChatId) ?? null : null;
   const heroSuggestions = [
@@ -1144,12 +1155,46 @@ export function ChatPage({
     { icon: "🔍", title: "Research a topic", desc: "Find and summarize information" },
   ];
 
-  // Auto-select the first agent if none is selected
-  useEffect(() => {
-    if (!selectedAgentId && agents.length > 0) {
-      onSelectAgent(agents[0].id);
+  // Auto mode: pick the best agent for the given message content.
+  // Checks agent name/description/tags for keyword overlap with the user's task.
+  const autoPickAgent = useCallback((content: string): string | undefined => {
+    if (agents.length === 0) return undefined;
+    const lower = content.toLowerCase();
+
+    // Domain keyword → agent name/tag patterns
+    const domainAgentMap: [string[], string[]][] = [
+      [["code", "build", "implement", "function", "bug", "fix", "refactor", "app", "todo", "api"],
+       ["coder", "dev", "engineer", "coding"]],
+      [["research", "find", "compare", "trend", "study", "analyze"],
+       ["research", "analyst"]],
+      [["write", "draft", "blog", "article", "report", "email", "document"],
+       ["writer", "creative"]],
+      [["design", "ui", "ux", "css", "style", "layout"],
+       ["design", "frontend"]],
+      [["test", "spec", "coverage", "unit test"],
+       ["test", "qa"]],
+      [["deploy", "docker", "server", "ci/cd", "kubernetes"],
+       ["devops", "sysadmin"]],
+      [["security", "audit", "vulnerability", "auth"],
+       ["security"]],
+    ];
+
+    for (const [keywords, agentPatterns] of domainAgentMap) {
+      if (keywords.some((kw) => lower.includes(kw))) {
+        const match = agents.find((a) => {
+          const name = a.name.toLowerCase();
+          const desc = (a.persona || "").toLowerCase();
+          return agentPatterns.some((p) => name.includes(p) || desc.includes(p));
+        });
+        if (match) return match.id;
+      }
     }
-  }, [agents, selectedAgentId, onSelectAgent]);
+
+    // Fallback: use the first non-team agent, or just the first agent
+    return agents.find((a) => !a.team_id)?.id || agents[0]?.id;
+  }, [agents]);
+
+  // Don't auto-select an agent — null means "Auto" mode (default)
 
   // (Auto-create removed: agents are created explicitly from Settings > Agents)
 
@@ -1162,6 +1207,37 @@ export function ChatPage({
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Load project workspace path when active chat changes
+  useEffect(() => {
+    if (activeChatId) {
+      api.getChatWorkspace(activeChatId).then(setProjectWorkspacePath).catch(() => {});
+      // Reset project file navigation
+      setProjectFilePath([""]);
+      setSelectedProjectFile(null);
+      setProjectFileContent(null);
+    } else {
+      setProjectWorkspacePath("");
+      setProjectFiles([]);
+    }
+  }, [activeChatId]);
+
+  // Load project files when the panel is open and chat/path changes
+  const loadProjectFiles = useCallback(async (chatId: string, relPath: string) => {
+    try {
+      const files = await api.listChatProjectFiles(chatId, relPath || undefined);
+      setProjectFiles(files);
+    } catch {
+      setProjectFiles([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showProjectFiles && activeChatId) {
+      const currentDir = projectFilePath[projectFilePath.length - 1];
+      loadProjectFiles(activeChatId, currentDir);
+    }
+  }, [showProjectFiles, activeChatId, projectFilePath, loadProjectFiles]);
 
   // Note: Thread history is also refreshed by the selectedAgentId effect below.
 
@@ -1756,10 +1832,30 @@ export function ChatPage({
   }, []);
 
   const sendMessage = useCallback(async (content: string) => {
-    const agentId = selectedAgentId ?? agent?.id;
-    const agentName = agent?.name;
+    // Delegate mode: route to external CLI agent
+    const isDelegateMode = selectedAgentId?.startsWith("delegate:");
+    const delegateCliId = isDelegateMode ? selectedAgentId!.replace("delegate:", "") : null;
+
+    // Resolve the actual agent to use for the API call
+    let agentId: string | undefined;
+    let agentName: string | undefined;
+
+    if (isDelegateMode) {
+      // For delegate mode, use a coder-type agent as the executor
+      // The coder agent will run the CLI command via shell_exec
+      const coder = agents.find((a) => a.name.toLowerCase().includes("coder") || a.name.toLowerCase().includes("dev"));
+      agentId = coder?.id || agents.find((a) => !a.team_id)?.id || agents[0]?.id;
+      const cliNames: Record<string, string> = { "claude-code": "Claude Code", "codex": "Codex", "gemini-cli": "Gemini CLI", "aider": "Aider", "gh-copilot": "Copilot" };
+      agentName = cliNames[delegateCliId!] || delegateCliId || "CLI Agent";
+    } else {
+      // Auto mode or specific agent
+      agentId = selectedAgentId ?? autoPickAgent(content);
+      const resolvedAgent = agentId ? agents.find((a) => a.id === agentId) : null;
+      agentName = resolvedAgent?.name || (isAutoMode ? "Auto" : undefined);
+    }
+
     const visibleContent = content.replace(/\[Uploaded: [^\]]+\]\s*/g, "").replace(/\n{3,}/g, "\n\n").trim();
-    console.log("[SEND] sendMessage called. agentId:", agentId, "content:", visibleContent?.slice(0, 50), "sendingRef:", sendingRef.current);
+    console.log("[SEND] sendMessage called. agentId:", agentId, "autoMode:", isAutoMode, "delegate:", delegateCliId, "content:", visibleContent?.slice(0, 50));
     if (!agentId || !visibleContent) {
       console.warn("[SEND] early return: no agentId or empty content");
       if (agentId && !visibleContent) {
@@ -1847,6 +1943,19 @@ export function ChatPage({
       const attachedContext = await buildUploadedDocsContext();
       if (attachedContext) {
         requestContent = `${visibleContent}\n\n---\n\n${attachedContext}`;
+      }
+
+      // Delegate mode: wrap the task as a CLI command for the agent to execute
+      if (isDelegateMode && delegateCliId) {
+        const cliCommands: Record<string, string> = {
+          "claude-code": "claude -p",
+          "codex": "codex -p",
+          "gemini-cli": "gemini -p",
+          "aider": "aider --message",
+          "gh-copilot": "gh copilot suggest",
+        };
+        const cmd = cliCommands[delegateCliId] || delegateCliId;
+        requestContent = `Delegate this task to the ${delegateCliId} CLI agent. Run the following command and return its output:\n\n\`\`\`bash\n${cmd} "${requestContent.replace(/"/g, '\\"')}"\n\`\`\`\n\nCapture the full output and present it to the user. If the command fails, explain the error.`;
       }
 
       // Pass the resolved currentChatId to the backend
@@ -2005,7 +2114,7 @@ export function ChatPage({
       });
       setIsSending(false);
     }
-  }, [selectedAgentId, agent?.id, agent?.name, pushToast, effectiveModel, effectiveProvider, effectiveApiKey, effectiveBaseUrl, buildUploadedDocsContext]);
+  }, [selectedAgentId, agents, isAutoMode, autoPickAgent, pushToast, effectiveModel, effectiveProvider, effectiveApiKey, effectiveBaseUrl, buildUploadedDocsContext]);
 
   return (
     <div className="view chat-page">
@@ -2077,22 +2186,28 @@ export function ChatPage({
         <div className="chat-page-main">
           <div className="chat-stage-header">
             <div className="chat-stage-header__identity">
-              <div className="chat-stage-header__avatar">{agent?.icon ?? "✦"}</div>
+              <div className="chat-stage-header__avatar">{isAutoMode ? "✦" : (agent?.icon ?? "✦")}</div>
               <div className="chat-stage-header__copy">
                 <div className="chat-stage-header__eyebrow">
                   {currentSession ? "Conversation" : "New Session"}
                 </div>
                 <div className="chat-stage-header__title-row">
                   <h2 className="chat-stage-header__title">
-                    {currentSession?.title || (agent ? `Chat with ${agent.name}` : "Create an assistant to begin")}
+                    {currentSession?.title || (isAutoMode ? "Auto Mode — best agent selected per message" : (agent ? `Chat with ${agent.name}` : "Create an assistant to begin"))}
                   </h2>
-                  {agent && <span className="chat-stage-pill chat-stage-pill--brand">{agent.name}</span>}
+                  {isAutoMode && <span className="chat-stage-pill chat-stage-pill--brand" style={{ background: "linear-gradient(135deg, #6366f1, #a855f7)", color: "white" }}>Auto</span>}
+                  {agent && !isAutoMode && <span className="chat-stage-pill chat-stage-pill--brand">{agent.name}</span>}
                   {effectiveModel && <span className="chat-stage-pill">{effectiveModel}</span>}
                 </div>
                 <div className="chat-stage-header__meta">
                   <span>{currentSession ? `${currentSession.message_count} messages` : "Fresh context"}</span>
                   <span>{isSending ? "Agent responding" : "Ready"}</span>
                   <span>{effectiveProvider}</span>
+                  {activeChatId && projectWorkspacePath && (
+                    <span title={projectWorkspacePath} style={{ cursor: "pointer" }} onClick={() => setShowProjectFiles(!showProjectFiles)}>
+                      📁 Project
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -2113,6 +2228,10 @@ export function ChatPage({
               <button className={`chat-stage-action ${previewOpen ? "is-active" : ""}`} onClick={() => setPreviewOpen(!previewOpen)} title="Toggle preview panel">
                 <Icon name="eye" />
                 <span>Preview</span>
+              </button>
+              <button className={`chat-stage-action ${showProjectFiles ? "is-active" : ""}`} onClick={() => { if (activeChatId) setShowProjectFiles(!showProjectFiles); }} title="Toggle project files" disabled={!activeChatId}>
+                <Icon name="folder" />
+                <span>Project</span>
               </button>
               <button className={`chat-stage-action ${showFlowSelector ? "is-active" : ""}`} onClick={() => setShowFlowSelector(!showFlowSelector)} title="Agent flow coordination">
                 <Icon name="network" />
@@ -2135,7 +2254,7 @@ export function ChatPage({
                   </h1>
                   <p className="chat-hero-tagline">A cleaner, calmer place to think, build, and ship with your local assistant.</p>
                   <div className="chat-hero-signal-row">
-                    <span className="chat-stage-pill chat-stage-pill--brand">{agent ? agent.name : "No agent selected"}</span>
+                    <span className="chat-stage-pill chat-stage-pill--brand">{isAutoMode ? "Auto" : (agent ? agent.name : "No agent selected")}</span>
                     <span className="chat-stage-pill">{effectiveProvider}</span>
                     <span className="chat-stage-pill">{effectiveModel || "Choose a model"}</span>
                   </div>
@@ -2479,13 +2598,13 @@ export function ChatPage({
               <div className="chat-composer">
                 <textarea
                   className="chat-composer-input"
-                  placeholder={agent ? "Type a message..." : "Create an assistant to get started"}
+                  placeholder={(agent || isAutoMode) ? "Type a message..." : "Create an assistant to get started"}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
-                      if (input.trim() && agent && !isSending) {
+                      if (input.trim() && (agent || isAutoMode) && !isSending) {
                         // Defensive: if sendingRef is stuck true but isSending is false,
                         // force-clear the ref to recover from inconsistent state
                         if (sendingRef.current) {
@@ -2498,7 +2617,7 @@ export function ChatPage({
                     }
                   }}
                   rows={2}
-                  disabled={!agent}
+                  disabled={!(agent || isAutoMode)}
                 />
                 {uploadedContextDocs.length > 0 && (
                   <div className="chat-composer-attachments" aria-label="Uploaded context files">
@@ -2568,8 +2687,8 @@ export function ChatPage({
                       </button>
                     ) : (
                       <button
-                        className={`chat-send-btn ${input.trim() && agent ? "active" : ""}`}
-                        disabled={!agent || !input.trim()}
+                        className={`chat-send-btn ${input.trim() && (agent || isAutoMode) ? "active" : ""}`}
+                        disabled={!(agent || isAutoMode) || !input.trim()}
                         onClick={() => {
                           console.log("[UI] send button clicked. input:", input.trim()?.slice(0, 30), "isSending:", isSending, "sendingRef:", sendingRef.current);
                           if (input.trim() && !isSending) {
@@ -2635,6 +2754,102 @@ export function ChatPage({
               onSelectFlow={setSelectedFlowId}
               pushToast={pushToast}
             />
+          </div>
+        )}
+
+        {/* Per-chat project files panel */}
+        {showProjectFiles && activeChatId && (
+          <div className="chat-preview-shell" style={{ maxWidth: 360, minWidth: 300 }}>
+            <div className="modal-head" style={{ padding: "8px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
+                <Icon name="folder" /> Project Files
+              </span>
+              <button
+                className="btn ghost"
+                style={{ fontSize: 11, padding: "2px 6px" }}
+                onClick={() => setShowProjectFiles(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div style={{ padding: "4px 12px 8px", fontSize: 11, color: "var(--text-muted)", fontFamily: "monospace", wordBreak: "break-all" }}>
+              {projectWorkspacePath || "Loading..."}
+            </div>
+            {/* Breadcrumb navigation */}
+            {projectFilePath.length > 1 && (
+              <div style={{ padding: "0 12px 4px", display: "flex", alignItems: "center", gap: 4 }}>
+                <button
+                  className="btn ghost"
+                  style={{ fontSize: 11, padding: "2px 6px" }}
+                  onClick={() => {
+                    setProjectFilePath((prev) => prev.slice(0, -1));
+                    setSelectedProjectFile(null);
+                    setProjectFileContent(null);
+                  }}
+                >
+                  ← Back
+                </button>
+                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                  {projectFilePath[projectFilePath.length - 1] || "/"}
+                </span>
+              </div>
+            )}
+            <div style={{ overflowY: "auto", maxHeight: "50vh", padding: "0 8px" }}>
+              {projectFiles.length === 0 ? (
+                <div style={{ padding: "24px 16px", textAlign: "center", color: "var(--text-muted)", fontSize: 12 }}>
+                  No files yet. Files created by the agent will appear here.
+                </div>
+              ) : (
+                projectFiles.map((f) => (
+                  <div
+                    key={f.path}
+                    role="button"
+                    tabIndex={0}
+                    style={{
+                      padding: "6px 8px",
+                      borderRadius: 4,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: 12,
+                      color: selectedProjectFile === f.path ? "var(--accent)" : "var(--text)",
+                      background: selectedProjectFile === f.path ? "var(--accent-bg)" : "transparent",
+                    }}
+                    onClick={() => {
+                      if (f.is_dir) {
+                        setProjectFilePath((prev) => [...prev, f.path]);
+                        setSelectedProjectFile(null);
+                        setProjectFileContent(null);
+                      } else {
+                        setSelectedProjectFile(f.path);
+                        api.readChatProjectFile(activeChatId, f.path)
+                          .then(setProjectFileContent)
+                          .catch(() => setProjectFileContent("(binary or unreadable)"));
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.currentTarget.click();
+                      }
+                    }}
+                  >
+                    <Icon name={f.is_dir ? "folder" : "file"} />
+                    <span>{f.name}</span>
+                    {!f.is_dir && <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-muted)" }}>{(f.size / 1024).toFixed(1)}KB</span>}
+                  </div>
+                ))
+              )}
+            </div>
+            {/* File preview */}
+            {selectedProjectFile && projectFileContent !== null && (
+              <div style={{ borderTop: "1px solid var(--border)", padding: "8px 12px", maxHeight: "30vh", overflowY: "auto" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 4 }}>{selectedProjectFile}</div>
+                <pre style={{ fontSize: 11, fontFamily: "monospace", whiteSpace: "pre-wrap", wordBreak: "break-all", color: "var(--text)", margin: 0 }}>
+                  {projectFileContent}
+                </pre>
+              </div>
+            )}
           </div>
         )}
       </div>{/* end chat-page-body */}

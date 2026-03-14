@@ -153,3 +153,51 @@ pub async fn get_dlq(
     entries.into_iter().map(|e| serde_json::to_value(e).map_err(|err| err.to_string())).collect()
 }
 
+// ═══════════════════════════════════════════════════════════
+// CLI Agent Detection — discovers installed external agents
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize)]
+pub struct DetectedCliAgent {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub path: String,
+    pub installed: bool,
+}
+
+/// Detect which external CLI agents are installed on this system.
+#[tauri::command]
+pub async fn detect_cli_agents() -> Result<Vec<DetectedCliAgent>, String> {
+    let agents = vec![
+        ("claude-code", "Claude Code", "claude"),
+        ("codex", "OpenAI Codex", "codex"),
+        ("gemini-cli", "Gemini CLI", "gemini"),
+        ("aider", "Aider", "aider"),
+        ("gh-copilot", "GitHub Copilot", "gh"),
+    ];
+
+    let mut results = Vec::new();
+    for (id, name, cmd) in agents {
+        let output = tokio::process::Command::new("which")
+            .arg(cmd)
+            .output()
+            .await;
+        let (installed, path) = match output {
+            Ok(o) if o.status.success() => {
+                let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                (true, p)
+            }
+            _ => (false, String::new()),
+        };
+        results.push(DetectedCliAgent {
+            id: id.into(),
+            name: name.into(),
+            command: cmd.into(),
+            path,
+            installed,
+        });
+    }
+    Ok(results)
+}
+

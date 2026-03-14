@@ -141,3 +141,101 @@ pub async fn read_workspace_file(
 
     std::fs::read_to_string(&resolved).map_err(|e| format!("Cannot read file: {e}"))
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Per-chat project workspace commands
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Return the project workspace path for a specific chat session.
+/// Each chat gets its own isolated folder under workspace/projects/{chat_id}/.
+#[tauri::command]
+pub async fn get_chat_workspace(
+    chat_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let project_dir = state.project_dir_for_chat(&chat_id);
+    Ok(project_dir.display().to_string())
+}
+
+/// List files in a chat's project workspace.
+#[tauri::command]
+pub async fn list_chat_project_files(
+    chat_id: String,
+    relative_path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<WorkspaceFileEntry>, String> {
+    let project_root = state.project_dir_for_chat(&chat_id);
+    let dir = match &relative_path {
+        Some(rel) if !rel.is_empty() => safe_resolve(&project_root, rel)?,
+        _ => project_root
+            .canonicalize()
+            .map_err(|e| format!("Cannot resolve project root: {e}"))?,
+    };
+
+    if !dir.is_dir() {
+        return Err("Not a directory".into());
+    }
+
+    let root_canonical = project_root
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve project root: {e}"))?;
+
+    let mut entries = Vec::new();
+    let read_dir = std::fs::read_dir(&dir).map_err(|e| format!("Cannot read directory: {e}"))?;
+
+    for entry in read_dir.flatten() {
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let full_path = entry.path();
+        let rel = full_path
+            .strip_prefix(&root_canonical)
+            .unwrap_or(&full_path)
+            .to_string_lossy()
+            .to_string();
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        entries.push(WorkspaceFileEntry {
+            name,
+            path: rel,
+            is_dir: meta.is_dir(),
+            size: meta.len(),
+            modified,
+        });
+    }
+
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+    Ok(entries)
+}
+
+/// Read a file from a chat's project workspace.
+#[tauri::command]
+pub async fn read_chat_project_file(
+    chat_id: String,
+    relative_path: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let project_root = state.project_dir_for_chat(&chat_id);
+    let resolved = safe_resolve(&project_root, &relative_path)?;
+
+    if !resolved.is_file() {
+        return Err("Not a file".into());
+    }
+
+    let meta = std::fs::metadata(&resolved).map_err(|e| format!("Cannot stat file: {e}"))?;
+    if meta.len() > 1_048_576 {
+        return Err("File too large (>1 MB)".into());
+    }
+
+    std::fs::read_to_string(&resolved).map_err(|e| format!("Cannot read file: {e}"))
+}
