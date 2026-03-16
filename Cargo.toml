@@ -45,6 +45,10 @@ members = [
     "crates/clawdesk-local-models",
     "crates/clawdesk-rag",
     "crates/clawdesk-agent-config",
+    "crates/clawdesk-voice",
+    "crates/clawdesk-polls",
+    "crates/clawdesk-wizard",
+    "crates/clawdesk-channel-plugins",
     "xtask",
 ]
 resolver = "2"
@@ -130,6 +134,10 @@ clawdesk-test = { path = "crates/clawdesk-test" }
 clawdesk-local-models = { path = "crates/clawdesk-local-models" }
 clawdesk-rag = { path = "crates/clawdesk-rag" }
 clawdesk-agent-config = { path = "crates/clawdesk-agent-config" }
+clawdesk-voice = { path = "crates/clawdesk-voice" }
+clawdesk-polls = { path = "crates/clawdesk-polls" }
+clawdesk-wizard = { path = "crates/clawdesk-wizard" }
+clawdesk-channel-plugins = { path = "crates/clawdesk-channel-plugins" }
 
 # --- SochDB (embedded ACID vector database) ---
 sochdb = { version = "0.5.0", features = ["embedded"] }

@@ -1,6 +1,6 @@
 # Architecture Overview
 
-ClawDesk is a **40+-crate Rust workspace** following hexagonal (ports-and-adapters) architecture. Every component communicates through trait-defined ports, enabling independent testing and swappable implementations.
+ClawDesk is a **51-crate Rust workspace** following hexagonal (ports-and-adapters) architecture. Every component communicates through trait-defined ports, enabling independent testing and swappable implementations.
 
 ## Design Principles
 
@@ -69,8 +69,8 @@ The crate DAG has a critical path depth of 6. Dependencies flow strictly upward 
 
 | Crate | Purpose |
 |-------|---------|
-| `clawdesk-agents` | Agent execution engine: `AgentRunner`, multi-agent pipelines, failover, tool orchestration, context window management |
-| `clawdesk-providers` | LLM provider abstraction + 8 implementations: Anthropic, OpenAI, Google Gemini, Ollama, Azure, Bedrock, Cohere, Vertex |
+| `clawdesk-agents` | Agent execution engine: `AgentRunner`, multi-agent pipelines, failover, tool orchestration, context window management, `/btw` ephemeral side questions, session-based subagent hierarchy control |
+| `clawdesk-providers` | LLM provider abstraction + 8 implementations: Anthropic, OpenAI, Google Gemini, Ollama, Azure, Bedrock, Cohere, Vertex. Dynamic model capability detection (3-layer cache), model ID normalization |
 | `clawdesk-skills` | Composable skill system: registry, trigger evaluation, token-budgeted selection, env injection, verification |
 | `clawdesk-plugin` | Plugin lifecycle: hooks, sandbox, dependency resolution, SDK for plugin authors |
 
@@ -86,8 +86,9 @@ The crate DAG has a critical path depth of 6. Dependencies flow strictly upward 
 |-------|---------|
 | `clawdesk-channel` | Channel trait hierarchy: `Channel` → `Threaded` + `Streaming` + `Reactions` → `RichChannel` |
 | `clawdesk-channels` | 25+ channel implementations: Slack, Discord, Telegram, WhatsApp, Signal, Matrix, IRC, etc. |
+| `clawdesk-channel-plugins` | Dynamic plugin architecture for channels: capability bitvector checks, self-registration, 3-level hierarchical allowlists |
 | `clawdesk-bus` | Event-sourced reactive bus with weighted fair queuing and backpressure |
-| `clawdesk-autoreply` | Auto-reply engine: classify → route → enrich → execute → format → deliver |
+| `clawdesk-autoreply` | Auto-reply engine: classify → route → enrich → execute → format → deliver. Command registry, directive parser (`@model:X @think:high`), block streaming with coalescing |
 | `clawdesk-threads` | Namespaced chat-thread persistence on SochDB |
 | `clawdesk-acp` | Agent-to-Agent Communication Protocol (A2A). Agent Cards, task FSM, capability discovery |
 
@@ -95,7 +96,7 @@ The crate DAG has a critical path depth of 6. Dependencies flow strictly upward 
 
 | Crate | Purpose |
 |-------|---------|
-| `clawdesk-security` | Audit logging (hash-chained), content scanning (Aho-Corasick + regex), ACL, OAuth2 + PKCE, execution approval, credential vault, TLS cert pinning |
+| `clawdesk-security` | Audit logging (hash-chained), content scanning (Aho-Corasick + regex), ACL, OAuth2 + PKCE, execution approval, credential vault, TLS cert pinning, ReDoS-safe regex compilation, URL credential stripping |
 
 ### Networking
 
@@ -112,9 +113,13 @@ The crate DAG has a critical path depth of 6. Dependencies flow strictly upward 
 | `clawdesk-runtime` | Durable crash-recoverable agent execution. Checkpoint + resume, activity journal, dead-letter queue |
 | `clawdesk-infra` | Backup, clipboard, daemon management, dispatch queue, git-sync, idle detection, notifications, TLS |
 | `clawdesk-media` | Media pipeline: audio transcription, image analysis, document parsing, TTS, link previews |
-| `clawdesk-browser` | Browser automation via Chrome DevTools Protocol (CDP): navigate, click, type, screenshot |
+| `clawdesk-browser` | Browser automation via CDP + extension relay (real browser context), session-tab registry, route dispatcher, snapshot diffing |
 | `clawdesk-cron` | Cron scheduling with overlap prevention, heartbeat monitoring, proactive orchestration |
-| `clawdesk-adapters` | External service adapter trait with OAuth2 lifecycle, rate limiting, circuit breaking |
+| `clawdesk-adapters` | External service adapter trait with OAuth2 lifecycle, rate limiting, circuit breaking, channel health monitoring, schema migration |
+| `clawdesk-voice` | Multi-provider TTS engine (ElevenLabs, OpenAI, Edge TTS), VoiceWake keyword detection, voice call plugin |
+| `clawdesk-polls` | Interactive polls with CRDT vote aggregation, channel-agnostic state machine, multi-select support |
+| `clawdesk-wizard` | Onboarding wizard with resumable DAG flow, cryptographic device pairing, config validation |
+| `clawdesk-channel-plugins` | Dynamic channel plugin architecture with capability bitvectors, self-registration, hierarchical allowlists |
 
 ### Observability
 
@@ -147,7 +152,7 @@ The crate DAG has a critical path depth of 6. Dependencies flow strictly upward 
 | `clawdesk-extensions` | Integration registry with credential vault, OAuth2 flows, external service health monitoring |
 | `clawdesk-migrate` | Migration from OpenClaw (YAML agents, SQLite sessions, skill definitions) |
 | `clawdesk-bench` | Benchmark harness for provider latency, throughput, and cost tracking |
-| `clawdesk-test` | YAML-based test cases with deterministic replay and assertion system |
+| `clawdesk-test` | YAML-based test cases with deterministic replay, assertion system, property-based testing (proptest), coverage enforcement (70% line / 55% branch), contract testing |
 
 ## Data Flow: Message Processing
 

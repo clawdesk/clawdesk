@@ -46,7 +46,10 @@ pub mod suite;
 pub mod assertions;
 pub mod bench;
 pub mod chaos;
+pub mod contract;
+pub mod coverage;
 pub mod loadtest;
+pub mod property;
 
 pub use bench::{BenchConfig, BenchResult, RegressionReport, bench_sync, bench_async, check_regression};
 pub use chaos::{FaultInjector, FaultConfig, ChaosScenario, FaultType};

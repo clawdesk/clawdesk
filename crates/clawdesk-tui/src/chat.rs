@@ -1,5 +1,6 @@
 //! Chat view — message display, input buffer, and streaming output.
 
+use crate::btw_overlay::BtwInlineMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -55,6 +56,8 @@ pub struct ChatView {
     cursor_pos: usize,
     scroll_offset: usize,
     active_stream: Option<StreamState>,
+    /// Ephemeral BTW overlay (not persisted in message history).
+    btw_message: Option<BtwInlineMessage>,
 }
 
 /// Active streaming state.
@@ -72,6 +75,7 @@ impl ChatView {
             cursor_pos: 0,
             scroll_offset: 0,
             active_stream: None,
+            btw_message: None,
         }
     }
 
@@ -226,6 +230,43 @@ impl ChatView {
         self.messages.clear();
         self.scroll_offset = 0;
         self.active_stream = None;
+        self.btw_message = None;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // BTW overlay methods
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Show a BTW side question overlay.
+    pub fn show_btw(&mut self, question: &str) -> &mut BtwInlineMessage {
+        self.btw_message = Some(BtwInlineMessage::new(question));
+        self.btw_message.as_mut().unwrap()
+    }
+
+    /// Dismiss the BTW overlay.
+    pub fn dismiss_btw(&mut self) {
+        if let Some(btw) = &mut self.btw_message {
+            btw.dismiss();
+        }
+        self.btw_message = None;
+    }
+
+    /// Whether a BTW overlay is currently visible.
+    pub fn has_visible_btw(&self) -> bool {
+        self.btw_message
+            .as_ref()
+            .map(|b| b.is_visible())
+            .unwrap_or(false)
+    }
+
+    /// Get a mutable reference to the BTW overlay (for streaming updates).
+    pub fn btw_message_mut(&mut self) -> Option<&mut BtwInlineMessage> {
+        self.btw_message.as_mut()
+    }
+
+    /// Get the BTW overlay for rendering.
+    pub fn btw_message(&self) -> Option<&BtwInlineMessage> {
+        self.btw_message.as_ref()
     }
 }
 

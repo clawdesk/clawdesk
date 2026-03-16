@@ -92,7 +92,7 @@ impl Default for MemoryConfig {
             search_strategy: SearchStrategy::Hybrid,
             auto_embed: true,
             max_results: 10,
-            min_relevance: 0.3,
+            min_relevance: 0.15,
             chunker: ChunkerConfig::default(),
             temporal_decay: TemporalDecayConfig::default(),
             mmr: MmrConfig::default(),

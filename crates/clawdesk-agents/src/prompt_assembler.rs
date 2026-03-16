@@ -137,10 +137,13 @@ impl PromptAssembler {
             )
             .await;
 
-        // Stage 4: Output discipline — formatting rules
+        // Stage 4: Tool preference guidance — browser vs http_fetch
+        let system_prompt = self.inject_tool_guidance(system_prompt, &messages);
+
+        // Stage 5: Output discipline — formatting rules
         let system_prompt = Self::append_output_discipline(system_prompt);
 
-        // Stage 5: Memory recall — inject context before last user message
+        // Stage 6: Memory recall — inject context before last user message
         let messages = self
             .inject_memory(messages, memory_recall_fn, context_limit)
             .await;
@@ -284,6 +287,53 @@ impl PromptAssembler {
     }
 
     /// Stage 4: Append output discipline rules.
+    ///
+    /// Stage 4: Tool preference guidance.
+    ///
+    /// Detects user intent from the latest message and injects tool selection
+    /// hints. When the user mentions "browser", "chrome", "open", "navigate",
+    /// "visit", etc., guides the model to prefer `browser_navigate` over
+    /// `http_fetch` — because browser tools provide interactive DOM access,
+    /// screenshots, and element interaction that `http_fetch` cannot.
+    fn inject_tool_guidance(
+        &self,
+        system_prompt: String,
+        messages: &[ChatMessage],
+    ) -> String {
+        let user_msg = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .map(|m| m.content.as_ref())
+            .unwrap_or("");
+
+        let lower = user_msg.to_lowercase();
+        let wants_browser = lower.contains("browser")
+            || lower.contains("chrome")
+            || lower.contains("open ")
+            || lower.contains("navigate to")
+            || lower.contains("visit ")
+            || lower.contains("go to ")
+            || lower.contains("webpage")
+            || lower.contains("website")
+            || (lower.contains("use my") && (lower.contains("browser") || lower.contains("chrome")));
+
+        if wants_browser {
+            format!(
+                "{}\n\n## Tool Selection Guidance\n\
+                 The user wants you to use the BROWSER tools (browser_navigate, browser_screenshot, \
+                 browser_click, browser_type, browser_extract_text, browser_scroll). \
+                 Do NOT use http_fetch or web_search for this request — use browser_navigate \
+                 to open the URL, then browser_extract_text or browser_screenshot to see the content. \
+                 The browser tools provide interactive access to the real page with JavaScript rendering.",
+                system_prompt
+            )
+        } else {
+            system_prompt
+        }
+    }
+
+    /// Stage 5: Output discipline.
     ///
     /// Instructs the model to respond with ONLY the final answer,
     /// suppressing reasoning narration and raw data dumps.

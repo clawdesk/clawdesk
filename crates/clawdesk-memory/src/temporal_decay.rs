@@ -40,8 +40,8 @@ pub struct TemporalDecayConfig {
 impl Default for TemporalDecayConfig {
     fn default() -> Self {
         Self {
-            half_life_days: 30.0,
-            min_decay: 0.01,
+            half_life_days: 180.0,
+            min_decay: 0.15,
             enabled: true,
         }
     }
@@ -117,15 +117,15 @@ mod tests {
 
     #[test]
     fn decay_one_half_life() {
-        let config = TemporalDecayConfig::default(); // 30 days
-        let factor = decay_factor(30.0, &config);
+        let config = TemporalDecayConfig::default(); // 180 days
+        let factor = decay_factor(180.0, &config);
         assert!((factor - 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn decay_two_half_lives() {
         let config = TemporalDecayConfig::default();
-        let factor = decay_factor(60.0, &config);
+        let factor = decay_factor(360.0, &config);
         assert!((factor - 0.25).abs() < 1e-6);
     }
 

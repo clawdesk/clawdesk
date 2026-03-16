@@ -1,0 +1,366 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1100" font-family="Inter, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="coreG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+    <linearGradient id="agentG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+    <linearGradient id="commG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="secG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ef4444"/>
+      <stop offset="100%" stop-color="#f87171"/>
+    </linearGradient>
+    <linearGradient id="infraG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="newG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ec4899"/>
+      <stop offset="100%" stop-color="#f472b6"/>
+    </linearGradient>
+    <filter id="sh">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="1100" fill="url(#bg)" rx="16"/>
+
+  <!-- Title -->
+  <text x="600" y="38" text-anchor="middle" fill="#e2e8f0" font-size="22" font-weight="700">
+    ClawDesk — 51-Crate Architecture (March 2026)
+  </text>
+  <text x="600" y="58" text-anchor="middle" fill="#94a3b8" font-size="11">
+    Hexagonal ports-and-adapters · Critical path depth = 6 · Zero cycles
+  </text>
+
+  <!-- ════════ LAYER 1: Frontends (Leaf Binaries) ════════ -->
+  <rect x="60" y="75" width="1080" height="65" rx="10" fill="#1e293b" stroke="#475569" stroke-width="1" filter="url(#sh)"/>
+  <rect x="60" y="75" width="1080" height="4" rx="2" fill="#60a5fa"/>
+  <text x="105" y="100" fill="#93c5fd" font-size="11" font-weight="600">FRONTENDS</text>
+
+  <rect x="160" y="90" width="120" height="35" rx="6" fill="#1e1b4b" stroke="#4338ca" stroke-width="1"/>
+  <text x="220" y="112" text-anchor="middle" fill="#a5b4fc" font-size="10">Tauri Desktop</text>
+
+  <rect x="295" y="90" width="80" height="35" rx="6" fill="#1e1b4b" stroke="#4338ca" stroke-width="1"/>
+  <text x="335" y="112" text-anchor="middle" fill="#a5b4fc" font-size="10">CLI</text>
+
+  <rect x="390" y="90" width="80" height="35" rx="6" fill="#1e1b4b" stroke="#4338ca" stroke-width="1"/>
+  <text x="430" y="112" text-anchor="middle" fill="#a5b4fc" font-size="10">TUI</text>
+
+  <rect x="485" y="90" width="100" height="35" rx="6" fill="#1e1b4b" stroke="#4338ca" stroke-width="1"/>
+  <text x="535" y="112" text-anchor="middle" fill="#a5b4fc" font-size="10">Daemon</text>
+
+  <rect x="600" y="90" width="120" height="35" rx="6" fill="#1e1b4b" stroke="#4338ca" stroke-width="1"/>
+  <text x="660" y="112" text-anchor="middle" fill="#a5b4fc" font-size="10">React UI</text>
+
+  <rect x="735" y="90" width="120" height="35" rx="6" fill="#172554" stroke="#ec4899" stroke-width="1.5"/>
+  <text x="795" y="112" text-anchor="middle" fill="#f9a8d4" font-size="10">Wizard</text>
+  <rect x="835" y="90" width="18" height="12" rx="4" fill="#ec4899"/>
+  <text x="844" y="99" text-anchor="middle" fill="#fff" font-size="6" font-weight="700">NEW</text>
+
+  <!-- ════════ LAYER 2: Gateway ════════ -->
+  <rect x="300" y="160" width="600" height="50" rx="10" fill="#1e293b" stroke="url(#coreG)" stroke-width="1.5" filter="url(#sh)"/>
+  <rect x="300" y="160" width="600" height="4" rx="2" fill="url(#coreG)"/>
+  <text x="600" y="190" text-anchor="middle" fill="#93c5fd" font-size="13" font-weight="700">Gateway (Axum 0.7) — HTTP · WS · OpenAI-compat API</text>
+
+  <!-- Arrow down from frontends -->
+  <line x1="600" y1="140" x2="600" y2="160" stroke="#60a5fa" stroke-width="1.5"/>
+
+  <!-- ════════ LAYER 3: Agent Engine + Communication ════════ -->
+  <rect x="60" y="235" width="540" height="120" rx="10" fill="#1e293b" stroke="url(#agentG)" stroke-width="1" filter="url(#sh)"/>
+  <rect x="60" y="235" width="540" height="4" rx="2" fill="url(#agentG)"/>
+  <text x="90" y="258" fill="#6ee7b7" font-size="11" font-weight="600">AGENT ENGINE</text>
+
+  <rect x="80" y="268" width="120" height="30" rx="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8"/>
+  <text x="140" y="287" text-anchor="middle" fill="#a7f3d0" font-size="9">agents (runner)</text>
+
+  <rect x="210" y="268" width="110" height="30" rx="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8"/>
+  <text x="265" y="287" text-anchor="middle" fill="#a7f3d0" font-size="9">providers (8+)</text>
+
+  <rect x="330" y="268" width="100" height="30" rx="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8"/>
+  <text x="380" y="287" text-anchor="middle" fill="#a7f3d0" font-size="9">skills</text>
+
+  <rect x="440" y="268" width="100" height="30" rx="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8"/>
+  <text x="490" y="287" text-anchor="middle" fill="#a7f3d0" font-size="9">plugin (hooks)</text>
+
+  <!-- New agent features -->
+  <rect x="80" y="305" width="100" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="130" y="322" text-anchor="middle" fill="#f9a8d4" font-size="8">/btw questions</text>
+
+  <rect x="190" y="305" width="115" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="247" y="322" text-anchor="middle" fill="#f9a8d4" font-size="8">session control</text>
+
+  <rect x="315" y="305" width="120" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="375" y="322" text-anchor="middle" fill="#f9a8d4" font-size="8">cap. detector</text>
+
+  <rect x="445" y="305" width="100" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="495" y="322" text-anchor="middle" fill="#f9a8d4" font-size="8">model normalize</text>
+
+  <!-- Communication column -->
+  <rect x="620" y="235" width="520" height="120" rx="10" fill="#1e293b" stroke="url(#commG)" stroke-width="1" filter="url(#sh)"/>
+  <rect x="620" y="235" width="520" height="4" rx="2" fill="url(#commG)"/>
+  <text x="650" y="258" fill="#fcd34d" font-size="11" font-weight="600">COMMUNICATION</text>
+
+  <rect x="640" y="268" width="100" height="30" rx="5" fill="#451a03" stroke="#f59e0b" stroke-width="0.8"/>
+  <text x="690" y="287" text-anchor="middle" fill="#fed7aa" font-size="9">channels (25+)</text>
+
+  <rect x="750" y="268" width="100" height="30" rx="5" fill="#451a03" stroke="#f59e0b" stroke-width="0.8"/>
+  <text x="800" y="287" text-anchor="middle" fill="#fed7aa" font-size="9">autoreply</text>
+
+  <rect x="860" y="268" width="70" height="30" rx="5" fill="#451a03" stroke="#f59e0b" stroke-width="0.8"/>
+  <text x="895" y="287" text-anchor="middle" fill="#fed7aa" font-size="9">ACP</text>
+
+  <rect x="940" y="268" width="80" height="30" rx="5" fill="#451a03" stroke="#f59e0b" stroke-width="0.8"/>
+  <text x="980" y="287" text-anchor="middle" fill="#fed7aa" font-size="9">bus · threads</text>
+
+  <!-- New comms features -->
+  <rect x="640" y="305" width="110" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="695" y="322" text-anchor="middle" fill="#f9a8d4" font-size="8">channel-plugins</text>
+
+  <rect x="760" y="305" width="100" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="810" y="322" text-anchor="middle" fill="#f9a8d4" font-size="8">cmd registry</text>
+
+  <rect x="870" y="305" width="110" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="925" y="322" text-anchor="middle" fill="#f9a8d4" font-size="8">block streaming</text>
+
+  <rect x="990" y="305" width="90" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="1035" y="322" text-anchor="middle" fill="#f9a8d4" font-size="8">directives</text>
+
+  <!-- ════════ LAYER 4: Security + Memory ════════ -->
+  <rect x="60" y="380" width="360" height="85" rx="10" fill="#1e293b" stroke="url(#secG)" stroke-width="1" filter="url(#sh)"/>
+  <rect x="60" y="380" width="360" height="4" rx="2" fill="url(#secG)"/>
+  <text x="90" y="403" fill="#fca5a5" font-size="11" font-weight="600">SECURITY</text>
+
+  <rect x="80" y="413" width="100" height="22" rx="4" fill="#450a0a" stroke="#ef4444" stroke-width="0.7"/>
+  <text x="130" y="428" text-anchor="middle" fill="#fca5a5" font-size="8">audit (SHA-256)</text>
+
+  <rect x="190" y="413" width="90" height="22" rx="4" fill="#450a0a" stroke="#ef4444" stroke-width="0.7"/>
+  <text x="235" y="428" text-anchor="middle" fill="#fca5a5" font-size="8">scanner</text>
+
+  <rect x="290" y="413" width="70" height="22" rx="4" fill="#450a0a" stroke="#ef4444" stroke-width="0.7"/>
+  <text x="325" y="428" text-anchor="middle" fill="#fca5a5" font-size="8">ACL</text>
+
+  <rect x="80" y="440" width="90" height="20" rx="4" fill="#172554" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="125" y="454" text-anchor="middle" fill="#f9a8d4" font-size="7">safe-regex</text>
+
+  <rect x="180" y="440" width="100" height="20" rx="4" fill="#172554" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="230" y="454" text-anchor="middle" fill="#f9a8d4" font-size="7">url-sanitize</text>
+
+  <rect x="290" y="440" width="80" height="20" rx="4" fill="#450a0a" stroke="#ef4444" stroke-width="0.7"/>
+  <text x="330" y="454" text-anchor="middle" fill="#fca5a5" font-size="7">injection</text>
+
+  <!-- Memory -->
+  <rect x="440" y="380" width="200" height="85" rx="10" fill="#1e293b" stroke="#06b6d4" stroke-width="1" filter="url(#sh)"/>
+  <rect x="440" y="380" width="200" height="4" rx="2" fill="#06b6d4"/>
+  <text x="470" y="403" fill="#67e8f9" font-size="11" font-weight="600">MEMORY</text>
+
+  <rect x="460" y="413" width="80" height="22" rx="4" fill="#083344" stroke="#06b6d4" stroke-width="0.7"/>
+  <text x="500" y="428" text-anchor="middle" fill="#a5f3fc" font-size="8">embeddings</text>
+
+  <rect x="550" y="413" width="70" height="22" rx="4" fill="#083344" stroke="#06b6d4" stroke-width="0.7"/>
+  <text x="585" y="428" text-anchor="middle" fill="#a5f3fc" font-size="8">BM25</text>
+
+  <rect x="460" y="440" width="155" height="20" rx="4" fill="#083344" stroke="#06b6d4" stroke-width="0.7"/>
+  <text x="537" y="454" text-anchor="middle" fill="#a5f3fc" font-size="7">hybrid search (RRF)</text>
+
+  <!-- ════════ LAYER 5: New Crate Highlights ════════ -->
+  <rect x="660" y="380" width="480" height="85" rx="10" fill="#1a1a2e" stroke="url(#newG)" stroke-width="1.5" filter="url(#sh)"/>
+  <rect x="660" y="380" width="480" height="4" rx="2" fill="url(#newG)"/>
+  <text x="690" y="403" fill="#f9a8d4" font-size="11" font-weight="600">NEW CRATES (March 2026)</text>
+
+  <rect x="680" y="413" width="100" height="22" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="730" y="428" text-anchor="middle" fill="#f9a8d4" font-size="8">voice (TTS)</text>
+
+  <rect x="790" y="413" width="80" height="22" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="830" y="428" text-anchor="middle" fill="#f9a8d4" font-size="8">polls (CRDT)</text>
+
+  <rect x="880" y="413" width="100" height="22" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="930" y="428" text-anchor="middle" fill="#f9a8d4" font-size="8">wizard (pairing)</text>
+
+  <rect x="990" y="413" width="130" height="22" rx="4" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="1055" y="428" text-anchor="middle" fill="#f9a8d4" font-size="8">channel-plugins (caps)</text>
+
+  <rect x="680" y="440" width="130" height="20" rx="4" fill="#172554" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="745" y="454" text-anchor="middle" fill="#f9a8d4" font-size="7">browser ext relay</text>
+
+  <rect x="820" y="440" width="130" height="20" rx="4" fill="#172554" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="885" y="454" text-anchor="middle" fill="#f9a8d4" font-size="7">health monitor</text>
+
+  <rect x="960" y="440" width="130" height="20" rx="4" fill="#172554" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="1025" y="454" text-anchor="middle" fill="#f9a8d4" font-size="7">schema migration</text>
+
+  <!-- ════════ LAYER 6: Infrastructure ════════ -->
+  <rect x="60" y="490" width="1080" height="80" rx="10" fill="#1e293b" stroke="url(#infraG)" stroke-width="1" filter="url(#sh)"/>
+  <rect x="60" y="490" width="1080" height="4" rx="2" fill="url(#infraG)"/>
+  <text x="90" y="513" fill="#c4b5fd" font-size="11" font-weight="600">INFRASTRUCTURE &amp; CAPABILITIES</text>
+
+  <rect x="80" y="525" width="80" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="120" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">browser</text>
+
+  <rect x="170" y="525" width="70" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="205" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">media</text>
+
+  <rect x="250" y="525" width="70" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="285" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">cron</text>
+
+  <rect x="330" y="525" width="70" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="365" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">MCP</text>
+
+  <rect x="410" y="525" width="70" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="445" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">runtime</text>
+
+  <rect x="490" y="525" width="70" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="525" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">sandbox</text>
+
+  <rect x="570" y="525" width="70" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="605" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">RAG</text>
+
+  <rect x="650" y="525" width="70" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="685" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">canvas</text>
+
+  <rect x="730" y="525" width="80" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="770" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">consensus</text>
+
+  <rect x="820" y="525" width="70" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="855" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">tunnel</text>
+
+  <rect x="900" y="525" width="80" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="940" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">planner</text>
+
+  <rect x="990" y="525" width="130" height="25" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="0.7"/>
+  <text x="1055" y="542" text-anchor="middle" fill="#c4b5fd" font-size="8">local-models · SIMD</text>
+
+  <!-- ════════ LAYER 7: Core Foundation ════════ -->
+  <rect x="200" y="600" width="800" height="55" rx="10" fill="#1e293b" stroke="#475569" stroke-width="1.5" filter="url(#sh)"/>
+  <rect x="200" y="600" width="800" height="4" rx="2" fill="#475569"/>
+  <text x="600" y="625" text-anchor="middle" fill="#cbd5e1" font-size="12" font-weight="700">Foundation: types · storage (traits) · domain (pure) · SochDB (ACID)</text>
+  <text x="600" y="642" text-anchor="middle" fill="#64748b" font-size="9">Zero-dependency leaf crates — all other crates depend on these</text>
+
+  <!-- ════════ DEPLOYMENT SECTION ════════ -->
+  <rect x="60" y="685" width="1080" height="140" rx="12" fill="#1e293b" stroke="#475569" stroke-width="1" filter="url(#sh)"/>
+  <text x="600" y="712" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="700">Deployment &amp; Installation</text>
+
+  <!-- Docker -->
+  <rect x="90" y="730" width="180" height="75" rx="8" fill="#0f172a" stroke="#3b82f6" stroke-width="0.8"/>
+  <text x="180" y="750" text-anchor="middle" fill="#93c5fd" font-size="10" font-weight="600">Docker</text>
+  <text x="180" y="765" text-anchor="middle" fill="#64748b" font-size="8">Multi-stage build</text>
+  <text x="180" y="778" text-anchor="middle" fill="#64748b" font-size="8">docker-compose: 3 profiles</text>
+  <text x="180" y="791" text-anchor="middle" fill="#64748b" font-size="8">Health: /api/v1/health</text>
+
+  <!-- Local Install -->
+  <rect x="290" y="730" width="180" height="75" rx="8" fill="#0f172a" stroke="#10b981" stroke-width="0.8"/>
+  <text x="380" y="750" text-anchor="middle" fill="#6ee7b7" font-size="10" font-weight="600">Local Install</text>
+  <text x="380" y="765" text-anchor="middle" fill="#64748b" font-size="8">install.sh (macOS/Linux/Win)</text>
+  <text x="380" y="778" text-anchor="middle" fill="#64748b" font-size="8">Arch: amd64, arm64</text>
+  <text x="380" y="791" text-anchor="middle" fill="#64748b" font-size="8">launchd / systemd daemon</text>
+
+  <!-- Cloud Deploy -->
+  <rect x="490" y="730" width="180" height="75" rx="8" fill="#0f172a" stroke="#f59e0b" stroke-width="0.8"/>
+  <text x="580" y="750" text-anchor="middle" fill="#fcd34d" font-size="10" font-weight="600">Cloud Deploy</text>
+  <text x="580" y="765" text-anchor="middle" fill="#64748b" font-size="8">Fly.io (fly.toml)</text>
+  <text x="580" y="778" text-anchor="middle" fill="#64748b" font-size="8">Render (render.yaml)</text>
+  <text x="580" y="791" text-anchor="middle" fill="#64748b" font-size="8">Helm charts (K8s)</text>
+
+  <!-- CI/CD -->
+  <rect x="690" y="730" width="180" height="75" rx="8" fill="#0f172a" stroke="#8b5cf6" stroke-width="0.8"/>
+  <text x="780" y="750" text-anchor="middle" fill="#c4b5fd" font-size="10" font-weight="600">CI/CD</text>
+  <text x="780" y="765" text-anchor="middle" fill="#64748b" font-size="8">GitHub Actions (5 workflows)</text>
+  <text x="780" y="778" text-anchor="middle" fill="#64748b" font-size="8">Multi-platform releases</text>
+  <text x="780" y="791" text-anchor="middle" fill="#64748b" font-size="8">Auto-update (self-update)</text>
+
+  <!-- Desktop -->
+  <rect x="890" y="730" width="230" height="75" rx="8" fill="#0f172a" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="1005" y="750" text-anchor="middle" fill="#f9a8d4" font-size="10" font-weight="600">Desktop App (Tauri 2.0)</text>
+  <text x="1005" y="765" text-anchor="middle" fill="#64748b" font-size="8">macOS (Intel + Apple Silicon)</text>
+  <text x="1005" y="778" text-anchor="middle" fill="#64748b" font-size="8">Linux (deb, rpm, AppImage)</text>
+  <text x="1005" y="791" text-anchor="middle" fill="#64748b" font-size="8">Windows (MSI, NSIS)</text>
+
+  <!-- ════════ DATA FLOW ARROWS ════════ -->
+  <text x="60" y="860" fill="#e2e8f0" font-size="14" font-weight="700">Message Processing Pipeline</text>
+
+  <rect x="60" y="875" width="1080" height="200" rx="12" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+
+  <!-- Pipeline stages as connected boxes -->
+  <rect x="85" y="895" width="100" height="30" rx="5" fill="#1e293b" stroke="#60a5fa" stroke-width="1"/>
+  <text x="135" y="914" text-anchor="middle" fill="#93c5fd" font-size="8">User Input</text>
+
+  <line x1="185" y1="910" x2="210" y2="910" stroke="#60a5fa" stroke-width="1"/>
+  <polygon points="208,906 218,910 208,914" fill="#60a5fa"/>
+
+  <rect x="218" y="895" width="100" height="30" rx="5" fill="#1e293b" stroke="#ef4444" stroke-width="1"/>
+  <text x="268" y="914" text-anchor="middle" fill="#fca5a5" font-size="8">Security Scan</text>
+
+  <line x1="318" y1="910" x2="343" y2="910" stroke="#ef4444" stroke-width="1"/>
+  <polygon points="341,906 351,910 341,914" fill="#ef4444"/>
+
+  <rect x="351" y="895" width="100" height="30" rx="5" fill="#1e293b" stroke="#10b981" stroke-width="1"/>
+  <text x="401" y="914" text-anchor="middle" fill="#6ee7b7" font-size="8">Agent Resolve</text>
+
+  <line x1="451" y1="910" x2="476" y2="910" stroke="#10b981" stroke-width="1"/>
+  <polygon points="474,906 484,910 474,914" fill="#10b981"/>
+
+  <rect x="484" y="895" width="100" height="30" rx="5" fill="#1e293b" stroke="#f59e0b" stroke-width="1"/>
+  <text x="534" y="914" text-anchor="middle" fill="#fcd34d" font-size="8">Provider Route</text>
+
+  <line x1="584" y1="910" x2="609" y2="910" stroke="#f59e0b" stroke-width="1"/>
+  <polygon points="607,906 617,910 607,914" fill="#f59e0b"/>
+
+  <rect x="617" y="895" width="100" height="30" rx="5" fill="#1e293b" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="667" y="914" text-anchor="middle" fill="#c4b5fd" font-size="8">Skill Select</text>
+
+  <line x1="717" y1="910" x2="742" y2="910" stroke="#8b5cf6" stroke-width="1"/>
+  <polygon points="740,906 750,910 740,914" fill="#8b5cf6"/>
+
+  <rect x="750" y="895" width="100" height="30" rx="5" fill="#1e293b" stroke="#06b6d4" stroke-width="1"/>
+  <text x="800" y="914" text-anchor="middle" fill="#67e8f9" font-size="8">Memory Recall</text>
+
+  <line x1="850" y1="910" x2="875" y2="910" stroke="#06b6d4" stroke-width="1"/>
+  <polygon points="873,906 883,910 873,914" fill="#06b6d4"/>
+
+  <rect x="883" y="895" width="100" height="30" rx="5" fill="#1e293b" stroke="#ec4899" stroke-width="1"/>
+  <text x="933" y="914" text-anchor="middle" fill="#f9a8d4" font-size="8">Agent Runner</text>
+
+  <line x1="983" y1="910" x2="1008" y2="910" stroke="#ec4899" stroke-width="1"/>
+  <polygon points="1006,906 1016,910 1006,914" fill="#ec4899"/>
+
+  <rect x="1016" y="895" width="100" height="30" rx="5" fill="#1e293b" stroke="#10b981" stroke-width="1"/>
+  <text x="1066" y="914" text-anchor="middle" fill="#6ee7b7" font-size="8">Stream → UI</text>
+
+  <!-- Tool loop arrow -->
+  <path d="M 933 925 L 933 955 L 400 955 L 400 925" fill="none" stroke="#f59e0b" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="667" y="968" text-anchor="middle" fill="#fbbf24" font-size="8">Tool execution loop (max 25 rounds)</text>
+  <polygon points="398,927 403,937 393,937" fill="#f59e0b"/>
+
+  <!-- New features in pipeline -->
+  <rect x="85" y="985" width="250" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="210" y="1002" text-anchor="middle" fill="#f9a8d4" font-size="8">NEW: /btw bypasses tool loop · directives override model · steering interrupts mid-round</text>
+
+  <rect x="350" y="985" width="270" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="485" y="1002" text-anchor="middle" fill="#f9a8d4" font-size="8">NEW: block streaming coalescer merges text · TTS blocks route to voice crate</text>
+
+  <rect x="635" y="985" width="280" height="25" rx="4" fill="#172554" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="775" y="1002" text-anchor="middle" fill="#f9a8d4" font-size="8">NEW: channel-plugins cap-check · health monitor auto-reconnect · CRDT poll votes</text>
+
+  <!-- Stats footer -->
+  <rect x="85" y="1030" width="1030" height="30" rx="6" fill="#0f172a" stroke="#334155" stroke-width="0.5"/>
+  <text x="600" y="1050" text-anchor="middle" fill="#64748b" font-size="9">
+    51 crates · 8 LLM providers · 25+ channels · 5 deployment targets · Rust 1.75+ · Tauri 2.0 · SochDB ACID · OpenTelemetry
+  </text>
+
+  <!-- Legend -->
+  <text x="60" y="1092" fill="#64748b" font-size="8">
+    ClawDesk Agent2OS — March 2026 · Hexagonal Architecture · Privacy-First · Zero-Trust · Offline-Capable
+  </text>
+  <rect x="750" y="1082" width="12" height="12" rx="3" fill="#172554" stroke="#ec4899" stroke-width="1"/>
+  <text x="768" y="1092" fill="#f9a8d4" font-size="8">= New in March 2026</text>
+</svg>

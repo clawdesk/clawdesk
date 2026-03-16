@@ -25,11 +25,13 @@ pub mod injection;
 pub mod oauth;
 pub mod rotation;
 pub mod sandbox_policy;
+pub mod safe_regex;
 pub mod scanner;
 pub mod secret_ref;
 pub mod skill_verify;
 pub mod tokens;
 pub mod obfuscation;
+pub mod url_sanitize;
 
 pub use acl::AclManager;
 pub use audit::AuditLogger;
@@ -47,4 +49,6 @@ pub use secret_ref::{SecretRef, SecretDetector, resolve_or_passthrough, resolve_
 pub use skill_verify::SkillVerifier;
 pub use oauth::{OAuthFlowManager, AuthProfile, AuthProfileManager, TokenSet, OAuthClientConfig};
 pub use rotation::{ManagedSecret, RotationPolicy, RotationRecord, SecretRotationManager, SecretState};
+pub use safe_regex::{SafeRegexResult, RejectReason, safe_compile, safe_compile_case_insensitive};
 pub use tokens::{AuthError, ScopedToken, ServerSecret, TokenScope};
+pub use url_sanitize::{strip_url_userinfo, sanitize_embedded_urls};

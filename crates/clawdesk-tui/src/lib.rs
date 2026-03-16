@@ -12,6 +12,7 @@
 //! - **Theme**: Configurable color schemes with 4 presets
 
 pub mod app;
+pub mod btw_overlay;
 pub mod chat;
 pub mod event;
 pub mod layout;
@@ -20,6 +21,7 @@ pub mod status;
 pub mod theme;
 
 pub use app::App;
+pub use btw_overlay::BtwInlineMessage;
 pub use chat::ChatView;
 pub use event::{AppEvent, BackendEvent, EventHandler};
 pub use layout::AppLayout;

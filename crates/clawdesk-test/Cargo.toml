@@ -23,6 +23,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 regex = { workspace = true }
 async-trait = { workspace = true }
+proptest = "1"
 
 [dev-dependencies]
 tempfile = "3"

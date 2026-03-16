@@ -15,15 +15,22 @@
 //! - **Format**: Adapt response for target channel constraints
 //! - **Deliver**: Send via channel, track delivery status
 
+pub mod block_stream;
 pub mod chunking;
 pub mod classifier;
+pub mod command_registry;
+pub mod commands;
 pub mod debounce;
+pub mod directive;
 pub mod echo;
 pub mod formatter;
 pub mod pipeline;
 pub mod router;
 
+pub use block_stream::{Block, BlockCoalescer, CoalescedDelivery, TypingHeartbeat};
 pub use classifier::TriggerClassifier;
+pub use command_registry::{CommandRegistry, CommandDef, ParsedCommand, CommandResult, Command, CommandContext};
+pub use directive::{Directives, ThinkLevel, parse_directives, merge_directives};
 pub use echo::{EchoSuppressor, EchoSuppressionConfig, SuppressionReason};
 pub use formatter::ResponseFormatter;
 pub use pipeline::ReplyPipeline;

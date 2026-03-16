@@ -44,6 +44,7 @@ pub mod irc;
 pub mod markdown;
 pub mod mastodon;
 pub mod matrix;
+pub mod plugins;
 pub mod retry_policy;
 pub mod signal;
 pub mod slack;

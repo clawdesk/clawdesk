@@ -17,6 +17,7 @@ futures = { workspace = true }
 tokio-tungstenite = { workspace = true }
 reqwest = { workspace = true }
 dashmap = { workspace = true }
+fastrand = "2"
 
 [dev-dependencies]
 clawdesk-agents = { workspace = true }

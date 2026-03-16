@@ -11,6 +11,7 @@ pub mod anthropic;
 pub mod azure;
 pub mod bedrock;
 pub mod capability;
+pub mod capability_detector;
 pub mod cache;
 pub mod cohere;
 pub mod compatible;
@@ -38,6 +39,7 @@ pub mod tool_recovery;
 pub mod vertex;
 
 pub use negotiator::ProviderNegotiator;
+pub use capability_detector::{CapabilityDetector, CapabilityDetectorConfig, ModelCapabilities, ModelCost, InputModality, normalize_model_id};
 pub use registry::ProviderRegistry;
 pub use cost_router::{CostAwareRouter, CostRouterConfig, CostRoutingDecision, ModelCostProfile, ModelTaskStats, EwmaEstimate, ModelCostSummary, BudgetTracker, BudgetConfig, BudgetAction, BudgetCheck, BudgetLimitKind};
 pub use provider_spec::{ProviderSpec, ProviderSpecError};

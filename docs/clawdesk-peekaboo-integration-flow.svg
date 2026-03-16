@@ -1,0 +1,282 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1050" font-family="Inter, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="card2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#334155"/>
+    </linearGradient>
+    <linearGradient id="clawdeskGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+    <linearGradient id="peekabooGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+    <linearGradient id="macosGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ec4899"/>
+      <stop offset="100%" stop-color="#f472b6"/>
+    </linearGradient>
+    <linearGradient id="greenG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+    <linearGradient id="cyanG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="purpleG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+    <filter id="glow2">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow2">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+    <marker id="aBlue" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="10" markerHeight="7" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#60a5fa"/>
+    </marker>
+    <marker id="aIndigo" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="10" markerHeight="7" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#818cf8"/>
+    </marker>
+    <marker id="aGreen" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="10" markerHeight="7" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/>
+    </marker>
+    <marker id="aOrange" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="10" markerHeight="7" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24"/>
+    </marker>
+    <marker id="aPink" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="10" markerHeight="7" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f472b6"/>
+    </marker>
+    <marker id="aCyan" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="10" markerHeight="7" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/>
+    </marker>
+    <marker id="aPurple" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="10" markerHeight="7" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa"/>
+    </marker>
+    <marker id="aRed" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="10" markerHeight="7" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f87171"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="1050" fill="url(#bg2)" rx="16"/>
+
+  <!-- Title -->
+  <text x="600" y="40" text-anchor="middle" fill="#e2e8f0" font-size="22" font-weight="700" letter-spacing="1">
+    ClawDesk + Peekaboo — macOS Desktop Automation Integration
+  </text>
+  <text x="600" y="62" text-anchor="middle" fill="#94a3b8" font-size="12">
+    Peekaboo provides native macOS screen capture + UI automation as tools for ClawDesk agents
+  </text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- LAYER 1: User -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="420" y="80" width="360" height="55" rx="12" fill="url(#card2)" stroke="#60a5fa" stroke-width="1.5" filter="url(#shadow2)"/>
+  <text x="600" y="105" text-anchor="middle" fill="#93c5fd" font-size="12" font-weight="600">👤 User Request</text>
+  <text x="600" y="122" text-anchor="middle" fill="#94a3b8" font-size="10">"Take a screenshot of Safari and find the login button"</text>
+
+  <line x1="600" y1="135" x2="600" y2="165" stroke="#60a5fa" stroke-width="2" marker-end="url(#aBlue)"/>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- LAYER 2: ClawDesk Frontend -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="300" y="165" width="600" height="55" rx="12" fill="url(#card2)" stroke="url(#clawdeskGrad)" stroke-width="2" filter="url(#shadow2)"/>
+  <rect x="300" y="165" width="600" height="5" rx="3" fill="url(#clawdeskGrad)"/>
+  <text x="600" y="193" text-anchor="middle" fill="#93c5fd" font-size="14" font-weight="700">ClawDesk Frontend</text>
+  <text x="600" y="210" text-anchor="middle" fill="#94a3b8" font-size="10">Tauri Desktop  ·  CLI  ·  TUI  ·  HTTP Gateway  ·  React UI</text>
+
+  <line x1="600" y1="220" x2="600" y2="255" stroke="#818cf8" stroke-width="2" marker-end="url(#aIndigo)"/>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- LAYER 3: AgentRunner -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="200" y="255" width="800" height="80" rx="14" fill="url(#card2)" stroke="#6366f1" stroke-width="2" filter="url(#shadow2)"/>
+  <rect x="200" y="255" width="800" height="5" rx="3" fill="url(#clawdeskGrad)"/>
+
+  <text x="600" y="282" text-anchor="middle" fill="#c7d2fe" font-size="14" font-weight="700">ClawDesk AgentRunner — 7-Stage Pipeline</text>
+
+  <!-- Pipeline stages -->
+  <rect x="218" y="295" width="90" height="28" rx="5" fill="#1e1b4b" stroke="#4f46e5" stroke-width="0.8"/>
+  <text x="263" y="313" text-anchor="middle" fill="#a5b4fc" font-size="8">1. Hooks</text>
+
+  <rect x="318" y="295" width="90" height="28" rx="5" fill="#1e1b4b" stroke="#4f46e5" stroke-width="0.8"/>
+  <text x="363" y="313" text-anchor="middle" fill="#a5b4fc" font-size="8">2. Sanitize</text>
+
+  <rect x="418" y="295" width="90" height="28" rx="5" fill="#1e1b4b" stroke="#4f46e5" stroke-width="0.8"/>
+  <text x="463" y="313" text-anchor="middle" fill="#a5b4fc" font-size="8">3. Bootstrap</text>
+
+  <rect x="518" y="295" width="90" height="28" rx="5" fill="#1e1b4b" stroke="#4f46e5" stroke-width="0.8"/>
+  <text x="563" y="313" text-anchor="middle" fill="#a5b4fc" font-size="8">4. Skills</text>
+
+  <rect x="618" y="295" width="130" height="28" rx="5" fill="#312e81" stroke="#6366f1" stroke-width="1.2"/>
+  <text x="683" y="313" text-anchor="middle" fill="#e0e7ff" font-size="9" font-weight="600">5. LLM Execute Loop</text>
+
+  <rect x="758" y="295" width="100" height="28" rx="5" fill="#1e1b4b" stroke="#4f46e5" stroke-width="0.8"/>
+  <text x="808" y="313" text-anchor="middle" fill="#a5b4fc" font-size="8">6. Tool Dispatch</text>
+
+  <rect x="868" y="295" width="115" height="28" rx="5" fill="#1e1b4b" stroke="#4f46e5" stroke-width="0.8"/>
+  <text x="925" y="313" text-anchor="middle" fill="#a5b4fc" font-size="8">7. Response Chunk</text>
+
+  <!-- Arrow from Execute Loop to Tool Dispatch -->
+  <!-- Arrow from Tool Dispatch down to tools -->
+  <line x1="808" y1="335" x2="808" y2="370" stroke="#818cf8" stroke-width="2" marker-end="url(#aIndigo)"/>
+  <text x="830" y="358" fill="#818cf8" font-size="9">tool_use</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- LAYER 4: Tool Registry -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="170" y="370" width="860" height="55" rx="12" fill="url(#card2)" stroke="#10b981" stroke-width="1.5" filter="url(#shadow2)"/>
+  <rect x="170" y="370" width="860" height="4" rx="3" fill="url(#greenG)"/>
+  <text x="600" y="395" text-anchor="middle" fill="#6ee7b7" font-size="13" font-weight="700">🔧 ClawDesk Tool Registry</text>
+  <text x="600" y="412" text-anchor="middle" fill="#94a3b8" font-size="10">shell_exec · file_read · file_write · http_request · browser_* · memory_* · canvas_* · media_* · peekaboo_*</text>
+
+  <!-- Arrows from registry to tool groups -->
+  <line x1="330" y1="425" x2="230" y2="470" stroke="#34d399" stroke-width="1.5" marker-end="url(#aGreen)"/>
+  <line x1="550" y1="425" x2="550" y2="470" stroke="#34d399" stroke-width="1.5" marker-end="url(#aGreen)"/>
+  <line x1="850" y1="425" x2="920" y2="470" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#aOrange)"/>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- LAYER 5: Tool Groups (3 columns) -->
+  <!-- ═══════════════════════════════════════════════════ -->
+
+  <!-- Column 1: Existing tools -->
+  <rect x="100" y="470" width="280" height="100" rx="12" fill="url(#card2)" stroke="#475569" stroke-width="1" filter="url(#shadow2)"/>
+  <text x="240" y="495" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">Existing Tools</text>
+  <text x="240" y="512" text-anchor="middle" fill="#64748b" font-size="9">shell_exec · file_read/write</text>
+  <text x="240" y="526" text-anchor="middle" fill="#64748b" font-size="9">http_request · memory_store</text>
+  <text x="240" y="540" text-anchor="middle" fill="#64748b" font-size="9">browser_navigate · browser_click</text>
+  <text x="240" y="554" text-anchor="middle" fill="#64748b" font-size="9">media_transcribe · canvas_render</text>
+
+  <!-- Column 2: Browser Tools (existing) -->
+  <rect x="410" y="470" width="280" height="100" rx="12" fill="url(#card2)" stroke="#06b6d4" stroke-width="1" filter="url(#shadow2)"/>
+  <text x="550" y="495" text-anchor="middle" fill="#67e8f9" font-size="11" font-weight="600">🌐 Browser Automation (CDP)</text>
+  <text x="550" y="512" text-anchor="middle" fill="#64748b" font-size="9">Chrome DevTools Protocol</text>
+  <text x="550" y="526" text-anchor="middle" fill="#64748b" font-size="9">DOM snapshot · ARIA tree · Screenshots</text>
+  <text x="550" y="540" text-anchor="middle" fill="#64748b" font-size="9">Click · Type · Navigate · Multi-tab</text>
+  <text x="550" y="554" text-anchor="middle" fill="#64748b" font-size="9">In-browser only — cannot see desktop</text>
+
+  <!-- Column 3: NEW Peekaboo Tools -->
+  <rect x="720" y="470" width="360" height="100" rx="12" fill="#1a1a2e" stroke="url(#peekabooGrad)" stroke-width="2" filter="url(#shadow2)"/>
+  <rect x="720" y="470" width="360" height="5" rx="3" fill="url(#peekabooGrad)"/>
+  <text x="900" y="497" text-anchor="middle" fill="#fcd34d" font-size="12" font-weight="700">🔭 NEW: Peekaboo macOS Tools</text>
+  <text x="900" y="514" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="600">via MCP stdio / Rust native wrapper</text>
+  <text x="900" y="530" text-anchor="middle" fill="#e2e8f0" font-size="9">peekaboo_screenshot — capture screen/window/area</text>
+  <text x="900" y="544" text-anchor="middle" fill="#e2e8f0" font-size="9">peekaboo_see — detect UI elements + JSON map</text>
+  <text x="900" y="558" text-anchor="middle" fill="#e2e8f0" font-size="9">peekaboo_click · peekaboo_type · peekaboo_scroll</text>
+
+  <!-- NEW badge -->
+  <rect x="1040" y="474" width="32" height="16" rx="8" fill="#ef4444"/>
+  <text x="1056" y="486" text-anchor="middle" fill="#fff" font-size="8" font-weight="700">NEW</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- Integration Bridge: MCP Connection -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <line x1="900" y1="570" x2="900" y2="610" stroke="#fbbf24" stroke-width="2" marker-end="url(#aOrange)"/>
+
+  <rect x="740" y="610" width="320" height="55" rx="12" fill="url(#card2)" stroke="#f59e0b" stroke-width="1.5" filter="url(#shadow2)"/>
+  <rect x="740" y="610" width="320" height="4" rx="3" fill="url(#peekabooGrad)"/>
+  <text x="900" y="635" text-anchor="middle" fill="#fcd34d" font-size="12" font-weight="700">🔌 MCP Client ↔ Peekaboo MCP Server</text>
+  <text x="900" y="652" text-anchor="middle" fill="#94a3b8" font-size="10">stdio transport · JSON-RPC 2.0 · tool discovery</text>
+
+  <!-- Arrow from MCP to Peekaboo core -->
+  <line x1="900" y1="665" x2="900" y2="700" stroke="#fbbf24" stroke-width="2" marker-end="url(#aOrange)"/>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- LAYER 6: Peekaboo Core (inside macOS) -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="60" y="700" width="1080" height="90" rx="14" fill="#1a1a2e" stroke="url(#peekabooGrad)" stroke-width="1.5" filter="url(#shadow2)"/>
+  <rect x="60" y="700" width="1080" height="5" rx="3" fill="url(#peekabooGrad)"/>
+  <text x="600" y="725" text-anchor="middle" fill="#fcd34d" font-size="14" font-weight="700">🔭 Peekaboo Services  @MainActor  (macOS native · Swift)</text>
+
+  <!-- Peekaboo sub-services -->
+  <rect x="80" y="738" width="155" height="38" rx="7" fill="#0f172a" stroke="#b45309" stroke-width="0.8"/>
+  <text x="157" y="755" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="600">📸 ScreenCapture</text>
+  <text x="157" y="768" text-anchor="middle" fill="#64748b" font-size="8">SCKit + CGWindowList</text>
+
+  <rect x="250" y="738" width="155" height="38" rx="7" fill="#0f172a" stroke="#b45309" stroke-width="0.8"/>
+  <text x="327" y="755" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="600">🤖 UIAutomation</text>
+  <text x="327" y="768" text-anchor="middle" fill="#64748b" font-size="8">see · click · type · scroll</text>
+
+  <rect x="420" y="738" width="140" height="38" rx="7" fill="#0f172a" stroke="#b45309" stroke-width="0.8"/>
+  <text x="490" y="755" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="600">🗂 Snapshots</text>
+  <text x="490" y="768" text-anchor="middle" fill="#64748b" font-size="8">element ID ↔ bounds cache</text>
+
+  <rect x="575" y="738" width="155" height="38" rx="7" fill="#0f172a" stroke="#b45309" stroke-width="0.8"/>
+  <text x="652" y="755" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="600">🪟 Window/App/Menu</text>
+  <text x="652" y="768" text-anchor="middle" fill="#64748b" font-size="8">focus · dock · dialog · menubar</text>
+
+  <rect x="745" y="738" width="140" height="38" rx="7" fill="#0f172a" stroke="#b45309" stroke-width="0.8"/>
+  <text x="815" y="755" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="600">🔑 Permissions</text>
+  <text x="815" y="768" text-anchor="middle" fill="#64748b" font-size="8">Screen Record + AX</text>
+
+  <rect x="900" y="738" width="225" height="38" rx="7" fill="#0f172a" stroke="#b45309" stroke-width="0.8"/>
+  <text x="1012" y="755" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="600">🧪 OCR Fallback + Retina</text>
+  <text x="1012" y="768" text-anchor="middle" fill="#64748b" font-size="8">2x capture · non-AX element detection</text>
+
+  <!-- Arrow to macOS -->
+  <line x1="600" y1="790" x2="600" y2="820" stroke="#f472b6" stroke-width="2" marker-end="url(#aPink)"/>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- LAYER 7: macOS APIs -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="60" y="820" width="1080" height="50" rx="12" fill="#1a1a2e" stroke="#ec4899" stroke-width="1.5" filter="url(#shadow2)"/>
+  <rect x="60" y="820" width="1080" height="4" rx="3" fill="url(#macosGrad)"/>
+  <text x="600" y="845" text-anchor="middle" fill="#f9a8d4" font-size="13" font-weight="700"> macOS Sequoia — Native APIs</text>
+  <text x="600" y="860" text-anchor="middle" fill="#94a3b8" font-size="10">Accessibility (AX)  ·  ScreenCaptureKit  ·  CGWindowList  ·  CGEvent  ·  NSWorkspace  ·  AppKit  ·  IOKit</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- Return path: response flows back up -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- Left side return arrow -->
+  <path d="M 100 800 L 100 870 L 60 870 L 60 400 L 100 400"
+        fill="none" stroke="#34d399" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#aGreen)"/>
+  <text x="40" y="640" fill="#34d399" font-size="9" transform="rotate(-90, 40, 640)">
+    JSON result + screenshot data flows back
+  </text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- LLM Provider (connected to AgentRunner) -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="60" y="280" width="120" height="45" rx="8" fill="url(#card2)" stroke="#8b5cf6" stroke-width="1" filter="url(#shadow2)"/>
+  <text x="120" y="302" text-anchor="middle" fill="#c4b5fd" font-size="10" font-weight="600">🧠 LLM Provider</text>
+  <text x="120" y="316" text-anchor="middle" fill="#64748b" font-size="8">Claude · GPT · Gemini</text>
+  <line x1="180" y1="302" x2="200" y2="302" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#aPurple)"/>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- Annotations: What Peekaboo adds -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="60" y="910" width="1080" height="120" rx="14" fill="url(#card2)" stroke="#475569" stroke-width="1" filter="url(#shadow2)"/>
+  <text x="600" y="937" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="700">What Peekaboo Adds to ClawDesk on macOS</text>
+
+  <!-- 4 benefit boxes -->
+  <rect x="85" y="950" width="230" height="60" rx="8" fill="#0f172a" stroke="#f59e0b" stroke-width="0.8"/>
+  <text x="200" y="970" text-anchor="middle" fill="#fcd34d" font-size="10" font-weight="600">🖥  Full Desktop Vision</text>
+  <text x="200" y="985" text-anchor="middle" fill="#94a3b8" font-size="8.5">See ANY app — not just Chrome.</text>
+  <text x="200" y="998" text-anchor="middle" fill="#94a3b8" font-size="8.5">Native apps, Finder, Settings, Xcode...</text>
+
+  <rect x="340" y="950" width="230" height="60" rx="8" fill="#0f172a" stroke="#10b981" stroke-width="0.8"/>
+  <text x="455" y="970" text-anchor="middle" fill="#6ee7b7" font-size="10" font-weight="600">🎯  Pixel-Perfect Automation</text>
+  <text x="455" y="985" text-anchor="middle" fill="#94a3b8" font-size="8.5">Click, type, scroll on any macOS UI</text>
+  <text x="455" y="998" text-anchor="middle" fill="#94a3b8" font-size="8.5">via Accessibility API + CGEvent</text>
+
+  <rect x="595" y="950" width="230" height="60" rx="8" fill="#0f172a" stroke="#6366f1" stroke-width="0.8"/>
+  <text x="710" y="970" text-anchor="middle" fill="#a5b4fc" font-size="10" font-weight="600">🗺  Element-Level UI Maps</text>
+  <text x="710" y="985" text-anchor="middle" fill="#94a3b8" font-size="8.5">JSON with elem IDs, roles, bounds</text>
+  <text x="710" y="998" text-anchor="middle" fill="#94a3b8" font-size="8.5">Agents reason about UI structure</text>
+
+  <rect x="850" y="950" width="265" height="60" rx="8" fill="#0f172a" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="982" y="970" text-anchor="middle" fill="#f9a8d4" font-size="10" font-weight="600">🔒  Permissions-Aware</text>
+  <text x="982" y="985" text-anchor="middle" fill="#94a3b8" font-size="8.5">Checks Screen Recording + Accessibility</text>
+  <text x="982" y="998" text-anchor="middle" fill="#94a3b8" font-size="8.5">Graceful fallback with OCR when AX unavailable</text>
+
+  <!-- Legend -->
+  <text x="60" y="1045" fill="#64748b" font-size="9">ClawDesk Agent2OS + Peekaboo v3.0 — Tauri 2.0 · Rust · Swift 6.2 · macOS 15.0+ · MCP stdio · Hexagonal Architecture</text>
+</svg>
