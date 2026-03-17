@@ -96,7 +96,7 @@ pub struct UpdateConfig {
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            repo: "user/clawdesk".to_string(),
+            repo: "clawdesk/clawdesk".to_string(),
             current_version: env!("CARGO_PKG_VERSION").to_string(),
             allow_prerelease: false,
             timeout: std::time::Duration::from_secs(60),

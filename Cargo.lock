@@ -1185,7 +1185,7 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
 name = "clawdesk-acp"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-adapters"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-agent-config"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "clawdesk-types",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-agents"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "aho-corasick",
  "async-trait",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-autoreply"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-bench"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "clawdesk-memory",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-browser"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "clawdesk-agents",
  "clawdesk-skills",
@@ -1324,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-bus"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-canvas"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-channel"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-channel-plugins"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "clawdesk-channel",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-channels"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1422,7 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-cli"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-cron"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-daemon"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-discovery"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "clawdesk-acp",
@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-domain"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "clawdesk-types",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-extensions"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-gateway"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -1644,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-infra"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-local-models"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-mcp"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-media"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-memory"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1747,7 +1747,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-migrate"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "clawdesk-types",
@@ -1765,7 +1765,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-observability"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-planner"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1802,7 +1802,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-plugin"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1816,7 +1816,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-polls"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "clawdesk-types",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-providers"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1853,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-rag"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1871,7 +1871,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-runtime"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1894,7 +1894,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-sandbox"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1914,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-security"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "aho-corasick",
  "async-trait",
@@ -1943,14 +1943,14 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-simd"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "rand 0.8.5",
 ]
 
 [[package]]
 name = "clawdesk-skills"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-sochdb"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1996,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-storage"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2008,7 +2008,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-tauri"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "aho-corasick",
  "async-trait",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-telemetry"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-test"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2111,7 +2111,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-threads"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -2129,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-tui"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "clawdesk-types",
@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-tunnel"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2159,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-types"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "aho-corasick",
  "chrono",
@@ -2172,7 +2172,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-voice"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2189,7 +2189,7 @@ dependencies = [
 
 [[package]]
 name = "clawdesk-wizard"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "clawdesk-types",

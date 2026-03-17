@@ -342,7 +342,8 @@ pub async fn send_message(
         state.cancel.clone(),
     )
     .without_sandbox()
-    .with_hook_manager(std::sync::Arc::clone(&state.hook_manager));
+    .with_hook_manager(std::sync::Arc::clone(&state.hook_manager))
+    .with_session_context(session_id.clone(), agent_id.clone());
 
     if let Some(sp) = skill_provider {
         builder = builder.with_skill_provider(sp);

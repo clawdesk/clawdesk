@@ -99,7 +99,7 @@ detect_platform() {
 # ---- Version Resolution ------------------------------------------------------
 
 resolve_version() {
-    if [ -n "$CLAWDESK_VERSION" ]; then
+    if [ -n "${CLAWDESK_VERSION:-}" ]; then
         VERSION="$CLAWDESK_VERSION"
         info "Using pinned version: ${BOLD}${VERSION}${RESET}"
         return
@@ -186,7 +186,7 @@ download_binary() {
 
 install_binary() {
     # Determine install location.
-    if [ -n "$CLAWDESK_INSTALL" ]; then
+    if [ -n "${CLAWDESK_INSTALL:-}" ]; then
         INSTALL_DIR="$CLAWDESK_INSTALL"
     elif [ -w "/usr/local/bin" ]; then
         INSTALL_DIR="/usr/local/bin"
@@ -214,7 +214,7 @@ install_binary() {
 
     # Ensure it's in PATH.
     if ! echo "$PATH" | tr ':' '\n' | grep -q "^${INSTALL_DIR}$"; then
-        if [ -z "$CLAWDESK_NO_MODIFY_PATH" ]; then
+        if [ -z "${CLAWDESK_NO_MODIFY_PATH:-}" ]; then
             add_to_path "$INSTALL_DIR"
         else
             warn "${INSTALL_DIR} is not in PATH — add it manually"
@@ -229,9 +229,9 @@ add_to_path() {
     local profile=""
 
     # Detect shell profile.
-    if [ -n "$ZSH_VERSION" ] || [ -f "$HOME/.zshrc" ]; then
+    if [ -n "${ZSH_VERSION:-}" ] || [ -f "$HOME/.zshrc" ]; then
         profile="$HOME/.zshrc"
-    elif [ -n "$BASH_VERSION" ] || [ -f "$HOME/.bashrc" ]; then
+    elif [ -n "${BASH_VERSION:-}" ] || [ -f "$HOME/.bashrc" ]; then
         profile="$HOME/.bashrc"
     elif [ -f "$HOME/.profile" ]; then
         profile="$HOME/.profile"
@@ -253,12 +253,12 @@ add_to_path() {
 
 install_completions() {
     if command -v "$BINARY_NAME" > /dev/null 2>&1; then
-        if [ -n "$ZSH_VERSION" ] || [ -f "$HOME/.zshrc" ]; then
+        if [ -n "${ZSH_VERSION:-}" ] || [ -f "$HOME/.zshrc" ]; then
             local comp_dir="${HOME}/.zfunc"
             mkdir -p "$comp_dir"
             "$BINARY_NAME" completions zsh > "${comp_dir}/_clawdesk" 2>/dev/null && \
                 success "Installed zsh completions" || true
-        elif [ -n "$BASH_VERSION" ] || [ -f "$HOME/.bashrc" ]; then
+        elif [ -n "${BASH_VERSION:-}" ] || [ -f "$HOME/.bashrc" ]; then
             local comp_dir="${HOME}/.local/share/bash-completion/completions"
             mkdir -p "$comp_dir"
             "$BINARY_NAME" completions bash > "${comp_dir}/clawdesk" 2>/dev/null && \
@@ -277,7 +277,7 @@ install_completions() {
 # ---- Daemon Registration -----------------------------------------------------
 
 install_daemon() {
-    if [ -n "$CLAWDESK_NO_DAEMON" ]; then
+    if [ -n "${CLAWDESK_NO_DAEMON:-}" ]; then
         info "Skipping daemon installation (CLAWDESK_NO_DAEMON set)"
         return
     fi
