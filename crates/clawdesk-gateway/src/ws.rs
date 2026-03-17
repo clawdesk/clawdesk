@@ -326,6 +326,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<GatewayState>) {
                             temperature: None,
                             tools: vec![],
                             stream: true,
+                            images: vec![],
                         };
 
                         let (chunk_tx, mut chunk_rx) =

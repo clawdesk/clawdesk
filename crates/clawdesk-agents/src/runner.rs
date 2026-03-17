@@ -701,6 +701,7 @@ impl AgentRunnerBuilder<SandboxConfigured> {
             turn_counter: std::sync::atomic::AtomicU32::new(0),
             memory_recall_fn: self.memory_recall_fn,
             approval_session_cache: Arc::new(dashmap::DashMap::new()),
+            images: Vec::new(),
         }
     }
 }
@@ -762,6 +763,10 @@ pub struct AgentRunner {
     /// Uses `DashMap` for O(1) per-shard locking — zero reader contention
     /// under concurrent tool execution (P0 recommendation).
     approval_session_cache: Arc<dashmap::DashMap<String, ApprovalDecision>>,
+    /// Images attached to the current user message for multimodal input.
+    /// Passed through to `ProviderRequest.images` so vision-capable models
+    /// receive native image content blocks.
+    images: Vec<clawdesk_providers::ImageContent>,
 }
 
 impl AgentRunner {
@@ -794,6 +799,7 @@ impl AgentRunner {
             turn_counter: std::sync::atomic::AtomicU32::new(0),
             memory_recall_fn: None,
             approval_session_cache: Arc::new(dashmap::DashMap::new()),
+            images: Vec::new(),
         }
     }
 
@@ -893,6 +899,13 @@ impl AgentRunner {
     /// the engine-level recall.
     pub fn with_memory_recall(mut self, recall_fn: MemoryRecallFn) -> Self {
         self.memory_recall_fn = Some(recall_fn);
+        self
+    }
+
+    /// Attach images for multimodal input on the current user turn.
+    /// The images are included as native content blocks in the provider request.
+    pub fn with_images(mut self, images: Vec<clawdesk_providers::ImageContent>) -> Self {
+        self.images = images;
         self
     }
 
@@ -1388,6 +1401,7 @@ impl AgentRunner {
             temperature: None,
             tools: tool_defs,
             stream: true,
+            images: self.images.clone(),
         };
 
         let mut loop_state = LoopState {
@@ -2238,6 +2252,7 @@ impl AgentRunner {
             temperature: Some(0.2),
             tools: vec![],
             stream: false,
+            images: vec![],
         };
         match self.provider.complete(&req).await {
             Ok(resp) => {

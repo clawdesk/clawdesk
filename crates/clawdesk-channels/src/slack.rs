@@ -94,13 +94,41 @@ impl SlackChannel {
             thread_ts: event.thread_ts.clone(),
         };
 
+        // Extract media attachments from Slack file objects
+        let media: Vec<clawdesk_types::message::MediaAttachment> = event
+            .files
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|f| {
+                let mime = f.mimetype.as_deref().unwrap_or("application/octet-stream");
+                let media_type = if mime.starts_with("image/") {
+                    clawdesk_types::message::MediaType::Image
+                } else if mime.starts_with("audio/") {
+                    clawdesk_types::message::MediaType::Audio
+                } else if mime.starts_with("video/") {
+                    clawdesk_types::message::MediaType::Video
+                } else {
+                    clawdesk_types::message::MediaType::Document
+                };
+                Some(clawdesk_types::message::MediaAttachment {
+                    media_type,
+                    url: f.url_private_download.clone(),
+                    data: None,
+                    mime_type: mime.to_string(),
+                    filename: f.name.clone(),
+                    size_bytes: f.size,
+                })
+            })
+            .collect();
+
         Some(NormalizedMessage {
             id: uuid::Uuid::new_v4(),
             session_key,
             body: text.clone(),
             body_for_agent: None,
             sender,
-            media: vec![],
+            media,
             artifact_refs: vec![],
             reply_context: None,
             origin,
@@ -449,4 +477,22 @@ struct SlackMessageEvent {
     thread_ts: Option<String>,
     team: Option<String>,
     bot_id: Option<String>,
+    /// File attachments shared in the message.
+    #[serde(default)]
+    files: Option<Vec<SlackFile>>,
+}
+
+/// A Slack file attachment (image, document, etc.).
+#[derive(Debug, Deserialize)]
+struct SlackFile {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    mimetype: Option<String>,
+    #[serde(default)]
+    url_private_download: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
 }

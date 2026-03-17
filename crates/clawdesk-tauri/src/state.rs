@@ -1695,6 +1695,7 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
         let available_ch_names: Vec<String> = app_state.channel_registry.read()
             .map(|reg| reg.list().iter().map(|id| format!("{}", id).to_lowercase()).collect())
             .unwrap_or_default();
+        let session_scope = format!("{channel_id}:{}", msg.sender.id);
         let pipeline_result = crate::engine::build_prompt_pipeline(
             crate::engine::PromptPipelineInput {
                 user_content: &msg.body,
@@ -1705,6 +1706,7 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
                 channel_description: &channel_desc,
                 budget: clawdesk_domain::prompt_builder::PromptBudget::default(),
                 available_channels: available_ch_names,
+                session_id: Some(&session_scope),
             },
             &app_state.memory,
             &active_skills,
@@ -1860,6 +1862,58 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
                 }
             };
             runner = runner.with_channel_context(ch_ctx);
+        }
+
+        // Extract images from channel attachments for native multimodal.
+        // Discord, Telegram, etc. may include downloaded image bytes in
+        // msg.media. Convert them to ImageContent for provider-level vision.
+        {
+            let mut channel_images: Vec<clawdesk_providers::ImageContent> = Vec::new();
+            let mut extra_context: Vec<String> = Vec::new();
+            for attachment in &msg.media {
+                match attachment.media_type {
+                    clawdesk_types::message::MediaType::Image => {
+                        if let Some(ref bytes) = attachment.data {
+                            use base64::Engine;
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                            channel_images.push(clawdesk_providers::ImageContent {
+                                data: b64,
+                                mime_type: attachment.mime_type.clone(),
+                            });
+                        }
+                    }
+                    clawdesk_types::message::MediaType::Audio
+                    | clawdesk_types::message::MediaType::Voice => {
+                        let label = attachment.filename.as_deref().unwrap_or("audio");
+                        extra_context.push(format!(
+                            "[Attached audio: {} ({})]",
+                            label, attachment.mime_type
+                        ));
+                    }
+                    clawdesk_types::message::MediaType::Document => {
+                        let label = attachment.filename.as_deref().unwrap_or("document");
+                        extra_context.push(format!(
+                            "[Attached document: {} ({})]",
+                            label, attachment.mime_type
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            if !channel_images.is_empty() {
+                runner = runner.with_images(channel_images);
+            }
+            if !extra_context.is_empty() {
+                let ctx = extra_context.join("\n");
+                let insert_pos = history.len().saturating_sub(1);
+                history.insert(
+                    insert_pos,
+                    clawdesk_providers::ChatMessage::new(
+                        clawdesk_providers::MessageRole::System,
+                        ctx,
+                    ),
+                );
+            }
         }
 
         // 4. Run the agent with a timeout to prevent indefinite hangs.

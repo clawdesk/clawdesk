@@ -113,6 +113,9 @@ struct OllamaChatMessage {
     /// Ollama needs this to associate tool results with the original calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OllamaToolCall>>,
+    /// Base64-encoded images for multimodal models (e.g. llava).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -297,11 +300,17 @@ fn convert_messages(
             role: "system".into(),
             content: system.clone(),
             tool_calls: None,
+            images: None,
         });
     }
 
     let messages = &request.messages;
     let len = messages.len();
+
+    // Find the last user message index for image injection.
+    let last_user_idx = messages
+        .iter()
+        .rposition(|m| m.role == MessageRole::User);
 
     for (i, m) in messages.iter().enumerate() {
         match m.role {
@@ -321,6 +330,7 @@ fn convert_messages(
                     role: "tool".into(),
                     content,
                     tool_calls: None,
+                    images: None,
                 });
             }
             MessageRole::Assistant => {
@@ -357,13 +367,21 @@ fn convert_messages(
                     role: "assistant".into(),
                     content: m.content.to_string(),
                     tool_calls: tool_calls_for_msg,
+                    images: None,
                 });
             }
             _ => {
+                // Inject images on the last user message for multimodal models (llava, etc.)
+                let images = if Some(i) == last_user_idx && !request.images.is_empty() {
+                    Some(request.images.iter().map(|img| img.data.clone()).collect())
+                } else {
+                    None
+                };
                 msgs.push(OllamaChatMessage {
                     role: m.role.as_str().to_string(),
                     content: m.content.to_string(),
                     tool_calls: None,
+                    images,
                 });
             }
         }

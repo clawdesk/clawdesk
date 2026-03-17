@@ -481,6 +481,7 @@ mod tests {
             temperature: Some(0.7),
             tools: vec![],
             stream: false,
+            images: vec![],
         };
         let body = BedrockProvider::build_converse_body(&request);
         assert!(body.get("messages").is_some());

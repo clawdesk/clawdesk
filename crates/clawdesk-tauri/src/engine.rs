@@ -90,6 +90,10 @@ pub(crate) struct PromptPipelineInput<'a> {
     pub budget: PromptBudget,
     /// Actually-connected channel names from ChannelRegistry (e.g. ["telegram", "discord", "webchat"]).
     pub available_channels: Vec<String>,
+    /// Optional chat/session ID for temporal memory expansion.
+    /// When set, memory recall uses geodesic concentric search:
+    /// session-local → cross-session → global corpus.
+    pub session_id: Option<&'a str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +102,9 @@ pub(crate) struct PromptPipelineInput<'a> {
 
 /// Recall relevant memories for the given query.
 ///
+/// Uses temporal expansion: searches the current session first, then expands
+/// outward to cross-session memories, then global corpus (geodesic rings).
+///
 /// Returns `Vec<MemoryFragment>` ready for `PromptBuilder::memory()`.
 /// On failure, logs a warning and returns an empty vec (never blocks the pipeline).
 pub(crate) async fn recall_memories(
@@ -105,7 +112,26 @@ pub(crate) async fn recall_memories(
     query: &str,
     max_results: usize,
 ) -> Vec<MemoryFragment> {
-    match memory.recall(query, Some(max_results)).await {
+    recall_memories_scoped(memory, query, max_results, None).await
+}
+
+/// Recall memories with optional session scope for temporal expansion.
+///
+/// When `session_id` is provided, uses the geodesic concentric search pattern:
+/// Ring 0 (current session) → Ring 1 (cross-session) → Ring 2 (global corpus).
+/// Closer rings receive higher relevance boosts.
+pub(crate) async fn recall_memories_scoped(
+    memory: &MemoryManager<SochMemoryBackend>,
+    query: &str,
+    max_results: usize,
+    session_id: Option<&str>,
+) -> Vec<MemoryFragment> {
+    let recall_result = if session_id.is_some() {
+        memory.recall_with_scope(query, Some(max_results), session_id).await
+    } else {
+        memory.recall(query, Some(max_results)).await
+    };
+    match recall_result {
         Ok(results) => {
             let raw_count = results.len();
             let fragments: Vec<MemoryFragment> = results
@@ -245,8 +271,8 @@ pub(crate) async fn build_prompt_pipeline(
     memory: &MemoryManager<SochMemoryBackend>,
     active_skills: &[Arc<clawdesk_skills::Skill>],
 ) -> PromptPipelineResult {
-    // Step 1: Memory recall
-    let memory_fragments = recall_memories(memory, input.user_content, 10).await;
+    // Step 1: Memory recall (with temporal expansion when session_id is available)
+    let memory_fragments = recall_memories_scoped(memory, input.user_content, 10, input.session_id).await;
 
     // Step 2: Memory signals for skill boosting
     let memory_signals = extract_memory_signals(&memory_fragments, 5);

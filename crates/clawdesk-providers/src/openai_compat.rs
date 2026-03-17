@@ -70,11 +70,22 @@ fn parse_tool_result(msg: &ChatMessage) -> Option<ToolResultMeta> {
 /// - **Tool messages**: extracts `tool_call_id` and content from the embedded
 ///   JSON, placing `tool_call_id` at the top level as the API requires.
 /// - **System/User messages**: passed through unchanged.
+/// - **Images**: attached to the last user message as `image_url` content parts.
 ///
 /// The `system_prompt` is prepended as the first message when present.
 pub fn build_openai_api_messages(
     system_prompt: Option<&str>,
     messages: &[ChatMessage],
+) -> Vec<serde_json::Value> {
+    build_openai_api_messages_with_images(system_prompt, messages, &[])
+}
+
+/// Like `build_openai_api_messages` but also injects images into the last user
+/// message as `image_url` content parts.
+pub fn build_openai_api_messages_with_images(
+    system_prompt: Option<&str>,
+    messages: &[ChatMessage],
+    images: &[crate::ImageContent],
 ) -> Vec<serde_json::Value> {
     let mut api_msgs = Vec::with_capacity(messages.len() + 1);
 
@@ -84,6 +95,11 @@ pub fn build_openai_api_messages(
             "content": system,
         }));
     }
+
+    // Find the last user message index for image injection.
+    let last_user_idx = messages
+        .iter()
+        .rposition(|m| m.role == MessageRole::User);
 
     let len = messages.len();
     for i in 0..len {
@@ -157,10 +173,36 @@ pub fn build_openai_api_messages(
             }
             _ => {
                 // System, User — pass through.
-                api_msgs.push(serde_json::json!({
-                    "role": msg.role.as_str(),
-                    "content": &*msg.content,
-                }));
+                // Inject images on the last user message as image_url content parts.
+                let is_image_target = msg.role == MessageRole::User
+                    && Some(i) == last_user_idx
+                    && !images.is_empty();
+                if is_image_target {
+                    let mut parts: Vec<serde_json::Value> = Vec::new();
+                    let text = msg.content.trim();
+                    if !text.is_empty() {
+                        parts.push(serde_json::json!({"type": "text", "text": text}));
+                    } else {
+                        parts.push(serde_json::json!({"type": "text", "text": "User sent image(s) with no text."}));
+                    }
+                    for img in images {
+                        parts.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", img.mime_type, img.data),
+                            }
+                        }));
+                    }
+                    api_msgs.push(serde_json::json!({
+                        "role": "user",
+                        "content": parts,
+                    }));
+                } else {
+                    api_msgs.push(serde_json::json!({
+                        "role": msg.role.as_str(),
+                        "content": &*msg.content,
+                    }));
+                }
             }
         }
     }

@@ -646,6 +646,7 @@ mod tests {
             temperature: None,
             tools: Vec::new(),
             stream: false,
+            images: vec![],
         };
 
         let msgs = CopilotProvider::build_messages(&request);

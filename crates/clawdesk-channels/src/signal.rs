@@ -93,6 +93,23 @@ struct SignalMessage {
     group_id: Option<String>,
     message: Option<String>,
     timestamp: Option<i64>,
+    /// File attachments sent with the message.
+    #[serde(default)]
+    attachments: Option<Vec<SignalAttachment>>,
+}
+
+/// A Signal attachment reference.
+#[derive(Deserialize)]
+struct SignalAttachment {
+    #[serde(default, rename = "contentType")]
+    content_type: Option<String>,
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    /// Base64-encoded data (when signal-cli is configured to inline).
+    #[serde(default)]
+    data: Option<String>,
 }
 
 /// Signal Messenger channel.
@@ -178,6 +195,36 @@ impl SignalChannel {
                 continue;
             }
 
+            // Extract media from signal-cli attachments
+            let media: Vec<clawdesk_types::message::MediaAttachment> = signal_msg
+                .attachments
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(|a| {
+                    let ct = a.content_type.as_deref().unwrap_or("application/octet-stream");
+                    let media_type = if ct.starts_with("image/") {
+                        clawdesk_types::message::MediaType::Image
+                    } else if ct.starts_with("audio/") {
+                        clawdesk_types::message::MediaType::Audio
+                    } else if ct.starts_with("video/") {
+                        clawdesk_types::message::MediaType::Video
+                    } else {
+                        clawdesk_types::message::MediaType::Document
+                    };
+                    // Decode base64 data if signal-cli inlines it
+                    let data = None; // signal-cli typically stores to disk; inline base64 requires base64 dep
+                    clawdesk_types::message::MediaAttachment {
+                        media_type,
+                        url: None,
+                        data,
+                        mime_type: ct.to_string(),
+                        filename: a.filename.clone(),
+                        size_bytes: a.size,
+                    }
+                })
+                .collect();
+
             let session_target = signal_msg.group_id.clone().unwrap_or_else(|| source.clone());
             let msg = NormalizedMessage {
                 id: Uuid::new_v4(),
@@ -194,7 +241,7 @@ impl SignalChannel {
                         .unwrap_or_else(|| source.clone()),
                     channel: ChannelId::Signal,
                 },
-                media: vec![],
+                media,
                 artifact_refs: vec![],
                 reply_context: None,
                 origin: clawdesk_types::message::MessageOrigin::Signal {

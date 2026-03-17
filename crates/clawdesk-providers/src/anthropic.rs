@@ -15,16 +15,6 @@ use crate::{
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Extract an attribute value from an XML-like tag.
-/// e.g., `extract_attr(r#"<tag key="value" />"#, "key")` → `Some("value")`
-fn extract_attr(tag: &str, attr: &str) -> Option<String> {
-    let needle = format!("{}=\"", attr);
-    let start = tag.find(&needle)? + needle.len();
-    let rest = &tag[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
 /// Anthropic Claude provider.
 pub struct AnthropicProvider {
     client: Client,
@@ -43,6 +33,60 @@ impl AnthropicProvider {
             default_model: default_model
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string()),
         }
+    }
+
+    /// Convert internal `ChatMessage` list + attached images to Anthropic API format.
+    ///
+    /// Images are injected as native `image` content blocks on the **last user
+    /// message** (matching openclaw's pattern). All other messages pass through
+    /// as plain text. System messages are skipped (sent via the top-level
+    /// `system` field instead).
+    fn build_messages(
+        messages: &[ChatMessage],
+        images: &[crate::ImageContent],
+    ) -> Vec<AnthropicMessage> {
+        // Find the index of the last user message — images attach there.
+        let last_user_idx = messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::User);
+
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role != MessageRole::System)
+            .map(|(i, m)| {
+                let is_image_target = Some(i) == last_user_idx && !images.is_empty();
+                if is_image_target {
+                    // Build multimodal content array: text + image blocks.
+                    let mut blocks: Vec<serde_json::Value> = Vec::new();
+                    let text = m.content.trim();
+                    if !text.is_empty() {
+                        blocks.push(serde_json::json!({"type": "text", "text": text}));
+                    } else {
+                        blocks.push(serde_json::json!({"type": "text", "text": "User sent image(s) with no text."}));
+                    }
+                    for img in images {
+                        blocks.push(serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img.mime_type,
+                                "data": img.data,
+                            }
+                        }));
+                    }
+                    AnthropicMessage {
+                        role: m.role.as_str().to_string(),
+                        content: serde_json::Value::Array(blocks),
+                    }
+                } else {
+                    AnthropicMessage {
+                        role: m.role.as_str().to_string(),
+                        content: serde_json::Value::String(m.content.to_string()),
+                    }
+                }
+            })
+            .collect()
     }
 }
 
@@ -154,61 +198,7 @@ impl Provider for AnthropicProvider {
         let api_request = AnthropicRequest {
             model: model.clone(),
             max_tokens: request.max_tokens.unwrap_or(8192),
-            messages: request
-                .messages
-                .iter()
-                .map(|m| {
-                    // Check if message has image attachments (base64 data in metadata)
-                    let has_images = m.content.contains("<image_attachment ");
-                    if has_images {
-                        // Parse multimodal: extract image blocks + text
-                        let mut blocks: Vec<serde_json::Value> = Vec::new();
-                        let mut remaining = m.content.as_ref();
-                        while let Some(start) = remaining.find("<image_attachment ") {
-                            // Add text before the image tag
-                            let text_before = &remaining[..start].trim();
-                            if !text_before.is_empty() {
-                                blocks.push(serde_json::json!({"type": "text", "text": text_before}));
-                            }
-                            // Extract image data
-                            if let Some(end) = remaining[start..].find("/>") {
-                                let tag = &remaining[start..start + end + 2];
-                                let media_type = extract_attr(tag, "media_type").unwrap_or("image/png".into());
-                                let data = extract_attr(tag, "data").unwrap_or_default();
-                                blocks.push(serde_json::json!({
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": media_type,
-                                        "data": data,
-                                    }
-                                }));
-                                remaining = &remaining[start + end + 2..];
-                            } else {
-                                break;
-                            }
-                        }
-                        // Add remaining text after last image
-                        let tail = remaining.trim();
-                        if !tail.is_empty() {
-                            blocks.push(serde_json::json!({"type": "text", "text": tail}));
-                        }
-                        if blocks.is_empty() {
-                            blocks.push(serde_json::json!({"type": "text", "text": m.content.as_ref()}));
-                        }
-                        AnthropicMessage {
-                            role: m.role.as_str().to_string(),
-                            content: serde_json::Value::Array(blocks),
-                        }
-                    } else {
-                        // Plain text message (most common path)
-                        AnthropicMessage {
-                            role: m.role.as_str().to_string(),
-                            content: serde_json::Value::String(m.content.to_string()),
-                        }
-                    }
-                })
-                .collect(),
+            messages: Self::build_messages(&request.messages, &request.images),
             system: request.system_prompt.clone(),
             temperature: request.temperature,
             tools,
@@ -326,16 +316,10 @@ impl Provider for AnthropicProvider {
 
         debug!(%model, "streaming Anthropic API");
 
-        // Build request JSON with stream: true
-        let messages: Vec<serde_json::Value> = request
-            .messages
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "role": m.role.as_str(),
-                    "content": m.content.to_string(),
-                })
-            })
+        // Build messages with native multimodal image support
+        let messages: Vec<serde_json::Value> = Self::build_messages(&request.messages, &request.images)
+            .into_iter()
+            .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
             .collect();
 
         let mut body = serde_json::json!({
@@ -562,6 +546,7 @@ impl Provider for AnthropicProvider {
             temperature: None,
             tools: vec![],
             stream: false,
+            images: vec![],
         };
 
         self.complete(&request).await?;

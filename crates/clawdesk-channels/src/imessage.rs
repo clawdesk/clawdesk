@@ -225,14 +225,19 @@ impl Channel for IMessageChannel {
             let since = last_rowid;
             let allowed = self.allowed_contacts.clone();
             let (returned_conn, poll_result) = match tokio::task::spawn_blocking(move || {
-                let result: Result<Vec<(i64, String, String)>, rusqlite::Error> = (|| {
+                // Query messages + attachment info via LEFT JOIN.
+                // Each row: (rowid, sender, text, attachment_path, attachment_mime)
+                // Messages without attachments have NULL for the last two columns.
+                let result: Result<Vec<(i64, String, String, Option<String>, Option<String>)>, rusqlite::Error> = (|| {
                     let mut stmt = conn.prepare(
-                        "SELECT m.ROWID, h.id, m.text \
+                        "SELECT m.ROWID, h.id, m.text, a.filename, a.mime_type \
                          FROM message m \
                          JOIN handle h ON m.handle_id = h.ROWID \
+                         LEFT JOIN message_attachment_join maj ON maj.message_id = m.ROWID \
+                         LEFT JOIN attachment a ON a.ROWID = maj.attachment_id \
                          WHERE m.ROWID > ?1 \
                          AND m.is_from_me = 0 \
-                         AND m.text IS NOT NULL \
+                         AND (m.text IS NOT NULL OR a.ROWID IS NOT NULL) \
                          ORDER BY m.ROWID ASC \
                          LIMIT 20",
                     )?;
@@ -240,7 +245,9 @@ impl Channel for IMessageChannel {
                         Ok((
                             row.get::<_, i64>(0)?,
                             row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(2).unwrap_or_default(),
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
                         ))
                     })?;
                     rows.collect::<Result<Vec<_>, _>>()
@@ -259,7 +266,7 @@ impl Channel for IMessageChannel {
 
             match poll_result {
                 Ok(messages) => {
-                    for (rowid, sender, text) in messages {
+                    for (rowid, sender, text, att_path, att_mime) in messages {
                         if rowid > last_rowid {
                             last_rowid = rowid;
                         }
@@ -274,9 +281,43 @@ impl Channel for IMessageChannel {
                             continue;
                         }
 
-                        if text.trim().is_empty() {
+                        if text.trim().is_empty() && att_path.is_none() {
                             continue;
                         }
+
+                        // Build media from attachment path if present
+                        let media = if let (Some(path), Some(mime)) = (&att_path, &att_mime) {
+                            // Expand ~/Library paths
+                            let expanded = path.replacen("~", &directories::BaseDirs::new().map(|b| b.home_dir().to_string_lossy().to_string()).unwrap_or_default(), 1);
+                            let data = std::fs::read(&expanded).ok();
+                            let media_type = if mime.starts_with("image/") {
+                                clawdesk_types::message::MediaType::Image
+                            } else if mime.starts_with("audio/") {
+                                clawdesk_types::message::MediaType::Audio
+                            } else if mime.starts_with("video/") {
+                                clawdesk_types::message::MediaType::Video
+                            } else {
+                                clawdesk_types::message::MediaType::Document
+                            };
+                            vec![clawdesk_types::message::MediaAttachment {
+                                media_type,
+                                url: None,
+                                data,
+                                mime_type: mime.clone(),
+                                filename: std::path::Path::new(&expanded)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string()),
+                                size_bytes: None,
+                            }]
+                        } else {
+                            vec![]
+                        };
+
+                        let body = if text.is_empty() && !media.is_empty() {
+                            "User sent an attachment.".to_string()
+                        } else {
+                            text
+                        };
 
                         let normalized = NormalizedMessage {
                             id: Uuid::new_v4(),
@@ -284,14 +325,14 @@ impl Channel for IMessageChannel {
                                 ChannelId::IMessage,
                                 &sender,
                             ),
-                            body: text,
+                            body,
                             body_for_agent: None,
                             sender: SenderIdentity {
                                 id: sender.clone(),
                                 display_name: sender.clone(),
                                 channel: ChannelId::IMessage,
                             },
-                            media: vec![],
+                            media,
                             artifact_refs: vec![],
                             reply_context: None,
                             origin: clawdesk_types::message::MessageOrigin::IMessage {

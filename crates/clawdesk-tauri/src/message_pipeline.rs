@@ -812,6 +812,7 @@ pub(crate) async fn build_prompt(
                 safety_cap: 1_024,
             },
             available_channels: available_ch_names,
+            session_id: None,
         },
         &state.memory,
         active_skills,

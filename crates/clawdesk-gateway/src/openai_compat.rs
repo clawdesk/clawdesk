@@ -204,6 +204,7 @@ pub async fn chat_completions(
         temperature: req.temperature,
         tools: vec![],
         stream,
+        images: vec![],
     };
 
     if stream {

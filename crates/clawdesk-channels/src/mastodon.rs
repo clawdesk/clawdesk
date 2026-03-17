@@ -77,6 +77,20 @@ pub struct Status {
     pub created_at: String,
     #[serde(default)]
     pub mentions: Vec<Mention>,
+    /// Media attachments (images, video, audio).
+    #[serde(default)]
+    pub media_attachments: Vec<MastodonMedia>,
+}
+
+/// A Mastodon media attachment.
+#[derive(Debug, Deserialize)]
+pub struct MastodonMedia {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub media_type: String, // "image", "video", "gifv", "audio"
+    pub url: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,6 +191,33 @@ impl MastodonChannel {
 
         let text = Self::strip_html(&status.content);
 
+        // Extract media attachments from Mastodon status
+        let media: Vec<clawdesk_types::message::MediaAttachment> = status
+            .media_attachments
+            .iter()
+            .map(|m| {
+                let media_type = match m.media_type.as_str() {
+                    "image" => clawdesk_types::message::MediaType::Image,
+                    "video" | "gifv" => clawdesk_types::message::MediaType::Video,
+                    "audio" => clawdesk_types::message::MediaType::Audio,
+                    _ => clawdesk_types::message::MediaType::Document,
+                };
+                clawdesk_types::message::MediaAttachment {
+                    media_type,
+                    url: Some(m.url.clone()),
+                    data: None,
+                    mime_type: match m.media_type.as_str() {
+                        "image" => "image/jpeg".to_string(),
+                        "video" | "gifv" => "video/mp4".to_string(),
+                        "audio" => "audio/mpeg".to_string(),
+                        _ => "application/octet-stream".to_string(),
+                    },
+                    filename: m.description.clone(),
+                    size_bytes: None,
+                }
+            })
+            .collect();
+
         let session_target = status.account.acct.clone();
         let msg = NormalizedMessage {
             id: Uuid::new_v4(),
@@ -195,7 +236,7 @@ impl MastodonChannel {
                 },
                 channel: ChannelId::Mastodon,
             },
-            media: vec![],
+            media,
             artifact_refs: vec![],
             reply_context: None,
             origin: clawdesk_types::message::MessageOrigin::Mastodon {

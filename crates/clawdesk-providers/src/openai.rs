@@ -104,10 +104,11 @@ impl Provider for OpenAiProvider {
 
         debug!(%model, messages = request.messages.len(), "calling OpenAI API");
 
-        // Use openai_compat to properly format tool call exchanges
-        let messages = crate::openai_compat::build_openai_api_messages(
+        // Use openai_compat to properly format tool call exchanges + images
+        let messages = crate::openai_compat::build_openai_api_messages_with_images(
             request.system_prompt.as_deref(),
             &request.messages,
+            &request.images,
         );
 
         let mut body = serde_json::json!({
@@ -238,10 +239,11 @@ impl Provider for OpenAiProvider {
 
         debug!(%model, "streaming OpenAI API");
 
-        // Use openai_compat to properly format tool call exchanges
-        let messages = crate::openai_compat::build_openai_api_messages(
+        // Use openai_compat to properly format tool call exchanges + images
+        let messages = crate::openai_compat::build_openai_api_messages_with_images(
             request.system_prompt.as_deref(),
             &request.messages,
+            &request.images,
         );
 
         let mut body = serde_json::json!({
@@ -497,6 +499,7 @@ impl Provider for OpenAiProvider {
             temperature: None,
             tools: vec![],
             stream: false,
+            images: vec![],
         };
         self.complete(&request).await?;
         Ok(())

@@ -91,24 +91,107 @@ impl WhatsAppChannel {
 
                 for msg in messages {
                     let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    if msg_type != "text" {
-                        debug!(msg_type, "WhatsApp: skipping non-text message");
-                        continue;
-                    }
 
                     let from = match msg.get("from").and_then(|f| f.as_str()) {
                         Some(f) => f,
                         None => continue,
                     };
 
-                    let body = match msg
-                        .get("text")
-                        .and_then(|t| t.get("body"))
-                        .and_then(|b| b.as_str())
-                    {
-                        Some(b) => b,
-                        None => continue,
+                    // Extract text body — from text messages or media captions
+                    let body = if msg_type == "text" {
+                        msg.get("text")
+                            .and_then(|t| t.get("body"))
+                            .and_then(|b| b.as_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        // Image/audio/document messages may have a caption
+                        msg.get(msg_type)
+                            .and_then(|m| m.get("caption"))
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string())
                     };
+
+                    // Build media attachments from non-text message types
+                    let mut media = Vec::new();
+                    match msg_type {
+                        "image" => {
+                            let mime = msg.get("image")
+                                .and_then(|i| i.get("mime_type"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("image/jpeg");
+                            media.push(clawdesk_types::message::MediaAttachment {
+                                media_type: clawdesk_types::message::MediaType::Image,
+                                url: msg.get("image").and_then(|i| i.get("id")).and_then(|i| i.as_str()).map(|s| s.to_string()),
+                                data: None,
+                                mime_type: mime.to_string(),
+                                filename: None,
+                                size_bytes: None,
+                            });
+                        }
+                        "audio" | "voice" => {
+                            let mime = msg.get(msg_type)
+                                .and_then(|a| a.get("mime_type"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("audio/ogg");
+                            media.push(clawdesk_types::message::MediaAttachment {
+                                media_type: if msg_type == "voice" {
+                                    clawdesk_types::message::MediaType::Voice
+                                } else {
+                                    clawdesk_types::message::MediaType::Audio
+                                },
+                                url: msg.get(msg_type).and_then(|a| a.get("id")).and_then(|i| i.as_str()).map(|s| s.to_string()),
+                                data: None,
+                                mime_type: mime.to_string(),
+                                filename: None,
+                                size_bytes: None,
+                            });
+                        }
+                        "document" => {
+                            let mime = msg.get("document")
+                                .and_then(|d| d.get("mime_type"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("application/octet-stream");
+                            let filename = msg.get("document")
+                                .and_then(|d| d.get("filename"))
+                                .and_then(|f| f.as_str())
+                                .map(|s| s.to_string());
+                            media.push(clawdesk_types::message::MediaAttachment {
+                                media_type: clawdesk_types::message::MediaType::Document,
+                                url: msg.get("document").and_then(|d| d.get("id")).and_then(|i| i.as_str()).map(|s| s.to_string()),
+                                data: None,
+                                mime_type: mime.to_string(),
+                                filename,
+                                size_bytes: None,
+                            });
+                        }
+                        "sticker" => {
+                            media.push(clawdesk_types::message::MediaAttachment {
+                                media_type: clawdesk_types::message::MediaType::Sticker,
+                                url: None,
+                                data: None,
+                                mime_type: "image/webp".to_string(),
+                                filename: None,
+                                size_bytes: None,
+                            });
+                        }
+                        "text" => {} // no media for plain text
+                        _ => {
+                            debug!(msg_type, "WhatsApp: unhandled message type");
+                            continue;
+                        }
+                    }
+
+                    // Need either text body or media to proceed
+                    let body_text = body.unwrap_or_else(|| {
+                        if !media.is_empty() {
+                            format!("User sent a {} attachment.", msg_type)
+                        } else {
+                            String::new()
+                        }
+                    });
+                    if body_text.is_empty() && media.is_empty() {
+                        continue;
+                    }
 
                     let wamid = msg
                         .get("id")
@@ -130,14 +213,14 @@ impl WhatsAppChannel {
                             ChannelId::WhatsApp,
                             from,
                         ),
-                        body: body.to_string(),
+                        body: body_text,
                         body_for_agent: None,
                         sender: clawdesk_types::message::SenderIdentity {
                             id: from.to_string(),
                             display_name: sender_name.to_string(),
                             channel: ChannelId::WhatsApp,
                         },
-                        media: vec![],
+                        media,
                         artifact_refs: vec![],
                         reply_context: None,
                         origin: clawdesk_types::message::MessageOrigin::WhatsApp {

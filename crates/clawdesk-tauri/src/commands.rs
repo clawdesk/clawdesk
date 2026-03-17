@@ -1561,40 +1561,148 @@ pub async fn send_message(
         }
     }
 
-    // Media pipeline — process image attachments for vision-capable models.
-    // Encodes images as base64 data URIs and appends a vision context message
-    // that the provider can include in the multimodal content array.
+    // Media pipeline — process attachments for multimodal context.
+    //
+    // Following openclaw's pattern:
+    //   • Images  → collected as native ImageContent for provider-level multimodal
+    //   • Files   → text extracted via document processor, embedded as <file> context
+    //   • Audio   → transcribed via Whisper API, embedded as [Audio] transcript
+    //
+    // Images are NOT embedded in the message text. They travel through
+    // ProviderRequest.images → each provider formats them natively
+    // (Anthropic image blocks, OpenAI image_url parts, Gemini inlineData).
+
+    let mut image_contents: Vec<clawdesk_providers::ImageContent> = Vec::new();
+    let mut extra_context_parts: Vec<String> = Vec::new();
+
     if !request.attachments.is_empty() {
-        let image_attachments: Vec<&MessageAttachment> = request.attachments.iter()
-            .filter(|a| a.mime_type.starts_with("image/"))
-            .collect();
+        for att in &request.attachments {
+            if att.mime_type.starts_with("image/") {
+                // ── Image attachment → native multimodal ──
+                image_contents.push(clawdesk_providers::ImageContent {
+                    data: att.data.clone(),
+                    mime_type: att.mime_type.clone(),
+                });
+                tracing::info!(
+                    mime = %att.mime_type,
+                    filename = ?att.filename,
+                    "Collected image attachment for native multimodal"
+                );
+            } else if att.mime_type.starts_with("audio/") {
+                // ── Audio attachment → transcribe via Whisper ──
+                let transcript = {
+                    use base64::Engine;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(&att.data)
+                        .unwrap_or_default();
 
-        if !image_attachments.is_empty() {
-            // Build a vision context message with base64 image references
-            let mut vision_parts = Vec::new();
-            for (i, att) in image_attachments.iter().enumerate() {
-                let label = att.filename.as_deref().unwrap_or("image");
-                vision_parts.push(format!(
-                    "[Attached image {}: {} ({}). Data URI: data:{};base64,{}]",
-                    i + 1, label, att.mime_type,
-                    att.mime_type, &att.data[..att.data.len().min(100)],
-                ));
+                    if bytes.is_empty() {
+                        tracing::warn!("Audio attachment has empty/invalid base64 data");
+                        None
+                    } else {
+                        // Try transcription via WhisperProcessor (OpenAI API)
+                        // Fall back to noting the audio exists if no API key available
+                        let api_key = request.api_key.as_deref().unwrap_or("");
+                        if !api_key.is_empty() {
+                            use clawdesk_media::processor::MediaProcessor;
+                            let processor = clawdesk_media::processor::WhisperProcessor::openai(api_key);
+                            let filename = att.filename.as_deref().unwrap_or("audio.wav").to_string();
+                            let input = clawdesk_types::media::MediaInput {
+                                media_type: clawdesk_types::media::MediaType::Audio,
+                                data: clawdesk_types::media::MediaData::Bytes(bytes),
+                                mime_type: att.mime_type.clone(),
+                                metadata: clawdesk_types::media::MediaMetadata {
+                                    filename: Some(filename),
+                                    ..Default::default()
+                                },
+                            };
+                            match processor.process(&input).await {
+                                Ok(result) if !result.text.is_empty() => {
+                                    tracing::info!(
+                                        chars = result.text.len(),
+                                        ms = result.processing_ms,
+                                        "Transcribed audio attachment"
+                                    );
+                                    Some(result.text)
+                                }
+                                Ok(_) => {
+                                    tracing::warn!("Whisper returned empty transcript");
+                                    None
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Audio transcription failed");
+                                    None
+                                }
+                            }
+                        } else {
+                            tracing::warn!("No API key available for audio transcription");
+                            None
+                        }
+                    }
+                };
+
+                if let Some(text) = transcript {
+                    let label = att.filename.as_deref().unwrap_or("audio");
+                    extra_context_parts.push(format!(
+                        "[Audio: {}]\nTranscript: {}",
+                        label, text
+                    ));
+                } else {
+                    let label = att.filename.as_deref().unwrap_or("audio");
+                    extra_context_parts.push(format!(
+                        "[Audio: {} ({}) — transcription unavailable]",
+                        label, att.mime_type
+                    ));
+                }
+            } else {
+                // ── Document/file attachment → extract text ──
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&att.data)
+                    .unwrap_or_default();
+
+                if !bytes.is_empty() {
+                    let filename = att.filename.as_deref();
+                    let format = clawdesk_media::document::detect_format(&bytes, filename);
+                    let doc = clawdesk_media::document::extract_text(&bytes, format);
+
+                    if !doc.text.is_empty() {
+                        let label = filename.unwrap_or("document");
+                        // Cap file content at 50K chars to avoid blowing context
+                        let content = if doc.text.len() > 50_000 {
+                            format!("{}...[truncated, {} total chars]",
+                                &doc.text[..50_000], doc.text.len())
+                        } else {
+                            doc.text
+                        };
+                        extra_context_parts.push(format!(
+                            "<file name=\"{}\">\n{}\n</file>",
+                            label, content
+                        ));
+                        tracing::info!(
+                            filename = ?att.filename,
+                            format = ?format,
+                            words = doc.word_count,
+                            "Extracted text from file attachment"
+                        );
+                    } else {
+                        let label = filename.unwrap_or("file");
+                        extra_context_parts.push(format!(
+                            "[Attached file: {} ({}) — could not extract text content]",
+                            label, att.mime_type
+                        ));
+                    }
+                }
             }
+        }
 
-            let vision_context = format!(
-                "[Context: User attached {} image(s). Describe or analyze these images as requested.\n{}]",
-                image_attachments.len(),
-                vision_parts.join("\n"),
-            );
+        // Inject file/audio context as a system message before the user message
+        if !extra_context_parts.is_empty() {
+            let context = extra_context_parts.join("\n\n");
             let insert_pos = history.len().saturating_sub(1);
             history.insert(
                 insert_pos,
-                clawdesk_providers::ChatMessage::new(MessageRole::System, vision_context),
-            );
-
-            tracing::info!(
-                count = image_attachments.len(),
-                "Processed image attachments for vision context"
+                clawdesk_providers::ChatMessage::new(MessageRole::System, context),
             );
         }
     }
@@ -1815,6 +1923,7 @@ pub async fn send_message(
                 safety_cap: 1_024,
             },
             available_channels: available_ch_names,
+            session_id: Some(&chat_id),
         },
         &state.memory,
         &active_skills,
@@ -2499,6 +2608,7 @@ interact with web UIs, or capture visual output for the user.\n"
         app.clone(),
     )))
     .with_context_guard(compacted_guard)
+    .with_images(image_contents)
     .with_profile_rotator(Arc::new(
         clawdesk_providers::profile_rotation::ProfileRotator::new(
             agent.model.as_str(),
@@ -5376,6 +5486,11 @@ pub async fn list_channels(
         ("email", "Email", "Email", std::env::var("IMAP_HOST").is_ok()),
         ("irc", "IRC", "Irc", std::env::var("IRC_SERVER").is_ok()),
         ("imessage", "iMessage", "IMessage", cfg!(target_os = "macos")),
+        ("signal", "Signal", "Signal", std::env::var("SIGNAL_PHONE_NUMBER").is_ok()),
+        ("matrix", "Matrix", "Matrix", std::env::var("MATRIX_HOMESERVER").is_ok()),
+        ("teams", "Teams", "Teams", std::env::var("TEAMS_APP_ID").is_ok()),
+        ("mastodon", "Mastodon", "Mastodon", std::env::var("MASTODON_ACCESS_TOKEN").is_ok()),
+        ("webhook", "Webhook", "Webhook", true),
     ];
 
     for (id, name, channel_type, env_ok) in catalog {
@@ -5431,6 +5546,16 @@ pub async fn update_channel(
         ("email", "email_password", "EMAIL_PASSWORD"),
         ("irc", "server", "IRC_SERVER"),
         ("irc", "nickname", "IRC_NICKNAME"),
+        ("signal", "phone_number", "SIGNAL_PHONE_NUMBER"),
+        ("signal", "rpc_endpoint", "SIGNAL_RPC_ENDPOINT"),
+        ("matrix", "homeserver_url", "MATRIX_HOMESERVER"),
+        ("matrix", "user_id", "MATRIX_USER_ID"),
+        ("matrix", "access_token", "MATRIX_ACCESS_TOKEN"),
+        ("teams", "app_id", "TEAMS_APP_ID"),
+        ("teams", "app_secret", "TEAMS_APP_SECRET"),
+        ("mastodon", "access_token", "MASTODON_ACCESS_TOKEN"),
+        ("mastodon", "instance_url", "MASTODON_INSTANCE_URL"),
+        ("webhook", "callback_url", "WEBHOOK_CALLBACK_URL"),
     ];
 
     for &(ch, key, env_var) in env_mappings {
@@ -5765,6 +5890,7 @@ pub async fn test_llm_connection(
         temperature: Some(0.0),
         tools: vec![],
         stream: false,
+        images: vec![],
     };
 
     match prov.complete(&request).await {

@@ -112,8 +112,23 @@ struct RoomEvent {
 struct EventContent {
     msgtype: Option<String>,
     body: Option<String>,
+    /// Media URL (mxc:// for images/files/audio).
+    #[serde(default)]
+    url: Option<String>,
+    /// MIME info for media events.
+    #[serde(default)]
+    info: Option<MatrixMediaInfo>,
     #[serde(rename = "m.relates_to")]
     relates_to: Option<RelatesTo>,
+}
+
+/// Media info from Matrix m.image / m.file / m.audio events.
+#[derive(Deserialize)]
+struct MatrixMediaInfo {
+    #[serde(default)]
+    mimetype: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -246,15 +261,23 @@ impl MatrixChannel {
             None => return,
         };
 
-        // Skip non-text messages
-        if content.msgtype.as_deref() != Some("m.text") {
+        // Accept text, image, file, and audio messages
+        let msgtype = content.msgtype.as_deref().unwrap_or("");
+        let is_media = matches!(msgtype, "m.image" | "m.file" | "m.audio" | "m.video");
+        if msgtype != "m.text" && !is_media {
             return;
         }
 
-        let text = match content.body {
-            Some(t) => t,
-            None => return,
-        };
+        let text = content.body.unwrap_or_else(|| {
+            if is_media {
+                format!("User sent a {} attachment.", msgtype.trim_start_matches("m."))
+            } else {
+                String::new()
+            }
+        });
+        if text.is_empty() && !is_media {
+            return;
+        }
 
         let sender_id = event.sender.unwrap_or_default();
 
@@ -262,6 +285,36 @@ impl MatrixChannel {
         if sender_id == self.config.user_id {
             return;
         }
+
+        // Build media vector from m.image / m.file / m.audio events
+        let media = if is_media {
+            let media_type = match msgtype {
+                "m.image" => clawdesk_types::message::MediaType::Image,
+                "m.audio" => clawdesk_types::message::MediaType::Audio,
+                "m.video" => clawdesk_types::message::MediaType::Video,
+                _ => clawdesk_types::message::MediaType::Document,
+            };
+            let mime = content.info
+                .as_ref()
+                .and_then(|i| i.mimetype.clone())
+                .unwrap_or_else(|| match msgtype {
+                    "m.image" => "image/jpeg".to_string(),
+                    "m.audio" => "audio/ogg".to_string(),
+                    "m.video" => "video/mp4".to_string(),
+                    _ => "application/octet-stream".to_string(),
+                });
+            let size = content.info.as_ref().and_then(|i| i.size);
+            vec![clawdesk_types::message::MediaAttachment {
+                media_type,
+                url: content.url.clone(),
+                data: None,
+                mime_type: mime,
+                filename: None,
+                size_bytes: size,
+            }]
+        } else {
+            vec![]
+        };
 
         let thread_id = content
             .relates_to
@@ -286,7 +339,7 @@ impl MatrixChannel {
                 display_name: sender_id.split(':').next().unwrap_or(&sender_id).trim_start_matches('@').to_string(),
                 channel: ChannelId::Matrix,
             },
-            media: vec![],
+            media,
             artifact_refs: vec![],
             reply_context: None,
             origin: clawdesk_types::message::MessageOrigin::Matrix {

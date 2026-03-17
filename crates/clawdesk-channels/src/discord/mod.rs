@@ -555,21 +555,22 @@ impl DiscordChannel {
                         continue;
                     };
 
-                    // Process attachments and enrich body
+                    // Process attachments and enrich body + media
                     let normalized = {
                         let mut m = normalized;
                         let attachments = msg_event
                             .attachments
                             .as_deref()
                             .unwrap_or(&[]);
-                        let attachment_text =
+                        let processed =
                             process_attachments(attachments, &self.client).await;
-                        if !attachment_text.is_empty() {
+                        if !processed.text.is_empty() {
                             m.body_for_agent = Some(format!(
-                                "{}\n\n[Attachments]\n{attachment_text}",
-                                m.body
+                                "{}\n\n[Attachments]\n{}",
+                                m.body, processed.text
                             ));
                         }
+                        m.media = processed.media;
                         m
                     };
 
@@ -1186,16 +1187,28 @@ fn normalize_incoming_content(
     Some(normalized)
 }
 
-/// Process Discord message attachments and return a string to append to
-/// the agent message context.
+/// Processed attachment results: enrichment text + media metadata.
+struct ProcessedAttachments {
+    /// Text to append to the agent message body.
+    text: String,
+    /// Media metadata for the autoreply pipeline enrichment stage.
+    media: Vec<clawdesk_types::message::MediaAttachment>,
+}
+
+/// Process Discord message attachments.
 ///
-/// Only `text/*` MIME types are fetched and inlined. All other types are
-/// silently skipped. Fetch errors are logged as warnings.
+/// - **Images**: Downloaded from Discord CDN, base64-encoded, and added to the
+///   media vector so the agent receives them as native multimodal content.
+/// - **Audio/Voice**: Added to media vector with URL for transcription.
+/// - **Text files**: Fetched and inlined as `[filename]\ncontent`.
+/// - **Other docs**: Added to media vector with metadata.
 async fn process_attachments(
     attachments: &[serde_json::Value],
     client: &Client,
-) -> String {
-    let mut parts: Vec<String> = Vec::new();
+) -> ProcessedAttachments {
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut media: Vec<clawdesk_types::message::MediaAttachment> = Vec::new();
+
     for att in attachments {
         let ct = att
             .get("content_type")
@@ -1205,15 +1218,82 @@ async fn process_attachments(
             .get("filename")
             .and_then(|v| v.as_str())
             .unwrap_or("file");
+        let size = att
+            .get("size")
+            .and_then(|v| v.as_u64());
         let Some(url) = att.get("url").and_then(|v| v.as_str()) else {
             warn!(name, "discord: attachment has no url, skipping");
             continue;
         };
-        if ct.starts_with("text/") {
+
+        if ct.starts_with("image/") {
+            // Download image from Discord CDN and convert to bytes.
+            // We store the URL + bytes so the autoreply pipeline can
+            // enrich the message and the provider can send native multimodal.
+            match client.get(url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.bytes().await {
+                        Ok(bytes) => {
+                            info!(
+                                name,
+                                content_type = ct,
+                                size_bytes = bytes.len(),
+                                "discord: downloaded image attachment"
+                            );
+                            media.push(clawdesk_types::message::MediaAttachment {
+                                media_type: clawdesk_types::message::MediaType::Image,
+                                url: Some(url.to_string()),
+                                data: Some(bytes.to_vec()),
+                                mime_type: ct.to_string(),
+                                filename: Some(name.to_string()),
+                                size_bytes: Some(bytes.len() as u64),
+                            });
+                        }
+                        Err(e) => {
+                            warn!(name, error = %e, "discord: failed to read image bytes");
+                            // Still record the media with URL only
+                            media.push(clawdesk_types::message::MediaAttachment {
+                                media_type: clawdesk_types::message::MediaType::Image,
+                                url: Some(url.to_string()),
+                                data: None,
+                                mime_type: ct.to_string(),
+                                filename: Some(name.to_string()),
+                                size_bytes: size,
+                            });
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    warn!(name, status = %resp.status(), "discord: image fetch failed");
+                    media.push(clawdesk_types::message::MediaAttachment {
+                        media_type: clawdesk_types::message::MediaType::Image,
+                        url: Some(url.to_string()),
+                        data: None,
+                        mime_type: ct.to_string(),
+                        filename: Some(name.to_string()),
+                        size_bytes: size,
+                    });
+                }
+                Err(e) => {
+                    warn!(name, error = %e, "discord: image download error");
+                }
+            }
+        } else if ct.starts_with("audio/") {
+            // Audio attachments — record with URL for potential transcription
+            media.push(clawdesk_types::message::MediaAttachment {
+                media_type: clawdesk_types::message::MediaType::Audio,
+                url: Some(url.to_string()),
+                data: None,
+                mime_type: ct.to_string(),
+                filename: Some(name.to_string()),
+                size_bytes: size,
+            });
+        } else if ct.starts_with("text/") {
+            // Text files — fetch and inline content
             match client.get(url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     if let Ok(text) = resp.text().await {
-                        parts.push(format!("[{name}]\n{text}"));
+                        text_parts.push(format!("[{name}]\n{text}"));
                     }
                 }
                 Ok(resp) => {
@@ -1223,15 +1303,36 @@ async fn process_attachments(
                     warn!(name, error = %e, "discord attachment fetch error");
                 }
             }
+            media.push(clawdesk_types::message::MediaAttachment {
+                media_type: clawdesk_types::message::MediaType::Document,
+                url: Some(url.to_string()),
+                data: None,
+                mime_type: ct.to_string(),
+                filename: Some(name.to_string()),
+                size_bytes: size,
+            });
         } else {
+            // Other files (PDF, DOCX, etc.) — record as document
+            media.push(clawdesk_types::message::MediaAttachment {
+                media_type: clawdesk_types::message::MediaType::Document,
+                url: Some(url.to_string()),
+                data: None,
+                mime_type: ct.to_string(),
+                filename: Some(name.to_string()),
+                size_bytes: size,
+            });
             debug!(
                 name,
                 content_type = ct,
-                "discord: skipping unsupported attachment type"
+                "discord: recorded document attachment"
             );
         }
     }
-    parts.join("\n---\n")
+
+    ProcessedAttachments {
+        text: text_parts.join("\n---\n"),
+        media,
+    }
 }
 
 /// Pick a random index from [0, len) using system time as entropy.
@@ -1560,11 +1661,12 @@ mod tests {
     async fn process_attachments_empty_returns_empty() {
         let client = Client::new();
         let result = process_attachments(&[], &client).await;
-        assert!(result.is_empty());
+        assert!(result.text.is_empty());
+        assert!(result.media.is_empty());
     }
 
     #[tokio::test]
-    async fn process_attachments_skips_unsupported() {
+    async fn process_attachments_records_unsupported_as_document() {
         let client = Client::new();
         let attachments = vec![serde_json::json!({
             "url": "https://example.com/doc.pdf",
@@ -1572,6 +1674,8 @@ mod tests {
             "content_type": "application/pdf"
         })];
         let result = process_attachments(&attachments, &client).await;
-        assert!(result.is_empty());
+        assert!(result.text.is_empty());
+        assert_eq!(result.media.len(), 1);
+        assert_eq!(result.media[0].media_type, clawdesk_types::message::MediaType::Document);
     }
 }

@@ -277,6 +277,7 @@ pub async fn create_response(
         temperature: req.temperature,
         tools,
         stream: false,
+        images: vec![],
     };
 
     // Try to find a provider
@@ -370,6 +371,7 @@ async fn create_response_streaming(
         temperature: req.temperature,
         tools,
         stream: true,
+        images: vec![],
     };
 
     let providers = state.providers.load();

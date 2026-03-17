@@ -68,6 +68,23 @@ pub struct InboundWebhookPayload {
     pub sender: Option<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    /// Optional attachments array: [{"url": "...", "mime_type": "image/png", "filename": "..."}]
+    #[serde(default)]
+    pub attachments: Vec<WebhookAttachment>,
+}
+
+/// A webhook attachment.
+#[derive(Debug, Deserialize)]
+pub struct WebhookAttachment {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// Base64-encoded data (alternative to URL).
+    #[serde(default)]
+    pub data: Option<String>,
 }
 
 /// Outbound webhook payload.
@@ -112,6 +129,33 @@ impl WebhookChannel {
     pub async fn process_inbound(&self, payload: InboundWebhookPayload) {
         let sink = self.sink.read().await;
         if let Some(ref s) = *sink {
+            // Extract media from webhook attachments
+            let media: Vec<clawdesk_types::message::MediaAttachment> = payload
+                .attachments
+                .iter()
+                .map(|a| {
+                    let ct = a.mime_type.as_deref().unwrap_or("application/octet-stream");
+                    let media_type = if ct.starts_with("image/") {
+                        clawdesk_types::message::MediaType::Image
+                    } else if ct.starts_with("audio/") {
+                        clawdesk_types::message::MediaType::Audio
+                    } else if ct.starts_with("video/") {
+                        clawdesk_types::message::MediaType::Video
+                    } else {
+                        clawdesk_types::message::MediaType::Document
+                    };
+                    let data = None; // Webhook base64 decoding handled by backend
+                    clawdesk_types::message::MediaAttachment {
+                        media_type,
+                        url: a.url.clone(),
+                        data,
+                        mime_type: ct.to_string(),
+                        filename: a.filename.clone(),
+                        size_bytes: None,
+                    }
+                })
+                .collect();
+
             let sender_id = payload.sender.clone().unwrap_or_else(|| "webhook".into());
             let msg = NormalizedMessage {
                 id: Uuid::new_v4(),
@@ -126,7 +170,7 @@ impl WebhookChannel {
                     display_name: payload.sender.unwrap_or_else(|| "Webhook".into()),
                     channel: ChannelId::Webhook,
                 },
-                media: vec![],
+                media,
                 artifact_refs: vec![],
                 reply_context: None,
                 origin: clawdesk_types::message::MessageOrigin::Webhook {

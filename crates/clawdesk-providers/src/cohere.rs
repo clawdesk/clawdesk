@@ -436,6 +436,7 @@ impl Provider for CohereProvider {
             temperature: None,
             tools: vec![],
             stream: false,
+            images: vec![],
         };
         self.complete(&request).await?;
         Ok(())

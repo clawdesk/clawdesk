@@ -416,6 +416,7 @@ pub async fn summarize_transcript_via_llm(
         temperature: Some(0.2),
         tools: vec![],
         stream: false,
+        images: vec![],
     };
     match provider.complete(&req).await {
         Ok(resp) => {

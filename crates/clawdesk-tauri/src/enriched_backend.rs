@@ -121,6 +121,7 @@ impl AgentBackend for EnrichedBackend {
                 channel_description: "Pipeline step execution",
                 budget,
                 available_channels: Vec::new(),
+                session_id: None,
             },
             &self.memory,
             &active_skills,

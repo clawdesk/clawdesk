@@ -814,6 +814,155 @@ impl<S: MemoryBackend> MemoryManager<S> {
         Ok(filtered)
     }
 
+    /// Recall with temporal expansion — geodesic concentric search.
+    ///
+    /// A physics-inspired approach: searches outward from the current session
+    /// in expanding temporal rings, like a wave propagating from the query point.
+    ///
+    /// **Ring 0** — Current session: memories attached to `session_id` via graph.
+    /// **Ring 1** — Cross-session (global node): memories from other sessions.
+    /// **Ring 2** — Full corpus: unscoped vector search across all memories.
+    ///
+    /// Results from closer rings receive higher boosts (1/r² decay — inverse
+    /// square law of relevance). This ensures recent, contextually-adjacent
+    /// memories dominate while distant memories still surface when nothing
+    /// nearby matches.
+    ///
+    /// The method is immutable (`&self`) — session scope is passed per-call
+    /// rather than stored as mutable state, allowing safe use behind `Arc`.
+    pub async fn recall_with_scope(
+        &self,
+        query: &str,
+        max_results: Option<usize>,
+        session_id: Option<&str>,
+    ) -> Result<Vec<VectorSearchResult>, String> {
+        self.ensure_collection().await?;
+
+        let top_k = max_results.unwrap_or(self.config.max_results);
+
+        // No session scope → fall back to global recall
+        let Some(session_id) = session_id else {
+            return self.recall(query, max_results).await;
+        };
+
+        let query_result = self
+            .embedding
+            .embed(query)
+            .await
+            .map_err(|e| format!("embed query: {e}"))?;
+
+        let fetch_k = (top_k * 4).max(30);
+
+        // ── Ring 0: Session-local memories ─────────────────
+        let session_node = format!("session:{session_id}");
+        let ring0_ids: Vec<String> = self
+            .store
+            .graph_reachable_memory_ids(&session_node, "has_memory", self.config.graph_max_depth)
+            .unwrap_or_default();
+
+        // ── Ring 1: Cross-session (user global) ────────────
+        let ring1_ids: Vec<String> = self
+            .store
+            .graph_reachable_memory_ids("user:global", "has_memory", 2)
+            .unwrap_or_default();
+
+        // ── Full-corpus vector search ──────────────────────
+        let mut results = self
+            .searcher
+            .search(
+                &self.config.collection_name,
+                &query_result.vector,
+                query,
+                fetch_k,
+                self.config.search_strategy,
+            )
+            .await?;
+
+        // ── Apply concentric ring boosts (inverse-square inspired) ──
+        // Ring 0 (session-local) → 1.5× boost
+        // Ring 1 (cross-session)  → 1.15× boost
+        // Ring 2 (unscoped)       → 1.0× (no change)
+        for result in &mut results {
+            if ring0_ids.contains(&result.id) {
+                result.score *= 1.5;
+            } else if ring1_ids.contains(&result.id) {
+                result.score *= 1.15;
+            }
+        }
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        // ── Temporal boost for current-session memories ────
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        if let Ok(edges) = self.store.temporal_edges_at(&session_node, Some("has_memory"), now_ms) {
+            let valid_ids: Vec<String> = edges.iter().map(|e| e.to_id.clone()).collect();
+            for result in &mut results {
+                if valid_ids.contains(&result.id) {
+                    result.score *= 1.2;
+                }
+            }
+            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        // ── Temporal decay ─────────────────────────────────
+        if self.config.temporal_decay.enabled {
+            let mut scored: Vec<(String, f32, serde_json::Value)> = results
+                .iter()
+                .map(|r| (r.id.clone(), r.score, r.metadata.clone()))
+                .collect();
+            apply_temporal_decay(&mut scored, &self.config.temporal_decay);
+            for (i, (_, decayed_score, _)) in scored.iter().enumerate() {
+                if i < results.len() {
+                    results[i].score = *decayed_score;
+                }
+            }
+            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        // ── MMR diversity re-ranking ───────────────────────
+        {
+            let candidates: Vec<MmrCandidate> = results
+                .iter()
+                .map(|r| MmrCandidate {
+                    id: r.id.clone(),
+                    score: r.score,
+                    content: r.content.clone().unwrap_or_default(),
+                    metadata: r.metadata.clone(),
+                })
+                .collect();
+
+            let mmr_config = MmrConfig {
+                lambda: self.config.mmr.lambda,
+                top_k,
+            };
+
+            let mmr_results = mmr_rerank(&candidates, &mmr_config);
+            results = mmr_results
+                .into_iter()
+                .map(|m| VectorSearchResult {
+                    id: m.id,
+                    score: m.score,
+                    metadata: m.metadata,
+                    content: Some(m.content),
+                })
+                .collect();
+        }
+
+        // ── Min-relevance filter ───────────────────────────
+        results.retain(|r| r.score >= self.config.min_relevance);
+        results.truncate(top_k);
+
+        debug!(
+            query = %query,
+            session = %session_id,
+            ring0 = ring0_ids.len(),
+            ring1 = ring1_ids.len(),
+            results = results.len(),
+            "temporal-expansion recall (session→global→corpus)"
+        );
+
+        Ok(results)
+    }
+
     /// Forget a specific memory.
     ///
     /// Also removes the graph node and any temporal edges (Tasks 7, 5).

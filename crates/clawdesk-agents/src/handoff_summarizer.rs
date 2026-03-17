@@ -117,6 +117,7 @@ impl HandoffSummarizer for LlmHandoffSummarizer {
             temperature: Some(0.2),
             tools: vec![],
             stream: false,
+            images: vec![],
         };
 
         match self.provider.complete(&request).await {

@@ -74,6 +74,20 @@ pub struct Activity {
     pub conversation: Option<Conversation>,
     pub service_url: Option<String>,
     pub reply_to_id: Option<String>,
+    /// File/media attachments from Bot Framework.
+    #[serde(default)]
+    pub attachments: Option<Vec<TeamsAttachment>>,
+}
+
+/// A Teams attachment (image, file, card).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TeamsAttachment {
+    #[serde(default, rename = "contentType")]
+    pub content_type: Option<String>,
+    #[serde(default, rename = "contentUrl")]
+    pub content_url: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -178,6 +192,38 @@ impl TeamsChannel {
             .map(|c| c.id.clone())
             .unwrap_or_default();
 
+        // Extract media attachments from Bot Framework attachments
+        let media: Vec<clawdesk_types::message::MediaAttachment> = activity
+            .attachments
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|a| {
+                let ct = a.content_type.as_deref().unwrap_or("");
+                // Skip adaptive cards and other non-media types
+                if ct.starts_with("application/vnd.microsoft") {
+                    return None;
+                }
+                let media_type = if ct.starts_with("image/") {
+                    clawdesk_types::message::MediaType::Image
+                } else if ct.starts_with("audio/") {
+                    clawdesk_types::message::MediaType::Audio
+                } else if ct.starts_with("video/") {
+                    clawdesk_types::message::MediaType::Video
+                } else {
+                    clawdesk_types::message::MediaType::Document
+                };
+                Some(clawdesk_types::message::MediaAttachment {
+                    media_type,
+                    url: a.content_url.clone(),
+                    data: None,
+                    mime_type: ct.to_string(),
+                    filename: a.name.clone(),
+                    size_bytes: None,
+                })
+            })
+            .collect();
+
         let sender_id = sender.map(|s| s.id.clone()).unwrap_or_default();
         let msg = NormalizedMessage {
             id: Uuid::new_v4(),
@@ -194,7 +240,7 @@ impl TeamsChannel {
                     .unwrap_or_else(|| "Teams User".into()),
                 channel: ChannelId::Teams,
             },
-            media: vec![],
+            media,
             artifact_refs: vec![],
             reply_context: None,
             origin: clawdesk_types::message::MessageOrigin::Teams {

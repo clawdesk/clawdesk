@@ -138,7 +138,7 @@ impl TelegramChannel {
                                     }
 
                                     // Normalize and dispatch
-                                    if let Some(normalized) = self.normalize_update(&msg) {
+                                    if let Some(normalized) = self.normalize_update(&msg).await {
                                         sink.on_message(normalized).await;
                                     }
                                 }
@@ -156,9 +156,41 @@ impl TelegramChannel {
         info!("Telegram poll loop stopped");
     }
 
+    /// Download a file from Telegram using the 2-step getFile → download flow.
+    async fn download_telegram_file(&self, file_id: &str) -> Option<Vec<u8>> {
+        // Step 1: getFile → file_path
+        let url = self.api_url("getFile");
+        let resp = self.client
+            .post(&url)
+            .json(&serde_json::json!({ "file_id": file_id }))
+            .send()
+            .await
+            .ok()?;
+        let body: TelegramResponse<TgFileResponse> = resp.json().await.ok()?;
+        let file_path = body.result?.file_path?;
+
+        // Step 2: Download bytes from file API
+        let download_url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            self.bot_token, file_path
+        );
+        let bytes = self.client
+            .get(&download_url)
+            .send()
+            .await
+            .ok()?
+            .bytes()
+            .await
+            .ok()?;
+
+        Some(bytes.to_vec())
+    }
+
     /// Normalize a Telegram message to the canonical form.
-    fn normalize_update(&self, msg: &TgMessage) -> Option<NormalizedMessage> {
-        let text = msg.text.clone()?;
+    /// Downloads attached media (photos, audio, documents) from Telegram's API.
+    async fn normalize_update(&self, msg: &TgMessage) -> Option<NormalizedMessage> {
+        // Accept messages that have text OR caption (photos use caption, not text)
+        let text = msg.text.clone().or_else(|| msg.caption.clone())?;
         let from = msg.from.as_ref()?;
 
         let sender = SenderIdentity {
@@ -170,20 +202,69 @@ impl TelegramChannel {
         let session_key =
             clawdesk_types::session::SessionKey::new(ChannelId::Telegram, &msg.chat.id.to_string());
 
-        // Detect media
-        let media = msg
-            .photo
-            .as_ref()
-            .and_then(|photos| photos.last())
-            .map(|p| vec![MediaAttachment {
-                media_type: clawdesk_types::message::MediaType::Image,
+        // Process media attachments — download actual bytes from Telegram API
+        let mut media = Vec::new();
+
+        // Photos: pick the largest resolution, download via getFile
+        if let Some(photos) = &msg.photo {
+            if let Some(photo) = photos.last() {
+                let data = self.download_telegram_file(&photo.file_id).await;
+                if data.is_some() {
+                    info!(
+                        file_id = %photo.file_id,
+                        size = ?data.as_ref().map(|d| d.len()),
+                        "Telegram: downloaded photo attachment"
+                    );
+                }
+                media.push(MediaAttachment {
+                    media_type: clawdesk_types::message::MediaType::Image,
+                    url: None,
+                    data,
+                    mime_type: "image/jpeg".into(),
+                    filename: None,
+                    size_bytes: photo.file_size,
+                });
+            }
+        }
+
+        // Voice messages
+        if let Some(voice) = &msg.voice {
+            let data = self.download_telegram_file(&voice.file_id).await;
+            media.push(MediaAttachment {
+                media_type: clawdesk_types::message::MediaType::Voice,
                 url: None,
-                data: None,
-                mime_type: "image/jpeg".into(),
-                filename: None,
-                size_bytes: p.file_size,
-            }])
-            .unwrap_or_default();
+                data,
+                mime_type: voice.mime_type.clone().unwrap_or_else(|| "audio/ogg".into()),
+                filename: voice.file_name.clone(),
+                size_bytes: voice.file_size,
+            });
+        }
+
+        // Audio files
+        if let Some(audio) = &msg.audio {
+            let data = self.download_telegram_file(&audio.file_id).await;
+            media.push(MediaAttachment {
+                media_type: clawdesk_types::message::MediaType::Audio,
+                url: None,
+                data,
+                mime_type: audio.mime_type.clone().unwrap_or_else(|| "audio/mpeg".into()),
+                filename: audio.file_name.clone(),
+                size_bytes: audio.file_size,
+            });
+        }
+
+        // Documents (PDF, etc.)
+        if let Some(doc) = &msg.document {
+            let data = self.download_telegram_file(&doc.file_id).await;
+            media.push(MediaAttachment {
+                media_type: clawdesk_types::message::MediaType::Document,
+                url: None,
+                data,
+                mime_type: doc.mime_type.clone().unwrap_or_else(|| "application/octet-stream".into()),
+                filename: doc.file_name.clone(),
+                size_bytes: doc.file_size,
+            });
+        }
 
         let origin = clawdesk_types::message::MessageOrigin::Telegram {
             chat_id: msg.chat.id,
@@ -450,7 +531,15 @@ struct TgMessage {
     from: Option<TgUser>,
     chat: TgChat,
     text: Option<String>,
+    /// Caption for photos/documents (Telegram puts the text here, not in `text`).
+    caption: Option<String>,
     photo: Option<Vec<TgPhotoSize>>,
+    /// Voice message.
+    voice: Option<TgFileRef>,
+    /// Audio file.
+    audio: Option<TgFileRef>,
+    /// Document (PDF, etc.).
+    document: Option<TgFileRef>,
     #[serde(default)]
     message_thread_id: Option<i64>,
 }
@@ -475,4 +564,21 @@ struct TgPhotoSize {
     file_size: Option<u64>,
     width: i32,
     height: i32,
+}
+
+/// Generic Telegram file reference (voice, audio, document).
+#[derive(Debug, Deserialize)]
+struct TgFileRef {
+    file_id: String,
+    file_size: Option<u64>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    file_name: Option<String>,
+}
+
+/// Response from Telegram `getFile` API.
+#[derive(Debug, Deserialize)]
+struct TgFileResponse {
+    file_path: Option<String>,
 }

@@ -54,6 +54,17 @@ use clawdesk_types::estimate_tokens;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Base64-encoded image data with MIME type, carried natively through the
+/// provider pipeline so each provider can format it for its own API
+/// (Anthropic `image` blocks, OpenAI `image_url` parts, Gemini `inlineData`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageContent {
+    /// Raw base64-encoded bytes (no `data:` prefix).
+    pub data: String,
+    /// MIME type, e.g. `"image/png"`, `"image/jpeg"`.
+    pub mime_type: String,
+}
+
 /// A request to send to an LLM provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderRequest {
@@ -64,6 +75,11 @@ pub struct ProviderRequest {
     pub temperature: Option<f32>,
     pub tools: Vec<ToolDefinition>,
     pub stream: bool,
+    /// Images attached to the **last user message**. Providers that support
+    /// multimodal input will include these as native content blocks alongside
+    /// the user text. Providers without vision silently ignore them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageContent>,
 }
 
 /// Role in a chat message — closed enum eliminates heap-allocated role strings.

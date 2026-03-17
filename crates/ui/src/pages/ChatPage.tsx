@@ -923,6 +923,8 @@ export function ChatPage({
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const [uploadedContextDocs, setUploadedContextDocs] = useState<UploadedContextDocument[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<api.MessageAttachment[]>([]);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
 
   const pushTrace = useCallback((type: string, summary: string, opts?: { detail?: string; level?: TraceLogEntry["level"]; toolName?: string }) => {
     setTraceEntries((prev) => [...prev, {
@@ -1098,6 +1100,86 @@ export function ChatPage({
       setIsUploadingFiles(false);
     }
   }, [isUploadingFiles, pushToast]);
+
+  // ── Smart attachment handler: auto-detects file type ──
+  // Images and audio → native multimodal attachments (sent with message)
+  // Small documents → inline attachments (sent with message)
+  // Large documents → RAG ingestion (chunked + vector indexed)
+  const handleSmartAttach = useCallback(async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const maxInlineSize = 5 * 1024 * 1024; // 5 MB — inline as attachment
+    const maxFileSize = 20 * 1024 * 1024;  // 20 MB total limit
+    const newAttachments: api.MessageAttachment[] = [];
+    const ragPaths: string[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (file.size > maxFileSize) {
+        pushToast(`"${file.name}" too large (max 20 MB)`);
+        continue;
+      }
+
+      const isImage = file.type.startsWith("image/");
+      const isAudio = file.type.startsWith("audio/");
+      const isSmall = file.size <= maxInlineSize;
+
+      // Images + audio always go as native attachments (multimodal)
+      // Small docs go as attachments too (inline context)
+      // Large docs get RAG-ingested for deep retrieval
+      if (isImage || isAudio || isSmall) {
+        try {
+          const base64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const result = reader.result as string;
+              const commaIdx = result.indexOf(",");
+              resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+            };
+            reader.onerror = () => reject(new Error("Failed to read file"));
+            reader.readAsDataURL(file);
+          });
+          newAttachments.push({
+            data: base64,
+            mime_type: file.type || "application/octet-stream",
+            filename: file.name,
+          });
+        } catch (err: any) {
+          pushToast(`Failed to read "${file.name}": ${err.message}`);
+        }
+      } else {
+        // Large document — use RAG ingestion via Tauri file picker
+        // Note: browser File objects don't have paths, so for RAG we'd need
+        // a fallback. For now, attach as inline (truncated on backend).
+        try {
+          const base64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const result = reader.result as string;
+              const commaIdx = result.indexOf(",");
+              resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+            };
+            reader.onerror = () => reject(new Error("Failed to read file"));
+            reader.readAsDataURL(file);
+          });
+          newAttachments.push({
+            data: base64,
+            mime_type: file.type || "application/octet-stream",
+            filename: file.name,
+          });
+          pushToast(`"${file.name}" attached (${(file.size / 1024).toFixed(0)} KB)`);
+        } catch (err: any) {
+          pushToast(`Failed to read "${file.name}": ${err.message}`);
+        }
+      }
+    }
+    if (newAttachments.length > 0) {
+      setPendingAttachments((prev) => [...prev, ...newAttachments].slice(0, 10));
+    }
+  }, [pushToast]);
+
+  const openSmartAttachPicker = useCallback(() => {
+    attachmentInputRef.current?.click();
+  }, []);
 
   const buildUploadedDocsContext = useCallback(async () => {
     if (!uploadedContextDocs.length) {
@@ -1960,7 +2042,12 @@ export function ChatPage({
 
       // Pass the resolved currentChatId to the backend
       // Add a 120-second timeout to prevent hanging indefinitely
-      const invokePromise = api.sendMessage(agentId, requestContent, userModel, currentChatId ?? undefined, userProvider, userApiKey, userBaseUrl);
+      // Include any pending attachments (images, audio, documents)
+      const attachmentsToSend = pendingAttachments.length > 0 ? [...pendingAttachments] : undefined;
+      if (attachmentsToSend) {
+        setPendingAttachments([]); // Clear attachments after sending
+      }
+      const invokePromise = api.sendMessage(agentId, requestContent, userModel, currentChatId ?? undefined, userProvider, userApiKey, userBaseUrl, attachmentsToSend);
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("Request timed out after 120 seconds. The provider may be slow or unresponsive.")), 120_000)
       );
@@ -2114,7 +2201,7 @@ export function ChatPage({
       });
       setIsSending(false);
     }
-  }, [selectedAgentId, agents, isAutoMode, autoPickAgent, pushToast, effectiveModel, effectiveProvider, effectiveApiKey, effectiveBaseUrl, buildUploadedDocsContext]);
+  }, [selectedAgentId, agents, isAutoMode, autoPickAgent, pushToast, effectiveModel, effectiveProvider, effectiveApiKey, effectiveBaseUrl, buildUploadedDocsContext, pendingAttachments]);
 
   return (
     <div className="view chat-page">
@@ -2637,6 +2724,29 @@ export function ChatPage({
                     ))}
                   </div>
                 )}
+                {pendingAttachments.length > 0 && (
+                  <div className="chat-composer-attachments" aria-label="Pending attachments">
+                    {pendingAttachments.map((att, idx) => {
+                      const isImage = att.mime_type.startsWith("image/");
+                      const isAudio = att.mime_type.startsWith("audio/");
+                      const icon = isImage ? "image" : isAudio ? "mic" : "paperclip";
+                      return (
+                        <span key={idx} className="chat-composer-chip">
+                          <Icon name={icon} />
+                          {att.filename || (isImage ? "Image" : isAudio ? "Audio" : "File")}
+                          <button
+                            className="chat-composer-chip-remove"
+                            aria-label={`Remove ${att.filename || "attachment"}`}
+                            title="Remove attachment"
+                            onClick={() => setPendingAttachments((prev) => prev.filter((_, i) => i !== idx))}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
                 <div className="chat-composer-actions">
                   <div className="chat-composer-left">
                     <ModelSelector
@@ -2658,14 +2768,24 @@ export function ChatPage({
                     {isUploadingFiles && <span className="chat-composer-status">Uploading files</span>}
                   </div>
                   <div className="chat-composer-right">
+                    <input
+                      ref={attachmentInputRef}
+                      type="file"
+                      multiple
+                      accept="image/*,audio/*,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.html,.py,.js,.ts,.rs,.go,.java,.c,.cpp,.h,.rb,.sh"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        void handleSmartAttach(e.target.files);
+                        e.target.value = "";
+                      }}
+                    />
                     <button
                       className="chat-upload-btn"
-                      disabled={isUploadingFiles}
-                      onClick={() => void openComposerFilePicker()}
-                      title="Upload files for RAG context"
+                      onClick={openSmartAttachPicker}
+                      title="Attach files, images, or audio — type is auto-detected"
                     >
                       <Icon name="paperclip" />
-                      <span>{isUploadingFiles ? "Uploading..." : "Upload files"}</span>
+                      <span>Attach</span>
                     </button>
                     <VoiceInput
                       onTranscription={(text) => {

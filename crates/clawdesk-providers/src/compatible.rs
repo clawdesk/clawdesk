@@ -1153,6 +1153,7 @@ mod tests {
             temperature: None,
             tools: Vec::new(),
             stream: false,
+            images: vec![],
         };
 
         let msgs = provider.build_messages(&request);

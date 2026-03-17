@@ -571,6 +571,112 @@ const IRC_JOURNEY: ChannelJourney = {
   ],
 };
 
+const SIGNAL_JOURNEY: ChannelJourney = {
+  channelType: "Signal",
+  steps: [
+    {
+      id: "config",
+      title: "Signal Connection",
+      description:
+        "Connect to Signal via signal-cli's JSON-RPC interface.\n\n" +
+        "**Prerequisites:**\n" +
+        "1. Install [signal-cli](https://github.com/AsamK/signal-cli)\n" +
+        "2. Register/link a phone number\n" +
+        "3. Start the JSON-RPC daemon: `signal-cli -u +1234567890 jsonRpc`",
+      fields: ["phone_number", "rpc_endpoint"],
+      validate: (draft) => {
+        if (!draft.phone_number?.trim()) return "Phone number is required (e.g., +1234567890)";
+        return null;
+      },
+      note: "Default RPC endpoint: http://localhost:8080/api/v1/rpc",
+    },
+  ],
+};
+
+const MATRIX_JOURNEY: ChannelJourney = {
+  channelType: "Matrix",
+  steps: [
+    {
+      id: "config",
+      title: "Matrix Homeserver",
+      description:
+        "Connect to a Matrix homeserver (Element, Synapse, Conduit, etc.).\n\n" +
+        "Create a bot user on your homeserver and generate an access token.",
+      fields: ["homeserver_url", "user_id", "access_token"],
+      validate: (draft) => {
+        if (!draft.homeserver_url?.trim()) return "Homeserver URL is required (e.g., https://matrix.org)";
+        if (!draft.user_id?.trim()) return "User ID is required (e.g., @bot:matrix.org)";
+        if (!draft.access_token?.trim()) return "Access token is required";
+        return null;
+      },
+    },
+  ],
+};
+
+const TEAMS_JOURNEY: ChannelJourney = {
+  channelType: "Teams",
+  steps: [
+    {
+      id: "config",
+      title: "Microsoft Teams Bot",
+      description:
+        "Connect via Azure Bot Framework.\n\n" +
+        "**Setup:**\n" +
+        "1. Register a bot in the [Azure Portal](https://portal.azure.com)\n" +
+        "2. Get the App ID and Secret from the bot registration\n" +
+        "3. Configure the messaging endpoint to point to your ClawDesk instance",
+      fields: ["app_id", "app_secret", "tenant_id"],
+      validate: (draft) => {
+        if (!draft.app_id?.trim()) return "App ID is required";
+        if (!draft.app_secret?.trim()) return "App Secret is required";
+        return null;
+      },
+    },
+  ],
+};
+
+const MASTODON_JOURNEY: ChannelJourney = {
+  channelType: "Mastodon",
+  steps: [
+    {
+      id: "config",
+      title: "Mastodon Instance",
+      description:
+        "Connect to a Mastodon/Fediverse instance.\n\n" +
+        "**Setup:**\n" +
+        "1. Go to your instance Settings → Development → New Application\n" +
+        "2. Grant `read` and `write` scopes\n" +
+        "3. Copy the access token",
+      fields: ["instance_url", "access_token"],
+      validate: (draft) => {
+        if (!draft.instance_url?.trim()) return "Instance URL is required (e.g., https://mastodon.social)";
+        if (!draft.access_token?.trim()) return "Access token is required";
+        return null;
+      },
+    },
+  ],
+};
+
+const WEBHOOK_JOURNEY: ChannelJourney = {
+  channelType: "Webhook",
+  steps: [
+    {
+      id: "config",
+      title: "Webhook Endpoint",
+      description:
+        "Configure a generic webhook for custom integrations.\n\n" +
+        "Inbound: POST JSON `{\"text\": \"...\", \"sender\": \"...\"}` to ClawDesk.\n" +
+        "Outbound: ClawDesk POSTs responses to your callback URL.",
+      fields: ["callback_url", "shared_secret", "listen_port"],
+      validate: (draft) => {
+        if (!draft.callback_url?.trim()) return "Callback URL is required";
+        return null;
+      },
+      note: "Default listen port: 9090. Set a shared secret for HMAC validation.",
+    },
+  ],
+};
+
 /** Registry of all channel journeys. */
 const JOURNEY_REGISTRY: Record<string, ChannelJourney> = {
   Telegram: TELEGRAM_JOURNEY,
@@ -580,6 +686,11 @@ const JOURNEY_REGISTRY: Record<string, ChannelJourney> = {
   Email: EMAIL_JOURNEY,
   IMessage: IMESSAGE_JOURNEY,
   Irc: IRC_JOURNEY,
+  Signal: SIGNAL_JOURNEY,
+  Matrix: MATRIX_JOURNEY,
+  Teams: TEAMS_JOURNEY,
+  Mastodon: MASTODON_JOURNEY,
+  Webhook: WEBHOOK_JOURNEY,
 };
 
 /** Get the journey for a channel type, or null if generic. */

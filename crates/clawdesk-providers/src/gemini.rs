@@ -118,6 +118,7 @@ impl GeminiProvider {
     fn build_contents(
         messages: &[ChatMessage],
         system_prompt: &Option<String>,
+        images: &[crate::ImageContent],
     ) -> (Option<serde_json::Value>, Vec<serde_json::Value>) {
         let system_instruction = system_prompt.as_ref().map(|s| {
             serde_json::json!({
@@ -125,11 +126,16 @@ impl GeminiProvider {
             })
         });
 
+        // Find the last user message index for image injection.
+        let last_user_idx = messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::User);
+
         let mut contents: Vec<serde_json::Value> = Vec::new();
         let mut current_role = String::new();
         let mut current_parts: Vec<serde_json::Value> = Vec::new();
 
-        for m in messages {
+        for (idx, m) in messages.iter().enumerate() {
             let role = match m.role {
                 MessageRole::Assistant => "model",
                 _ => "user", // Encode System, User, and Tool as 'user' for Gemini to satisfy alternating turns
@@ -155,6 +161,17 @@ impl GeminiProvider {
 
             if role == current_role {
                 current_parts.push(serde_json::json!({ "text": text }));
+                // Inject images on the last user message
+                if Some(idx) == last_user_idx && !images.is_empty() {
+                    for img in images {
+                        current_parts.push(serde_json::json!({
+                            "inline_data": {
+                                "mime_type": img.mime_type,
+                                "data": img.data,
+                            }
+                        }));
+                    }
+                }
             } else {
                 if !current_role.is_empty() {
                     contents.push(serde_json::json!({
@@ -164,6 +181,17 @@ impl GeminiProvider {
                 }
                 current_role = role.to_string();
                 current_parts = vec![serde_json::json!({ "text": text })];
+                // Inject images on the last user message
+                if Some(idx) == last_user_idx && !images.is_empty() {
+                    for img in images {
+                        current_parts.push(serde_json::json!({
+                            "inline_data": {
+                                "mime_type": img.mime_type,
+                                "data": img.data,
+                            }
+                        }));
+                    }
+                }
             }
         }
 
@@ -252,7 +280,7 @@ impl Provider for GeminiProvider {
         debug!(%model, messages = request.messages.len(), "calling Gemini API");
 
         let (system_instruction, contents) =
-            Self::build_contents(&request.messages, &request.system_prompt);
+            Self::build_contents(&request.messages, &request.system_prompt, &request.images);
 
         let mut body = serde_json::json!({
             "contents": contents,
@@ -376,7 +404,7 @@ impl Provider for GeminiProvider {
         debug!(%model, "streaming Gemini API");
 
         let (system_instruction, contents) =
-            Self::build_contents(&request.messages, &request.system_prompt);
+            Self::build_contents(&request.messages, &request.system_prompt, &request.images);
 
         let mut body = serde_json::json!({ "contents": contents });
         if let Some(si) = system_instruction {
