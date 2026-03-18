@@ -6,8 +6,8 @@ author = "ClawDesk"
 tags = ["mathematics", "tutoring", "calculus", "statistics", "linear-algebra"]
 
 [model]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+provider = "auto"
+model = "auto"
 fallback = ["openai:o1", "openai:gpt-4o"]
 temperature = 0.3
 max_tokens = 8192

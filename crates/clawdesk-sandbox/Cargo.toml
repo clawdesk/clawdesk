@@ -37,6 +37,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+rustc-hash = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

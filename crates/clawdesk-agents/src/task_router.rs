@@ -181,24 +181,28 @@ pub struct RoutingDecision {
     pub normalized_latency: f64,
 }
 
+/// Feature vector dimension — must match `TaskFeatures::to_vector().len()`.
+const LINUCB_D: usize = 11;
+
 #[derive(Debug, Clone)]
 struct LinUcbArm {
-    a: Vec<Vec<f64>>,
+    /// A matrix stored as flat row-major [f64; D*D].
+    a: [f64; LINUCB_D * LINUCB_D],
     /// Cached inverse of A — maintained via Sherman-Morrison on each update.
-    /// Avoids O(d³) Gaussian elimination on every `predict_and_bonus()`.
-    a_inv: Vec<Vec<f64>>,
-    b: Vec<f64>,
+    a_inv: [f64; LINUCB_D * LINUCB_D],
+    b: [f64; LINUCB_D],
 }
 
 impl LinUcbArm {
     fn new(d: usize) -> Self {
-        let mut a = vec![vec![0.0; d]; d];
-        let mut a_inv = vec![vec![0.0; d]; d];
-        for i in 0..d {
-            a[i][i] = 1.0;
-            a_inv[i][i] = 1.0;
+        debug_assert_eq!(d, LINUCB_D, "dimension mismatch: expected {LINUCB_D}, got {d}");
+        let mut a = [0.0; LINUCB_D * LINUCB_D];
+        let mut a_inv = [0.0; LINUCB_D * LINUCB_D];
+        for i in 0..LINUCB_D {
+            a[i * LINUCB_D + i] = 1.0;
+            a_inv[i * LINUCB_D + i] = 1.0;
         }
-        Self { a, a_inv, b: vec![0.0; d] }
+        Self { a, a_inv, b: [0.0; LINUCB_D] }
     }
 
     /// Update arm with observation (x, reward).
@@ -206,31 +210,30 @@ impl LinUcbArm {
     /// A_new = A_old + x * x^T  →  updates A in O(d²)
     /// A_inv_new via Sherman-Morrison: A_inv - (A_inv * x)(x^T * A_inv) / (1 + x^T * A_inv * x)
     fn update(&mut self, x: &[f64], reward: f64) {
-        let d = x.len();
+        debug_assert_eq!(x.len(), LINUCB_D);
         // Update b: b += reward * x
-        for i in 0..d {
+        for i in 0..LINUCB_D {
             self.b[i] += reward * x[i];
         }
         // Update A: A += x * x^T
-        for i in 0..d {
-            for j in 0..d {
-                self.a[i][j] += x[i] * x[j];
+        for i in 0..LINUCB_D {
+            for j in 0..LINUCB_D {
+                self.a[i * LINUCB_D + j] += x[i] * x[j];
             }
         }
         // Sherman-Morrison update for A_inv:
         // u = A_inv * x
-        let u = mat_vec(&self.a_inv, x);
+        let u = mat_vec_fixed(&self.a_inv, x);
         // denom = 1 + x^T * u
         let denom = 1.0 + dot(x, &u);
         if denom.abs() < 1e-12 {
-            // Degenerate — fall back to full recompute next predict
             return;
         }
         let inv_denom = 1.0 / denom;
-        // A_inv -= (u * u^T) / denom  (since u = A_inv * x, and x^T * A_inv = u^T)
-        for i in 0..d {
-            for j in 0..d {
-                self.a_inv[i][j] -= u[i] * u[j] * inv_denom;
+        // A_inv -= (u * u^T) / denom
+        for i in 0..LINUCB_D {
+            for j in 0..LINUCB_D {
+                self.a_inv[i * LINUCB_D + j] -= u[i] * u[j] * inv_denom;
             }
         }
     }
@@ -240,9 +243,10 @@ impl LinUcbArm {
     /// theta = A_inv * b  →  O(d²) matrix-vector multiply
     /// bonus = alpha * sqrt(x^T * A_inv * x)  →  O(d²)
     fn predict_and_bonus(&self, x: &[f64], alpha: f64) -> (f64, f64) {
-        let theta = mat_vec(&self.a_inv, &self.b);
+        debug_assert_eq!(x.len(), LINUCB_D);
+        let theta = mat_vec_fixed(&self.a_inv, &self.b);
         let pred = dot(&theta, x);
-        let z = mat_vec(&self.a_inv, x);
+        let z = mat_vec_fixed(&self.a_inv, x);
         let quad = dot(x, &z).max(0.0);
         let bonus = alpha * quad.sqrt();
         (pred, bonus)
@@ -255,6 +259,8 @@ pub struct TaskRouter {
     weights: RoutingWeights,
     dims: usize,
     arms: HashMap<String, LinUcbArm>,
+    /// Total feedback observations for alpha decay schedule.
+    total_feedback_count: u64,
 }
 
 impl TaskRouter {
@@ -266,7 +272,13 @@ impl TaskRouter {
             weights,
             dims,
             arms: HashMap::new(),
+            total_feedback_count: 0,
         }
+    }
+
+    /// Compute the effective alpha with Lai-Robbins decay: alpha / (1 + 0.1 * sqrt(t)).
+    fn effective_alpha(&self) -> f64 {
+        self.alpha / (1.0 + 0.1 * (self.total_feedback_count as f64).sqrt())
     }
 
     /// Select best route from a candidate set.
@@ -288,6 +300,7 @@ impl TaskRouter {
         let (c_min, c_max) = min_max(&costs);
         let (l_min, l_max) = min_max(&latencies);
 
+        let alpha = self.effective_alpha();
         let mut best: Option<RoutingDecision> = None;
         for c in candidates {
             let arm = self
@@ -295,7 +308,7 @@ impl TaskRouter {
                 .entry(c.key.clone())
                 .or_insert_with(|| LinUcbArm::new(self.dims));
 
-            let (pred, bonus) = arm.predict_and_bonus(&x, self.alpha);
+            let (pred, bonus) = arm.predict_and_bonus(&x, alpha);
             let q = normalize(c.estimated_quality, q_min, q_max);
             let c_norm = normalize(c.estimated_cost_usd, c_min, c_max);
             let l_norm = normalize(c.estimated_latency_ms, l_min, l_max);
@@ -334,11 +347,17 @@ impl TaskRouter {
         reward: f64,
     ) -> Result<(), String> {
         let x = features.to_vector();
+        debug_assert_eq!(
+            x.len(), self.dims,
+            "feature vector dimension mismatch: expected {}, got {}",
+            self.dims, x.len()
+        );
         let arm = self
             .arms
             .entry(selected_key.to_string())
             .or_insert_with(|| LinUcbArm::new(self.dims));
         arm.update(&x, reward);
+        self.total_feedback_count += 1;
         Ok(())
     }
 }
@@ -369,7 +388,20 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-/// Matrix-vector multiply: result[i] = sum_j m[i][j] * v[j].
+/// Stack-allocated matrix-vector multiply for flat row-major [f64; D*D].
+fn mat_vec_fixed(m: &[f64; LINUCB_D * LINUCB_D], v: &[f64]) -> [f64; LINUCB_D] {
+    let mut result = [0.0; LINUCB_D];
+    for i in 0..LINUCB_D {
+        let mut sum = 0.0;
+        for j in 0..LINUCB_D {
+            sum += m[i * LINUCB_D + j] * v[j];
+        }
+        result[i] = sum;
+    }
+    result
+}
+
+/// Matrix-vector multiply for Vec-based matrices (used by solve_linear).
 fn mat_vec(m: &[Vec<f64>], v: &[f64]) -> Vec<f64> {
     m.iter().map(|row| dot(row, v)).collect()
 }

@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -57,7 +58,7 @@ impl Default for OrchestratorConfig {
         Self {
             max_rewrite_iterations: 10,
             max_concurrent_dispatches: 5,
-            num_processors: 4,
+            num_processors: 5,
             enable_retry: true,
             max_retries: 2,
         }
@@ -335,7 +336,7 @@ impl OrchestrationLoop {
             let dispatch_count = ready.len().min(self.config.max_concurrent_dispatches);
             let nodes_to_dispatch = &ready[..dispatch_count];
 
-            let mut dispatch_handles = Vec::new();
+            let mut dispatch_set: JoinSet<(String, Result<DispatchResult, String>)> = JoinSet::new();
             for node_id in nodes_to_dispatch {
                 // Get node details
                 let node = graph.get_node(node_id).await;
@@ -354,83 +355,88 @@ impl OrchestrationLoop {
                         route: format!("{}", desc),
                     });
 
-                    let handle = tokio::spawn(async move {
-                        dispatcher.dispatch(&nid, &desc, input, &metadata).await
+                    let nid_owned = node_id.clone();
+                    dispatch_set.spawn(async move {
+                        let result = dispatcher.dispatch(&nid, &desc, input, &metadata).await;
+                        (nid_owned, Ok(result))
                     });
-                    dispatch_handles.push((node_id.clone(), handle));
                 }
             }
 
-            // Collect results
-            for (node_id, handle) in dispatch_handles {
-                match handle.await {
-                    Ok(result) => {
-                        if result.success {
-                            let output = result
-                                .output
-                                .unwrap_or(serde_json::json!({"status": "completed"}));
-                            graph
-                                .mark_completed(&node_id, output.clone())
-                                .await;
-                            outputs.insert(node_id.clone(), output);
-                            let _ =
-                                self.event_tx.send(OrchestrationEvent::TaskCompleted {
-                                    node_id: node_id.clone(),
-                                    duration_ms: result.duration_ms,
-                                });
-                            info!(node_id, duration_ms = result.duration_ms, "task completed");
-                        } else {
-                            let error_msg = result
-                                .error
-                                .unwrap_or_else(|| "unknown error".to_string());
-
-                            // Check if this was an escalation
-                            if matches!(result.route, DispatchRoute::HumanEscalation { .. }) {
-                                let _ = self.event_tx.send(OrchestrationEvent::Escalated {
-                                    node_id: node_id.clone(),
-                                    reason: error_msg.clone(),
-                                });
-                                // Don't mark as failed — mark with awaiting_human metadata
-                                // The graph state stays as Running until human responds
-                                continue;
-                            }
-
-                            // Handle retries
-                            let retry_count =
-                                self.retry_counts.entry(node_id.clone()).or_insert(0);
-                            if self.config.enable_retry
-                                && *retry_count < self.config.max_retries
-                            {
-                                *retry_count += 1;
-                                info!(
-                                    node_id,
-                                    retry = *retry_count,
-                                    max = self.config.max_retries,
-                                    "retrying failed task"
-                                );
-                                // Reset to pending for retry
-                                graph.mark_failed(&node_id, error_msg.clone()).await;
-                                // Apply rewrite rules for retry
-                                self.apply_rewrite_rules(graph, &node_id, &mut rewrite_count)
-                                    .await;
-                            } else {
-                                graph.mark_failed(&node_id, error_msg.clone()).await;
-                                let _ = self.event_tx.send(OrchestrationEvent::TaskFailed {
-                                    node_id: node_id.clone(),
-                                    error: error_msg.clone(),
-                                });
-                                // Apply rewrite rules for failure handling
-                                self.apply_rewrite_rules(graph, &node_id, &mut rewrite_count)
-                                    .await;
-                            }
-                        }
-                    }
+            // Collect results as they complete (no head-of-line blocking)
+            while let Some(join_result) = dispatch_set.join_next().await {
+                let (node_id, dispatch_result) = match join_result {
+                    Ok(pair) => pair,
                     Err(e) => {
-                        let error_msg = format!("task panicked: {}", e);
+                        // JoinError means the task panicked — can't recover node_id
+                        warn!(error = %e, "dispatched task panicked");
+                        continue;
+                    }
+                };
+                let result = match dispatch_result {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let error_msg = format!("dispatch error: {}", e);
                         graph.mark_failed(&node_id, error_msg.clone()).await;
                         let _ = self.event_tx.send(OrchestrationEvent::TaskFailed {
                             node_id: node_id.clone(),
                             error: error_msg,
+                        });
+                        self.apply_rewrite_rules(graph, &node_id, &mut rewrite_count)
+                            .await;
+                        continue;
+                    }
+                };
+
+                if result.success {
+                    let output = result
+                        .output
+                        .unwrap_or(serde_json::json!({"status": "completed"}));
+                    graph
+                        .mark_completed(&node_id, output.clone())
+                        .await;
+                    outputs.insert(node_id.clone(), output);
+                    let _ =
+                        self.event_tx.send(OrchestrationEvent::TaskCompleted {
+                            node_id: node_id.clone(),
+                            duration_ms: result.duration_ms,
+                        });
+                    info!(node_id, duration_ms = result.duration_ms, "task completed");
+                } else {
+                    let error_msg = result
+                        .error
+                        .unwrap_or_else(|| "unknown error".to_string());
+
+                    // Check if this was an escalation
+                    if matches!(result.route, DispatchRoute::HumanEscalation { .. }) {
+                        let _ = self.event_tx.send(OrchestrationEvent::Escalated {
+                            node_id: node_id.clone(),
+                            reason: error_msg.clone(),
+                        });
+                        continue;
+                    }
+
+                    // Handle retries
+                    let retry_count =
+                        self.retry_counts.entry(node_id.clone()).or_insert(0);
+                    if self.config.enable_retry
+                        && *retry_count < self.config.max_retries
+                    {
+                        *retry_count += 1;
+                        info!(
+                            node_id,
+                            retry = *retry_count,
+                            max = self.config.max_retries,
+                            "retrying failed task"
+                        );
+                        graph.mark_failed(&node_id, error_msg.clone()).await;
+                        self.apply_rewrite_rules(graph, &node_id, &mut rewrite_count)
+                            .await;
+                    } else {
+                        graph.mark_failed(&node_id, error_msg.clone()).await;
+                        let _ = self.event_tx.send(OrchestrationEvent::TaskFailed {
+                            node_id: node_id.clone(),
+                            error: error_msg.clone(),
                         });
                         self.apply_rewrite_rules(graph, &node_id, &mut rewrite_count)
                             .await;
@@ -444,6 +450,17 @@ impl OrchestrationLoop {
     async fn schedule_heft(&self, graph: &DynamicTaskGraph) {
         let snapshot = graph.snapshot().await;
         let nodes: Vec<&TaskNode> = snapshot.nodes.iter().collect();
+
+        if nodes.is_empty() {
+            tracing::warn!("HEFT scheduling called on empty graph — possible race condition");
+            let _ = self.event_tx.send(OrchestrationEvent::Finished {
+                status: OrchestrationStatus::PartialFailure {
+                    completed: 0,
+                    failed: 0,
+                },
+            });
+            return;
+        }
         let edges: Vec<(&str, &str, f64)> = snapshot
             .edges
             .iter()

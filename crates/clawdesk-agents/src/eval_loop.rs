@@ -18,6 +18,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 // ─── Quality Gate ────────────────────────────────────────────────────────────
@@ -236,8 +237,8 @@ pub enum ReentryLayer {
 pub struct EvalPipeline {
     pub gates: Vec<QualityGate>,
     pub labeler: OutcomeLabeler,
-    /// Consecutive failed gate count for escalation.
-    consecutive_failures: u32,
+    /// Consecutive failed gate count for escalation (atomic for Send+Sync).
+    consecutive_failures: AtomicU32,
     /// Max consecutive failures before abort.
     max_consecutive_failures: u32,
 }
@@ -256,7 +257,7 @@ impl EvalPipeline {
         Self {
             gates,
             labeler: OutcomeLabeler::default(),
-            consecutive_failures: 0,
+            consecutive_failures: AtomicU32::new(0),
             max_consecutive_failures: 3,
         }
     }
@@ -285,7 +286,7 @@ impl EvalPipeline {
     }
 
     /// Evaluate a turn outcome through the full pipeline.
-    pub fn evaluate(&mut self, outcome: &TurnOutcome) -> EvalResult {
+    pub fn evaluate(&self, outcome: &TurnOutcome) -> EvalResult {
         // 1. Run quality gates.
         let gate_results: Vec<GateResult> = self
             .gates
@@ -305,12 +306,13 @@ impl EvalPipeline {
 
         // 3. Decide loop action.
         let decision = if !all_passed {
-            self.consecutive_failures += 1;
-            if self.consecutive_failures >= self.max_consecutive_failures {
+            let prev = self.consecutive_failures.fetch_add(1, Ordering::SeqCst);
+            let count = prev + 1;
+            if count >= self.max_consecutive_failures {
                 LoopDecision::Abort {
                     reason: format!(
                         "{} consecutive gate failures: {}",
-                        self.consecutive_failures,
+                        count,
                         hard_failures
                             .iter()
                             .map(|r| format!("{}: {}", r.gate_name, r.detail))
@@ -337,7 +339,7 @@ impl EvalPipeline {
                 }
             }
         } else {
-            self.consecutive_failures = 0;
+            self.consecutive_failures.store(0, Ordering::SeqCst);
             LoopDecision::Continue
         };
 

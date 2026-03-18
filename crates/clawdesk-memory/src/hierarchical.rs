@@ -212,17 +212,20 @@ impl HierarchicalMemory {
     /// Query memories by tier, sorted by retention (highest first).
     pub fn query_tier(&self, tier: MemoryTier) -> Vec<&TieredMemoryEntry> {
         let now = Utc::now();
-        let mut entries: Vec<_> = self
+        // Collect entries with pre-computed retention scores to avoid
+        // recomputing exp() on every sort comparison (was 2k·log(k) calls,
+        // now k calls).
+        let mut scored: Vec<(f64, &TieredMemoryEntry)> = self
             .entries
             .values()
             .filter(|e| e.tier == tier)
+            .map(|e| (e.retention(&now), e))
             .collect();
-        entries.sort_by(|a, b| {
-            b.retention(&now)
-                .partial_cmp(&a.retention(&now))
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        entries
+        scored.into_iter().map(|(_, e)| e).collect()
     }
 
     /// Run consolidation pass: promote eligible memories to higher tiers.

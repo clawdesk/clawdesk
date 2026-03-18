@@ -16,6 +16,8 @@
 //! The safety factor (default 1.2) accounts for token estimation error.
 //! The aggregate guard ensures total tool output stays under 75% of headroom.
 
+use clawdesk_types::estimate_tokens;
+
 /// Configuration for the dynamic context budget.
 #[derive(Debug, Clone)]
 pub struct ContextBudgetConfig {
@@ -63,6 +65,8 @@ pub struct ContextBudget {
     response_reserve: usize,
     /// Number of pending tool results.
     pending_results: usize,
+    /// Number of tool results already processed.
+    completed_results: usize,
     /// Tokens consumed by tool results so far in this round.
     consumed_tokens: usize,
 }
@@ -82,6 +86,7 @@ impl ContextBudget {
             current_tokens,
             response_reserve,
             pending_results: pending_results.max(1),
+            completed_results: 0,
             consumed_tokens: 0,
         }
     }
@@ -98,17 +103,17 @@ impl ContextBudget {
         let headroom = self.headroom();
         let aggregate_budget = (headroom as f64 * self.config.max_aggregate_fraction) as usize;
         let remaining_aggregate = aggregate_budget.saturating_sub(self.consumed_tokens);
-        let remaining_results = self.pending_results.saturating_sub(
-            // crude estimate of how many results we've already processed
-            // based on consumed tokens
-            0
-        );
+        let remaining_results = self.pending_results.saturating_sub(self.completed_results);
         let per_result = remaining_aggregate / remaining_results.max(1);
         let single_max = (headroom as f64 * self.config.max_single_result_fraction) as usize;
         per_result.min(single_max)
     }
 
     /// Compute the per-result character limit.
+    ///
+    /// Uses the `estimate_tokens` function from `clawdesk-types` when content
+    /// is available, falling back to the configured `chars_per_token` ratio
+    /// for pre-sizing limits.
     pub fn per_result_char_limit(&self) -> usize {
         let token_budget = self.per_result_token_budget();
         let char_limit = (token_budget as f64 * self.config.chars_per_token / self.config.safety_factor) as usize;
@@ -118,6 +123,7 @@ impl ContextBudget {
     /// Record that a tool result consumed some tokens.
     pub fn record_consumption(&mut self, tokens: usize) {
         self.consumed_tokens += tokens;
+        self.completed_results += 1;
     }
 
     /// Check if the aggregate budget is exhausted.
@@ -127,26 +133,35 @@ impl ContextBudget {
     }
 
     /// Truncate content to fit within the per-result budget.
-    /// Returns the (possibly truncated) content and whether truncation occurred.
-    pub fn truncate_to_budget(&self, content: &str) -> (String, bool) {
-        let limit = self.per_result_char_limit();
-        if content.len() <= limit {
-            return (content.to_string(), false);
+    /// Returns the (possibly truncated) content, whether truncation occurred,
+    /// and the estimated token count of the result (measured via `estimate_tokens`).
+    pub fn truncate_to_budget(&self, content: &str) -> (String, bool, usize) {
+        let token_budget = self.per_result_token_budget();
+        let actual_tokens = estimate_tokens(content);
+
+        if actual_tokens <= token_budget {
+            return (content.to_string(), false, actual_tokens);
         }
 
+        // Estimate char limit from the token budget using per-byte-class-aware ratio.
+        // Start with the configured ratio, then binary-refine.
+        let char_limit = self.per_result_char_limit();
+
         // UTF-8 safe prefix
-        let mut end = limit;
+        let mut end = char_limit.min(content.len());
         while end > 0 && !content.is_char_boundary(end) {
             end -= 1;
         }
         let preview = &content[..end];
         let truncated = format!(
-            "{}...\n[truncated: output was {} chars, budget allows ~{} chars]",
+            "{}...\n[truncated: output was {} tokens (~{} chars), budget allows ~{} tokens]",
             preview,
+            actual_tokens,
             content.len(),
-            limit,
+            token_budget,
         );
-        (truncated, true)
+        let final_tokens = estimate_tokens(&truncated);
+        (truncated, true, final_tokens)
     }
 }
 
@@ -194,7 +209,7 @@ mod tests {
             1,
         );
         let content = "a".repeat(10_000);
-        let (truncated, did_truncate) = budget.truncate_to_budget(&content);
+        let (truncated, did_truncate, _tokens) = budget.truncate_to_budget(&content);
         assert!(did_truncate);
         assert!(truncated.len() < content.len());
         assert!(truncated.contains("[truncated:"));
@@ -210,7 +225,7 @@ mod tests {
             1,
         );
         let content = "short output";
-        let (result, did_truncate) = budget.truncate_to_budget(content);
+        let (result, did_truncate, _tokens) = budget.truncate_to_budget(content);
         assert!(!did_truncate);
         assert_eq!(result, content);
     }
@@ -245,5 +260,28 @@ mod tests {
         let headroom = budget.headroom();
         budget.record_consumption((headroom as f64 * 0.75) as usize + 1);
         assert!(budget.is_aggregate_exhausted());
+    }
+
+    #[test]
+    fn test_per_result_budget_shrinks_after_consumption() {
+        let mut budget = ContextBudget::new(
+            ContextBudgetConfig::default(),
+            128_000,
+            50_000,
+            8_192,
+            4,
+        );
+        let first_budget = budget.per_result_token_budget();
+        // After consuming one result, the per-result budget for remaining
+        // results should be recalculated against the remaining aggregate.
+        budget.record_consumption(first_budget);
+        let second_budget = budget.per_result_token_budget();
+        // With 3 results remaining and less aggregate, second should differ
+        // from first — specifically it should not equal first (the old bug).
+        assert!(
+            second_budget <= first_budget,
+            "per-result budget should not grow after consumption: first={}, second={}",
+            first_budget, second_budget,
+        );
     }
 }

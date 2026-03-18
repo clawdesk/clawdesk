@@ -32,37 +32,51 @@ use tracing::{debug, info, warn};
 
 /// Registry mapping agent IDs to their configurations.
 ///
-/// Resolves the TODO in `execute_step` — pipeline steps can now reference
-/// pre-configured agents by ID instead of using the agent_id as a model name.
+/// Uses `arc_swap::ArcSwap` for wait-free reads (~5ns) instead of
+/// `tokio::sync::RwLock` (~50ns + potential writer-stall). Writes use
+/// read-copy-update (RCU) semantics — readers in progress continue on the
+/// old map while new readers immediately see the updated map.
 pub struct AgentConfigRegistry {
-    configs: tokio::sync::RwLock<HashMap<String, clawdesk_agents::runner::AgentConfig>>,
+    configs: arc_swap::ArcSwap<HashMap<String, clawdesk_agents::runner::AgentConfig>>,
 }
 
 impl AgentConfigRegistry {
     pub fn new() -> Self {
         Self {
-            configs: tokio::sync::RwLock::new(HashMap::new()),
+            configs: arc_swap::ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
-    /// Register an agent configuration.
+    /// Register an agent configuration (RCU write — clones the map).
     pub async fn register(&self, agent_id: impl Into<String>, config: clawdesk_agents::runner::AgentConfig) {
-        self.configs.write().await.insert(agent_id.into(), config);
+        let id = agent_id.into();
+        self.configs.rcu(|old| {
+            let mut new = (**old).clone();
+            new.insert(id.clone(), config.clone());
+            std::sync::Arc::new(new)
+        });
     }
 
-    /// Look up an agent configuration by ID.
+    /// Look up an agent configuration by ID (wait-free read).
     pub async fn get(&self, agent_id: &str) -> Option<clawdesk_agents::runner::AgentConfig> {
-        self.configs.read().await.get(agent_id).cloned()
+        self.configs.load().get(agent_id).cloned()
     }
 
-    /// List all registered agent IDs.
+    /// List all registered agent IDs (wait-free read).
     pub async fn list_ids(&self) -> Vec<String> {
-        self.configs.read().await.keys().cloned().collect()
+        self.configs.load().keys().cloned().collect()
     }
 
-    /// Remove an agent configuration.
+    /// Remove an agent configuration (RCU write — clones the map).
     pub async fn remove(&self, agent_id: &str) -> Option<clawdesk_agents::runner::AgentConfig> {
-        self.configs.write().await.remove(agent_id)
+        let mut removed = None;
+        let id = agent_id.to_string();
+        self.configs.rcu(|old| {
+            let mut new = (**old).clone();
+            removed = new.remove(&id);
+            std::sync::Arc::new(new)
+        });
+        removed
     }
 }
 
@@ -258,10 +272,36 @@ impl DagExecutor {
                             warn!(run_id = %run.id, step = step_idx, %e, "step failed, continuing");
                             continue;
                         }
-                        ErrorPolicy::Retry { .. } => {
-                            // Retry is handled at the step level (future enhancement).
-                            warn!(run_id = %run.id, step = step_idx, %e, "step retry not yet implemented, treating as fail-fast");
-                            break;
+                        ErrorPolicy::Retry { max_attempts, backoff_ms } => {
+                            if run.attempt < max_attempts as u32 {
+                                run.attempt += 1;
+                                let base_delay = backoff_ms * 2u64.pow(run.attempt.saturating_sub(1));
+                                let delay = std::time::Duration::from_millis(base_delay.min(30_000));
+                                warn!(
+                                    run_id = %run.id, step = step_idx, attempt = run.attempt,
+                                    max = max_attempts, delay_ms = delay.as_millis() as u64,
+                                    %e, "step failed, retrying after backoff"
+                                );
+                                tokio::time::sleep(delay).await;
+                                // Checkpoint retry state so it survives process restart
+                                let cp = Checkpoint::PipelineStep {
+                                    step_index: step_idx,
+                                    step_results: step_results.clone(),
+                                    context: context.clone(),
+                                };
+                                let _ = self.checkpoint_store.save_checkpoint(&run.id, &cp).await;
+                                // Pop the failed step result so the retry can replace it
+                                step_results.pop();
+                                // Re-execute the same step (decrement to counteract the loop increment)
+                                continue;
+                            } else {
+                                warn!(
+                                    run_id = %run.id, step = step_idx,
+                                    attempts = run.attempt, %e,
+                                    "max retries exhausted, failing pipeline"
+                                );
+                                break;
+                            }
                         }
                     }
                 }

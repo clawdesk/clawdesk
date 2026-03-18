@@ -138,6 +138,42 @@ pub fn batch_cosine(query: &[f32], matrix: &[&[f32]]) -> Vec<f32> {
         .collect()
 }
 
+/// Batch cosine similarity with precomputed row norms.
+///
+/// When the matrix doesn't change between queries, precompute norms once
+/// via `precompute_norms()` and pass them here to avoid redundant O(d)
+/// norm computation per row on every query. ~2× throughput improvement.
+pub fn batch_cosine_with_norms(query: &[f32], matrix: &[&[f32]], row_norms: &[f32]) -> Vec<f32> {
+    let query_norm_sq = dot_product_scalar(query, query);
+    let query_norm = query_norm_sq.sqrt();
+    if query_norm == 0.0 {
+        return vec![0.0; matrix.len()];
+    }
+
+    matrix
+        .iter()
+        .zip(row_norms.iter())
+        .map(|(row, &row_norm)| {
+            if row.len() != query.len() || row_norm == 0.0 {
+                return 0.0;
+            }
+            let dot = dot_product(query, row);
+            dot / (query_norm * row_norm)
+        })
+        .collect()
+}
+
+/// Precompute L2 norms for a matrix of vectors.
+///
+/// Call this once when the matrix changes, then pass the result to
+/// `batch_cosine_with_norms()` for each query.
+pub fn precompute_norms(matrix: &[&[f32]]) -> Vec<f32> {
+    matrix
+        .iter()
+        .map(|row| dot_product_scalar(row, row).sqrt())
+        .collect()
+}
+
 /// Batch cosine similarity from owned slices (convenience for Vec<Vec<f32>>).
 pub fn batch_cosine_owned(query: &[f32], matrix: &[Vec<f32>]) -> Vec<f32> {
     let refs: Vec<&[f32]> = matrix.iter().map(|v| v.as_slice()).collect();

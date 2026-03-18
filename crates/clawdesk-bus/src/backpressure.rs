@@ -126,8 +126,10 @@ impl BackpressureSignal {
 pub enum OverflowStrategy {
     /// Drop the newest event (the one being delivered). Default.
     DropNewest,
-    /// Drop the oldest event in the channel (not trivially possible with mpsc;
-    /// approximate by dropping the new event and incrementing a counter).
+    /// **WARNING**: Currently equivalent to `DropNewest` because `mpsc` does not
+    /// support head-removal. Callers that need true oldest-eviction semantics
+    /// should use a ring-buffer subscriber instead.
+    #[deprecated(note = "behaves identically to DropNewest — mpsc does not support head-removal")]
     DropOldest,
     /// Block until space is available (NOT recommended for hot paths).
     Block,
@@ -224,12 +226,16 @@ struct RegisteredSubscriber {
 /// requirement that forced external serialization of all deliveries.
 pub struct BackpressureManager {
     subscribers: DashMap<String, RegisteredSubscriber>,
+    /// Cached worst signal level — maintained incrementally on deliver/consume.
+    /// Avoids O(S) DashMap scan on every `worst_signal()` poll.
+    cached_worst: std::sync::atomic::AtomicU8,
 }
 
 impl BackpressureManager {
     pub fn new() -> Self {
         Self {
             subscribers: DashMap::new(),
+            cached_worst: std::sync::atomic::AtomicU8::new(0), // Green = 0
         }
     }
 
@@ -423,14 +429,29 @@ impl BackpressureManager {
 
     /// Get the worst (highest) signal level across all subscribers.
     ///
-    /// Returns `Green` if no subscribers are registered.
-    /// Useful for global throttling decisions.
+    /// Returns the cached worst signal level in O(1). The cache is
+    /// updated incrementally on every `try_deliver` and `mark_consumed`.
     pub async fn worst_signal(&self) -> SignalLevel {
-        self.subscribers
+        match self.cached_worst.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => SignalLevel::Green,
+            1 => SignalLevel::Yellow,
+            _ => SignalLevel::Red,
+        }
+    }
+
+    /// Recompute worst signal from all subscribers (called on signal downgrade).
+    fn recompute_worst(&self) {
+        let worst = self.subscribers
             .iter()
             .map(|entry| entry.value().signal.load())
             .max()
-            .unwrap_or(SignalLevel::Green)
+            .unwrap_or(SignalLevel::Green);
+        let val = match worst {
+            SignalLevel::Green => 0u8,
+            SignalLevel::Yellow => 1u8,
+            SignalLevel::Red => 2u8,
+        };
+        self.cached_worst.store(val, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

@@ -25,9 +25,9 @@ use crate::embedding::{EmbeddingProvider, EmbeddingResult, BatchEmbeddingResult}
 use async_trait::async_trait;
 use clawdesk_types::error::MemoryError;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::num::NonZeroUsize;
 use tracing::{debug, info, warn};
 
 /// A cached embedding entry stored in the persistent layer.
@@ -89,38 +89,14 @@ pub trait EmbeddingCacheStore: Send + Sync + 'static {
 pub struct PersistentCachedProvider {
     inner: Arc<dyn EmbeddingProvider>,
     store: Arc<dyn EmbeddingCacheStore>,
-    /// L1 hot cache: HashMap for O(1) lookup + VecDeque for LRU order.
-    l1: Mutex<L1Cache>,
+    /// L1 hot cache: LRU cache with O(1) access/insert/evict.
+    /// Uses parking_lot::Mutex (not tokio) since all ops are CPU-bound.
+    l1: parking_lot::Mutex<lru::LruCache<String, EmbeddingResult>>,
     config: PersistentCacheConfig,
 }
 
-/// LRU-ordered L1 cache.
-///
-/// `entries` holds the cached data. `lru_order` tracks access order
-/// (most-recently-used at back, least-recently-used at front).
-/// `lru_index` provides O(1) position lookup by key, eliminating the
-/// previous O(N) `iter().position()` scan on every access.
-///
-/// On access, the key is promoted to the back. On eviction,
-/// the front entry is removed.
-struct L1Cache {
-    entries: HashMap<String, EmbeddingResult>,
-    lru_order: VecDeque<String>,
-    /// key → position in `lru_order` for O(1) lookup.
-    lru_index: HashMap<String, usize>,
-}
-
-impl L1Cache {
-    /// Rebuild `lru_index` for all entries from `start_pos` onwards.
-    /// Called after a VecDeque remove shifts indices.
-    fn rebuild_index_from(&mut self, start_pos: usize) {
-        for i in start_pos..self.lru_order.len() {
-            if let Some(key) = self.lru_order.get(i) {
-                self.lru_index.insert(key.clone(), i);
-            }
-        }
-    }
-}
+/// LRU-ordered L1 cache — backed by the `lru` crate for O(1) access,
+/// insert, and eviction with zero per-operation allocations.
 
 impl PersistentCachedProvider {
     /// Create a new persistent cached provider.
@@ -129,14 +105,11 @@ impl PersistentCachedProvider {
         store: Arc<dyn EmbeddingCacheStore>,
         config: PersistentCacheConfig,
     ) -> Self {
+        let cap = NonZeroUsize::new(config.l1_max_entries.max(1)).unwrap();
         Self {
             inner,
             store,
-            l1: Mutex::new(L1Cache {
-                entries: HashMap::with_capacity(config.l1_max_entries.min(1024)),
-                lru_order: VecDeque::with_capacity(config.l1_max_entries.min(1024)),
-                lru_index: HashMap::with_capacity(config.l1_max_entries.min(1024)),
-            }),
+            l1: parking_lot::Mutex::new(lru::LruCache::new(cap)),
             config,
         }
     }
@@ -148,60 +121,16 @@ impl PersistentCachedProvider {
         format!("emb_cache/{}", hash)
     }
 
-    /// Try to get an embedding from L1 cache.
-    ///
-    /// Uses a `HashMap<String, usize>` index for O(1) LRU position lookup
-    /// instead of the previous O(N) `iter().position()` scan.
+    /// Try to get an embedding from L1 cache. O(1) with no allocations.
     async fn l1_get(&self, key: &str) -> Option<EmbeddingResult> {
-        let mut l1 = self.l1.lock().await;
-        if let Some(result) = l1.entries.get(key).cloned() {
-            // Promote to MRU position: remove from current pos, push to back.
-            if let Some(&pos) = l1.lru_index.get(key) {
-                l1.lru_order.remove(pos);
-                // Rebuild index for entries after the removed position.
-                // This is O(k) where k = entries after `pos`, but avoids
-                // the previous O(N) full scan on every access.
-                l1.rebuild_index_from(pos);
-            }
-            let new_pos = l1.lru_order.len();
-            l1.lru_order.push_back(key.to_string());
-            l1.lru_index.insert(key.to_string(), new_pos);
-            Some(result)
-        } else {
-            None
-        }
+        let mut l1 = self.l1.lock();
+        l1.get(key).cloned()
     }
 
-    /// Insert into L1 cache with LRU eviction.
+    /// Insert into L1 cache. O(1) with automatic LRU eviction.
     async fn l1_put(&self, key: String, result: EmbeddingResult) {
-        let mut l1 = self.l1.lock().await;
-        if l1.entries.contains_key(&key) {
-            // Already present — update value and promote.
-            l1.entries.insert(key.clone(), result);
-            if let Some(&pos) = l1.lru_index.get(&key) {
-                l1.lru_order.remove(pos);
-                l1.rebuild_index_from(pos);
-            }
-            let new_pos = l1.lru_order.len();
-            l1.lru_order.push_back(key.clone());
-            l1.lru_index.insert(key, new_pos);
-            return;
-        }
-        // Evict LRU entry if at capacity.
-        while l1.entries.len() >= self.config.l1_max_entries {
-            if let Some(evict_key) = l1.lru_order.pop_front() {
-                l1.entries.remove(&evict_key);
-                l1.lru_index.remove(&evict_key);
-                // After pop_front, all indices shift down by 1.
-                l1.rebuild_index_from(0);
-            } else {
-                break;
-            }
-        }
-        let new_pos = l1.lru_order.len();
-        l1.lru_order.push_back(key.clone());
-        l1.lru_index.insert(key.clone(), new_pos);
-        l1.entries.insert(key, result);
+        let mut l1 = self.l1.lock();
+        l1.put(key, result);
     }
 
     /// Try to get an embedding from L2 (persistent) cache.
@@ -324,7 +253,7 @@ impl PersistentCachedProvider {
 
     /// Get the current L1 cache size (for metrics/observability).
     pub async fn l1_size(&self) -> usize {
-        self.l1.lock().await.entries.len()
+        self.l1.lock().len()
     }
 }
 

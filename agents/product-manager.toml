@@ -6,8 +6,8 @@ author = "ClawDesk"
 tags = ["product", "requirements", "prioritization", "strategy"]
 
 [model]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+provider = "auto"
+model = "auto"
 fallback = ["openai:gpt-4o"]
 temperature = 0.5
 max_tokens = 8192

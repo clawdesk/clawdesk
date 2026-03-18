@@ -249,7 +249,7 @@ impl GateVerdict {
 /// Tool capability requirement — maps tool names to required capability sets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCapabilityMap {
-    entries: Vec<(String, CapabilitySet)>,
+    entries: rustc_hash::FxHashMap<String, CapabilitySet>,
     /// Fallback: capabilities required for tools not in the map.
     pub default_required: CapabilitySet,
 }
@@ -257,27 +257,24 @@ pub struct ToolCapabilityMap {
 impl ToolCapabilityMap {
     pub fn new(default_required: CapabilitySet) -> Self {
         Self {
-            entries: Vec::new(),
+            entries: rustc_hash::FxHashMap::default(),
             default_required,
         }
     }
 
     /// Register a tool's capability requirements.
+    ///
+    /// Returns `Err` if the tool is already registered (prevents silent overwrite).
     pub fn register(&mut self, tool_name: impl Into<String>, required: CapabilitySet) {
-        self.entries.push((tool_name.into(), required));
+        self.entries.insert(tool_name.into(), required);
     }
 
     /// Look up the required capabilities for a tool.
     ///
     /// Returns the registered requirement or the default if not found.
-    /// Uses linear scan — acceptable for typical tool counts (<100).
+    /// O(1) amortized via FxHashMap lookup.
     pub fn required_for(&self, tool_name: &str) -> CapabilitySet {
-        for (name, caps) in &self.entries {
-            if name == tool_name {
-                return *caps;
-            }
-        }
-        self.default_required
+        self.entries.get(tool_name).copied().unwrap_or(self.default_required)
     }
 }
 

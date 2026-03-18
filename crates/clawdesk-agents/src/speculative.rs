@@ -26,7 +26,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -153,10 +153,12 @@ impl NWayPredictor {
 
 /// A table of branch predictors, one per Router step.
 ///
-/// Thread-safe: uses interior mutability via `DashMap`-style locking.
+/// Thread-safe: binary predictors use `AtomicU8` (wait-free predict,
+/// CAS-loop update). N-way predictors use `RwLock` with per-entry scope.
 pub struct BranchPredictorTable {
     /// 2-bit predictors for binary Router steps (2 routes).
-    binary: std::sync::RwLock<HashMap<String, PredictorState>>,
+    /// Value is a `PredictorState` encoded as u8 (0-3).
+    binary: std::sync::RwLock<HashMap<String, AtomicU8>>,
     /// N-way predictors for Router steps with >2 routes.
     nway: std::sync::RwLock<HashMap<String, NWayPredictor>>,
     /// Global statistics.
@@ -180,10 +182,11 @@ impl BranchPredictorTable {
     /// `num_routes` is the number of routes the Router has.
     pub fn predict(&self, step_key: &str, num_routes: usize) -> usize {
         if num_routes <= 2 {
+            // Wait-free: single atomic load
             let predictors = self.binary.read().unwrap();
             predictors
                 .get(step_key)
-                .map(|s| s.predicted_route())
+                .map(|atom| PredictorState::from_u8(atom.load(Ordering::Relaxed)).predicted_route())
                 .unwrap_or(0)
         } else {
             let predictors = self.nway.read().unwrap();
@@ -203,11 +206,40 @@ impl BranchPredictorTable {
         }
 
         if num_routes <= 2 {
+            // Try CAS-loop update under read lock first (common path).
+            {
+                let predictors = self.binary.read().unwrap();
+                if let Some(atom) = predictors.get(step_key) {
+                    loop {
+                        let old = atom.load(Ordering::Relaxed);
+                        let state = PredictorState::from_u8(old);
+                        let new_state = state.update(actual_route > 0);
+                        match atom.compare_exchange_weak(
+                            old, new_state as u8,
+                            Ordering::Relaxed, Ordering::Relaxed,
+                        ) {
+                            Ok(_) => break,
+                            Err(_) => continue,
+                        }
+                    }
+                    debug!(
+                        step_key,
+                        predicted = prediction,
+                        actual = actual_route,
+                        hit = prediction == actual_route,
+                        "branch predictor update"
+                    );
+                    return;
+                }
+            }
+            // Key doesn't exist yet — take write lock to insert.
             let mut predictors = self.binary.write().unwrap();
-            let state = predictors
+            let atom = predictors
                 .entry(step_key.to_string())
-                .or_insert(PredictorState::WeaklyNotTaken);
-            *state = state.update(actual_route > 0);
+                .or_insert_with(|| AtomicU8::new(PredictorState::WeaklyNotTaken as u8));
+            let old = atom.load(Ordering::Relaxed);
+            let new_state = PredictorState::from_u8(old).update(actual_route > 0);
+            atom.store(new_state as u8, Ordering::Relaxed);
         } else {
             let mut predictors = self.nway.write().unwrap();
             let predictor = predictors

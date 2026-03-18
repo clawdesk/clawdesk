@@ -6,8 +6,8 @@ author = "ClawDesk"
 tags = ["education", "teaching", "explanation", "tutoring"]
 
 [model]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+provider = "auto"
+model = "auto"
 fallback = ["openai:gpt-4o"]
 temperature = 0.6
 max_tokens = 8192

@@ -252,9 +252,17 @@ impl CostAwareRouter {
             return None;
         }
 
-        let mut scored: Vec<(String, String, f64, f64, f64, bool)> = Vec::new();
+        // Score candidates without cloning strings — use indices into `candidates`.
+        struct ScoredCandidate {
+            idx: usize,
+            quality: f64,
+            cost: f64,
+            latency: f64,
+            warm: bool,
+        }
+        let mut scored: Vec<ScoredCandidate> = Vec::new();
 
-        for entry in &candidates {
+        for (i, entry) in candidates.iter().enumerate() {
             let profile = entry.value();
 
             // Filter by capability requirements.
@@ -285,14 +293,7 @@ impl CostAwareRouter {
                 (default_quality.min(1.0), estimated_cost, 5000.0, false)
             };
 
-            scored.push((
-                profile.model_id.clone(),
-                profile.provider.clone(),
-                quality,
-                cost,
-                latency,
-                warm,
-            ));
+            scored.push(ScoredCandidate { idx: i, quality, cost, latency, warm });
         }
 
         if scored.is_empty() {
@@ -302,21 +303,22 @@ impl CostAwareRouter {
         // Phase 1: Find feasible models (quality ≥ q_min AND latency ≤ l_max).
         let feasible: Vec<_> = scored
             .iter()
-            .filter(|(_, _, q, _, l, _)| {
-                *q >= self.config.min_quality && *l <= self.config.max_latency_ms as f64
+            .filter(|s| {
+                s.quality >= self.config.min_quality && s.latency <= self.config.max_latency_ms as f64
             })
             .collect();
 
         if let Some(best) = feasible
             .iter()
-            .min_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap_or(std::cmp::Ordering::Equal))
         {
+            let profile = candidates[best.idx].value();
             return Some(CostRoutingDecision {
-                model_id: best.0.clone(),
-                provider: best.1.clone(),
-                estimated_quality: best.2,
-                estimated_cost: best.3,
-                estimated_latency_ms: best.4,
+                model_id: profile.model_id.clone(),
+                provider: profile.provider.clone(),
+                estimated_quality: best.quality,
+                estimated_cost: best.cost,
+                estimated_latency_ms: best.latency,
                 constraints_relaxed: false,
                 candidates_considered: scored.len() as u32,
                 reason: "minimum cost among feasible models".into(),
@@ -330,14 +332,15 @@ impl CostAwareRouter {
             // Pick the model with highest quality (regardless of cost/latency).
             if let Some(best) = scored
                 .iter()
-                .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+                .max_by(|a, b| a.quality.partial_cmp(&b.quality).unwrap_or(std::cmp::Ordering::Equal))
             {
+                let profile = candidates[best.idx].value();
                 return Some(CostRoutingDecision {
-                    model_id: best.0.clone(),
-                    provider: best.1.clone(),
-                    estimated_quality: best.2,
-                    estimated_cost: best.3,
-                    estimated_latency_ms: best.4,
+                    model_id: profile.model_id.clone(),
+                    provider: profile.provider.clone(),
+                    estimated_quality: best.quality,
+                    estimated_cost: best.cost,
+                    estimated_latency_ms: best.latency,
                     constraints_relaxed: true,
                     candidates_considered: scored.len() as u32,
                     reason: "constraints relaxed; selected highest quality".into(),

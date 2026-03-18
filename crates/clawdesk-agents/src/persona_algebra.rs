@@ -92,16 +92,26 @@ impl PersonaVector {
     }
 
     /// Normalize to unit length (L2 norm).
-    pub fn normalize(&self) -> Self {
+    ///
+    /// Returns `None` if the vector has near-zero norm (degenerate input),
+    /// rather than silently substituting the neutral vector.
+    pub fn try_normalize(&self) -> Option<Self> {
         let norm: f64 = self.dims.iter().map(|x| x * x).sum::<f64>().sqrt();
         if norm < 1e-10 {
-            return Self::neutral();
+            return None;
         }
         let mut dims = [0.0; NUM_DIMENSIONS];
         for i in 0..NUM_DIMENSIONS {
             dims[i] = self.dims[i] / norm;
         }
-        Self { dims }
+        Some(Self { dims })
+    }
+
+    /// Normalize to unit length (L2 norm).
+    ///
+    /// Falls back to neutral vector on near-zero norm for backward compatibility.
+    pub fn normalize(&self) -> Self {
+        self.try_normalize().unwrap_or_else(Self::neutral)
     }
 
     /// Cosine similarity with another vector ∈ [-1, 1].

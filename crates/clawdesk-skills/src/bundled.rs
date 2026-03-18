@@ -85,6 +85,14 @@ pub fn all_bundled_skills() -> Vec<Skill> {
         system_diagnostics(),
         system_info(),
         help_guide(),
+        // ── Gap-closing skills (v0.1.8) ──────────────────────
+        app_store_submission(),
+        hipaa_medical_research(),
+        ecommerce_operator(),
+        duckdb_crm(),
+        habit_health_tracker(),
+        package_tracker(),
+        voice_journal(),
     ]
 }
 
@@ -484,6 +492,623 @@ fn help_guide() -> Skill {
     )
 }
 
+// ─── Gap-Closing Skills (v0.1.8) ─────────────────────────────────────────────
+//
+// These skills close the 7 documented feature gaps vs OpenClaw:
+//   1. App Store submission pipeline
+//   2. HIPAA medical research agent
+//   3. One-person e-commerce operator
+//   4. SochDB-backed CRM & contact management
+//   5. Habit & health tracking (wearable data)
+//   6. Package tracking / delivery dashboard
+//   7. Voice journaling (Whisper transcription)
+
+fn app_store_submission() -> Skill {
+    make_skill(
+        "core", "appstore-submit",
+        "App Store Submission",
+        "Build, sign, validate, and submit apps to Apple App Store and Google Play",
+        "You can manage the full App Store submission pipeline. Use shell_exec \
+         to run xcodebuild, xcrun altool, and fastlane commands. Steps: \
+         1) Archive the Xcode project (xcodebuild archive). \
+         2) Export the IPA (xcodebuild -exportArchive). \
+         3) Validate with xcrun altool --validate-app. \
+         4) Upload with xcrun altool --upload-app or fastlane deliver. \
+         For Google Play, use bundletool for AAB and the Play Console API. \
+         Always verify code signing identity and provisioning profiles before build. \
+         Store credentials in the system keychain — never log secrets.",
+        vec![
+            SkillToolBinding {
+                tool_name: "shell_exec".to_string(),
+                description: "Execute shell commands for build and submission".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "Shell command to execute" },
+                        "working_dir": { "type": "string", "description": "Working directory" },
+                        "timeout_secs": { "type": "integer", "default": 300 }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "file_read".to_string(),
+                description: "Read project files and plists".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }),
+            },
+        ],
+        vec![
+            SkillParameter {
+                name: "platform".to_string(),
+                description: "Target platform".to_string(),
+                param_type: ParameterType::Enum {
+                    values: vec!["ios".into(), "macos".into(), "android".into()],
+                },
+                required: false,
+                default_value: Some(serde_json::json!("ios")),
+            },
+        ],
+        vec![SkillTrigger::Keywords {
+            words: vec![
+                "app store".into(), "submit".into(), "testflight".into(),
+                "xcodebuild".into(), "fastlane".into(), "ipa".into(),
+                "google play".into(), "aab".into(),
+            ],
+            threshold: 0.3,
+        }],
+        7.0,
+    )
+}
+
+fn hipaa_medical_research() -> Skill {
+    make_skill(
+        "core", "hipaa-medical",
+        "HIPAA Medical Research",
+        "Medical research with HIPAA-compliant data handling and EHR integration",
+        "You are a medical research assistant operating under HIPAA Safe Harbor \
+         de-identification requirements (45 CFR §164.514). \
+         MANDATORY CONSTRAINTS: \
+         - Never store PHI (Protected Health Information) in plaintext. \
+         - Strip all 18 HIPAA identifiers before persisting any patient data. \
+         - Use memory_store with scope='hipaa' for audit-logged persistence. \
+         - All EHR queries via http_fetch must use TLS and bearer-token auth. \
+         - Log every data access for audit trail (memory_store action='audit'). \
+         - Refuse to transmit PHI over unencrypted channels. \
+         Supported EHR systems: FHIR R4 endpoints (Epic, Cerner, Allscripts). \
+         Use web_search for PubMed/ClinicalTrials.gov literature. \
+         Always cite DOI or PMID for clinical references.",
+        vec![
+            SkillToolBinding {
+                tool_name: "memory_store".to_string(),
+                description: "HIPAA-scoped persistent storage with audit logging".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["store", "retrieve", "delete", "audit"] },
+                        "scope": { "type": "string", "enum": ["hipaa", "research", "audit"] },
+                        "key": { "type": "string" },
+                        "value": { "type": "string" },
+                        "ttl_hours": { "type": "integer", "description": "Auto-expire after N hours" }
+                    },
+                    "required": ["action", "scope"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "http_fetch".to_string(),
+                description: "Fetch data from FHIR R4 EHR endpoints".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "FHIR endpoint URL" },
+                        "method": { "type": "string", "enum": ["GET", "POST"], "default": "GET" },
+                        "headers": { "type": "object", "description": "HTTP headers (Authorization, Accept)" },
+                        "body": { "type": "string" }
+                    },
+                    "required": ["url"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "web_search".to_string(),
+                description: "Search PubMed, ClinicalTrials.gov, and medical literature".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" },
+                        "num_results": { "type": "integer", "default": 10 }
+                    },
+                    "required": ["query"]
+                }),
+            },
+        ],
+        vec![],
+        vec![SkillTrigger::Keywords {
+            words: vec![
+                "hipaa".into(), "ehr".into(), "fhir".into(), "patient".into(),
+                "clinical".into(), "medical research".into(), "phi".into(),
+                "de-identify".into(),
+            ],
+            threshold: 0.3,
+        }],
+        8.0,
+    )
+}
+
+fn ecommerce_operator() -> Skill {
+    make_skill(
+        "core", "ecommerce-ops",
+        "E-Commerce Operator",
+        "Autonomous e-commerce, invoicing, inventory, and logistics management",
+        "You are a one-person-company operations agent. You autonomously manage: \
+         - Product catalog: CRUD via http_fetch to Shopify/WooCommerce/custom APIs. \
+         - Invoicing: Generate PDF invoices via shell_exec (weasyprint/wkhtmltopdf). \
+         - Inventory: Track stock levels in memory_store, alert on low-stock. \
+         - Order fulfillment: Monitor orders, create shipping labels via carrier APIs. \
+         - Logistics: Track shipments, update customers on delivery status. \
+         - Scheduling: Use cron_schedule for recurring tasks (daily sales report, \
+           inventory sync, abandoned cart follow-ups). \
+         Store all operational data in memory_store with scope='ecommerce'. \
+         Support multi-currency pricing. Generate daily P&L summaries.",
+        vec![
+            SkillToolBinding {
+                tool_name: "http_fetch".to_string(),
+                description: "API calls to e-commerce platforms and carrier APIs".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string" },
+                        "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+                        "headers": { "type": "object" },
+                        "body": { "type": "string" }
+                    },
+                    "required": ["url"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "shell_exec".to_string(),
+                description: "Run invoice generation, report scripts, and CLI tools".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" },
+                        "timeout_secs": { "type": "integer", "default": 60 }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "memory_store".to_string(),
+                description: "Persist inventory, orders, and operational state".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["store", "retrieve", "query", "delete"] },
+                        "scope": { "type": "string", "default": "ecommerce" },
+                        "key": { "type": "string" },
+                        "value": { "type": "string" }
+                    },
+                    "required": ["action"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "cron_schedule".to_string(),
+                description: "Schedule recurring e-commerce tasks".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Task name" },
+                        "cron": { "type": "string", "description": "Cron expression" },
+                        "action": { "type": "string", "description": "Action to perform" }
+                    },
+                    "required": ["name", "cron", "action"]
+                }),
+            },
+        ],
+        vec![
+            SkillParameter {
+                name: "platform".to_string(),
+                description: "E-commerce platform".to_string(),
+                param_type: ParameterType::Enum {
+                    values: vec!["shopify".into(), "woocommerce".into(), "custom".into()],
+                },
+                required: false,
+                default_value: Some(serde_json::json!("shopify")),
+            },
+            SkillParameter {
+                name: "currency".to_string(),
+                description: "Base currency for pricing".to_string(),
+                param_type: ParameterType::String,
+                required: false,
+                default_value: Some(serde_json::json!("USD")),
+            },
+        ],
+        vec![SkillTrigger::Keywords {
+            words: vec![
+                "ecommerce".into(), "e-commerce".into(), "shopify".into(),
+                "inventory".into(), "invoice".into(), "order".into(),
+                "shipping".into(), "product".into(), "catalog".into(),
+                "woocommerce".into(),
+            ],
+            threshold: 0.3,
+        }],
+        8.0,
+    )
+}
+
+fn duckdb_crm() -> Skill {
+    make_skill(
+        "core", "sochdb-crm",
+        "SochDB CRM",
+        "CRM and contact management with SochDB-backed natural-language queries",
+        "You are a CRM agent backed by SochDB (the embedded ACID vector database). \
+         Manage contacts, companies, deals, and interactions. \
+         CAPABILITIES: \
+         - Add/update/search contacts with full-text + vector similarity search. \
+         - Track deal pipelines: stages, values, expected close dates. \
+         - Log interactions (calls, emails, meetings) with timestamps. \
+         - Natural-language queries: 'show me all contacts at Acme who haven't \
+           been contacted in 30 days' → translated to SochDB filter + temporal decay. \
+         - Relationship graph: model connections between contacts and companies. \
+         - Use memory_store with scope='crm' for all persistence. \
+         All data lives in SochDB — no external database required. \
+         Leverage BM25+vector hybrid search for contact/deal lookups. \
+         Support CSV/JSON import/export via shell_exec.",
+        vec![
+            SkillToolBinding {
+                tool_name: "contacts_add".to_string(),
+                description: "Add or update a contact in the CRM".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "email": { "type": "string" },
+                        "phone": { "type": "string" },
+                        "company": { "type": "string" },
+                        "role": { "type": "string" },
+                        "tags": { "type": "array", "items": { "type": "string" } },
+                        "notes": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "contacts_search".to_string(),
+                description: "Search contacts using natural language or filters".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Natural language or keyword search" },
+                        "company": { "type": "string" },
+                        "tag": { "type": "string" },
+                        "last_contact_days": { "type": "integer", "description": "Filter by days since last contact" },
+                        "top_k": { "type": "integer", "default": 20 }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "memory_store".to_string(),
+                description: "Persist CRM data (deals, interactions, pipelines) in SochDB".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["store", "retrieve", "query", "delete"] },
+                        "scope": { "type": "string", "default": "crm" },
+                        "key": { "type": "string" },
+                        "value": { "type": "string" }
+                    },
+                    "required": ["action", "scope"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "shell_exec".to_string(),
+                description: "CSV/JSON import/export and report generation".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" },
+                        "timeout_secs": { "type": "integer", "default": 30 }
+                    },
+                    "required": ["command"]
+                }),
+            },
+        ],
+        vec![],
+        vec![SkillTrigger::Keywords {
+            words: vec![
+                "crm".into(), "contact".into(), "deal".into(), "pipeline".into(),
+                "lead".into(), "prospect".into(), "customer".into(),
+                "interaction".into(), "follow up".into(),
+            ],
+            threshold: 0.3,
+        }],
+        7.0,
+    )
+}
+
+fn habit_health_tracker() -> Skill {
+    make_skill(
+        "core", "habit-health",
+        "Habit & Health Tracker",
+        "Track habits, fitness data, streaks, and wearable integrations",
+        "You are a habit and health tracking agent. \
+         CAPABILITIES: \
+         - Habit tracking: define habits, log completions, compute streaks. \
+         - Fitness data: ingest WHOOP, Fitbit, Apple Health, Garmin data \
+           via http_fetch to their REST APIs (OAuth2 bearer tokens). \
+         - Sleep analysis: track duration, quality, HRV, resting heart rate. \
+         - Streak tracking: current streak, longest streak, streak recovery. \
+         - Visualizations: generate charts via canvas_eval (JS in WebView). \
+         - Reminders: use cron_schedule for daily habit check-ins. \
+         Store all data in memory_store with scope='health'. \
+         Present weekly/monthly summaries with trend analysis. \
+         Never provide medical diagnoses — always recommend consulting professionals.",
+        vec![
+            SkillToolBinding {
+                tool_name: "memory_store".to_string(),
+                description: "Persist habit logs, streaks, and health metrics".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["store", "retrieve", "query", "delete"] },
+                        "scope": { "type": "string", "default": "health" },
+                        "key": { "type": "string" },
+                        "value": { "type": "string" }
+                    },
+                    "required": ["action", "scope"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "http_fetch".to_string(),
+                description: "Fetch wearable data from WHOOP, Fitbit, Garmin APIs".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string" },
+                        "method": { "type": "string", "default": "GET" },
+                        "headers": { "type": "object" }
+                    },
+                    "required": ["url"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "cron_schedule".to_string(),
+                description: "Schedule daily habit reminders and weekly reports".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "cron": { "type": "string" },
+                        "action": { "type": "string" }
+                    },
+                    "required": ["name", "cron", "action"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "canvas_eval".to_string(),
+                description: "Render health charts and streak visualizations".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "js_code": { "type": "string", "description": "JavaScript to render in WebView" }
+                    },
+                    "required": ["js_code"]
+                }),
+            },
+        ],
+        vec![
+            SkillParameter {
+                name: "wearable".to_string(),
+                description: "Connected wearable platform".to_string(),
+                param_type: ParameterType::Enum {
+                    values: vec!["whoop".into(), "fitbit".into(), "garmin".into(), "apple_health".into(), "none".into()],
+                },
+                required: false,
+                default_value: Some(serde_json::json!("none")),
+            },
+        ],
+        vec![SkillTrigger::Keywords {
+            words: vec![
+                "habit".into(), "streak".into(), "fitness".into(), "sleep".into(),
+                "workout".into(), "whoop".into(), "health track".into(),
+                "heart rate".into(), "hrv".into(),
+            ],
+            threshold: 0.3,
+        }],
+        7.0,
+    )
+}
+
+fn package_tracker() -> Skill {
+    make_skill(
+        "core", "package-track",
+        "Package Tracker",
+        "Monitor shipments, track deliveries, and alert on status changes",
+        "You are a package tracking and delivery dashboard agent. \
+         CAPABILITIES: \
+         - Track packages across carriers: USPS, UPS, FedEx, DHL, SF Express. \
+         - Auto-detect carrier from tracking number format. \
+         - Poll carrier APIs via http_fetch for status updates. \
+         - Store tracking state in memory_store with scope='shipping'. \
+         - Alert on status changes: shipped, in-transit, out-for-delivery, delivered, exception. \
+         - Schedule periodic polling via cron_schedule (every 2 hours). \
+         - Dashboard view: render delivery timeline via canvas_eval. \
+         - Summary: show all active shipments with ETA and current status. \
+         Use web_search as fallback for carriers without API access.",
+        vec![
+            SkillToolBinding {
+                tool_name: "http_fetch".to_string(),
+                description: "Fetch tracking data from carrier APIs".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string" },
+                        "method": { "type": "string", "default": "GET" },
+                        "headers": { "type": "object" }
+                    },
+                    "required": ["url"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "memory_store".to_string(),
+                description: "Persist tracking numbers and delivery states".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["store", "retrieve", "query", "delete"] },
+                        "scope": { "type": "string", "default": "shipping" },
+                        "key": { "type": "string" },
+                        "value": { "type": "string" }
+                    },
+                    "required": ["action", "scope"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "cron_schedule".to_string(),
+                description: "Schedule periodic tracking status polls".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "cron": { "type": "string" },
+                        "action": { "type": "string" }
+                    },
+                    "required": ["name", "cron", "action"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "web_search".to_string(),
+                description: "Fallback carrier tracking via web search".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": { "query": { "type": "string" } },
+                    "required": ["query"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "canvas_eval".to_string(),
+                description: "Render delivery timeline dashboard".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "js_code": { "type": "string" }
+                    },
+                    "required": ["js_code"]
+                }),
+            },
+        ],
+        vec![],
+        vec![SkillTrigger::Keywords {
+            words: vec![
+                "package".into(), "tracking".into(), "shipment".into(),
+                "delivery".into(), "usps".into(), "ups".into(), "fedex".into(),
+                "dhl".into(), "tracking number".into(),
+            ],
+            threshold: 0.3,
+        }],
+        6.0,
+    )
+}
+
+fn voice_journal() -> Skill {
+    make_skill(
+        "core", "voice-journal",
+        "Voice Journal",
+        "Record voice, transcribe with Whisper, and format daily journal entries",
+        "You are a voice journaling agent. \
+         CAPABILITIES: \
+         - Record audio via the clawdesk-voice crate (microphone capture). \
+         - Transcribe using Whisper (local via whisper.cpp or remote via OpenAI API). \
+         - Format transcriptions into structured journal entries with: \
+           date, mood tags, key topics, action items, and gratitude notes. \
+         - Store journal entries in memory_store with scope='journal'. \
+         - Search past entries using natural language (BM25+vector hybrid). \
+         - Generate weekly/monthly reflections from journal corpus. \
+         - Export to Markdown files via file_write. \
+         WORKFLOW: \
+         1) User says 'journal' → start recording. \
+         2) On stop → send audio to Whisper for transcription. \
+         3) Parse transcript → extract structure → persist. \
+         4) Confirm entry with formatted preview.",
+        vec![
+            SkillToolBinding {
+                tool_name: "voice_record".to_string(),
+                description: "Start/stop voice recording via microphone".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["start", "stop", "status"] },
+                        "max_duration_secs": { "type": "integer", "default": 300 }
+                    },
+                    "required": ["action"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "whisper_transcribe".to_string(),
+                description: "Transcribe audio using Whisper (local or API)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "audio_path": { "type": "string", "description": "Path to audio file" },
+                        "language": { "type": "string", "default": "en" },
+                        "model": { "type": "string", "enum": ["tiny", "base", "small", "medium", "large"], "default": "base" }
+                    },
+                    "required": ["audio_path"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "memory_store".to_string(),
+                description: "Persist and search journal entries".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["store", "retrieve", "query", "delete"] },
+                        "scope": { "type": "string", "default": "journal" },
+                        "key": { "type": "string" },
+                        "value": { "type": "string" }
+                    },
+                    "required": ["action", "scope"]
+                }),
+            },
+            SkillToolBinding {
+                tool_name: "file_write".to_string(),
+                description: "Export journal entries to Markdown".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["path", "content"]
+                }),
+            },
+        ],
+        vec![
+            SkillParameter {
+                name: "whisper_backend".to_string(),
+                description: "Whisper transcription backend".to_string(),
+                param_type: ParameterType::Enum {
+                    values: vec!["local".into(), "openai-api".into()],
+                },
+                required: false,
+                default_value: Some(serde_json::json!("local")),
+            },
+        ],
+        vec![SkillTrigger::Keywords {
+            words: vec![
+                "journal".into(), "voice journal".into(), "record".into(),
+                "transcribe".into(), "diary".into(), "daily entry".into(),
+                "whisper".into(),
+            ],
+            threshold: 0.3,
+        }],
+        7.0,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,7 +1116,7 @@ mod tests {
     #[test]
     fn bundled_skills_count() {
         let skills = all_bundled_skills();
-        assert_eq!(skills.len(), 12, "expected 12 bundled skills (email/calendar/tasks removed)");
+        assert_eq!(skills.len(), 19, "expected 19 bundled skills (12 original + 7 gap-closing)");
     }
 
     #[test]
@@ -500,7 +1125,7 @@ mod tests {
         let mut ids: Vec<String> = skills.iter().map(|s| s.manifest.id.0.clone()).collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 12, "skill IDs must be unique");
+        assert_eq!(ids.len(), 19, "skill IDs must be unique");
     }
 
     #[test]
@@ -517,11 +1142,46 @@ mod tests {
     #[test]
     fn bundled_registry_load() {
         let registry = load_bundled_skills();
-        // 12 core + 6 design + 92 embedded legacy skills (gog removed)
+        // 19 core + 6 design + 92 embedded legacy skills (gog removed)
         assert!(
             registry.len() >= 100,
             "expected 100+ skills in registry, got {}",
             registry.len()
+        );
+    }
+
+    #[test]
+    fn gap_closing_skills_present() {
+        let skills = all_bundled_skills();
+        let ids: Vec<String> = skills.iter().map(|s| s.manifest.id.0.clone()).collect();
+        assert!(ids.contains(&"core/appstore-submit".to_string()));
+        assert!(ids.contains(&"core/hipaa-medical".to_string()));
+        assert!(ids.contains(&"core/ecommerce-ops".to_string()));
+        assert!(ids.contains(&"core/sochdb-crm".to_string()));
+        assert!(ids.contains(&"core/habit-health".to_string()));
+        assert!(ids.contains(&"core/package-track".to_string()));
+        assert!(ids.contains(&"core/voice-journal".to_string()));
+    }
+
+    #[test]
+    fn hipaa_skill_has_audit_tool() {
+        let skill = hipaa_medical_research();
+        assert!(
+            skill.provided_tools.iter().any(|t| t.tool_name == "memory_store"),
+            "HIPAA skill must have memory_store for audit logging"
+        );
+    }
+
+    #[test]
+    fn crm_uses_sochdb_not_duckdb() {
+        let skill = duckdb_crm();
+        assert!(
+            skill.manifest.display_name.contains("SochDB"),
+            "CRM skill must use SochDB, not DuckDB"
+        );
+        assert!(
+            skill.prompt_fragment.contains("SochDB"),
+            "CRM prompt must reference SochDB"
         );
     }
 }

@@ -126,6 +126,13 @@ impl PromptBudgetTracker {
         self.total.saturating_sub(self.response_reserve)
     }
 
+    /// Budget available for non-history sections (identity, skills, memory,
+    /// runtime, safety). The `history_floor` is pre-reserved so these
+    /// sections cannot crowd out minimum history.
+    fn spendable(&self) -> usize {
+        self.available().saturating_sub(self.history_floor)
+    }
+
     fn total_consumed(&self) -> usize {
         self.identity_consumed
             + self.skills_consumed
@@ -135,8 +142,17 @@ impl PromptBudgetTracker {
             + self.safety_consumed
     }
 
+    /// Remaining budget for non-history sections.
+    fn non_history_consumed(&self) -> usize {
+        self.identity_consumed
+            + self.skills_consumed
+            + self.memory_consumed
+            + self.runtime_consumed
+            + self.safety_consumed
+    }
+
     fn global_remaining(&self) -> usize {
-        self.available().saturating_sub(self.total_consumed())
+        self.spendable().saturating_sub(self.non_history_consumed())
     }
 
     /// Record identity/persona section token consumption.
@@ -198,21 +214,15 @@ impl PromptBudgetTracker {
 
     /// Record history token consumption.
     ///
-    /// Returns the actual tokens used. If the available budget is less than
-    /// `history_floor`, this clamps to `history_floor` (violating other
-    /// section caps in favour of history — the history_floor invariant).
+    /// History always gets at least `history_floor` tokens (pre-reserved from
+    /// the spendable budget). Beyond the floor, history may consume any
+    /// unspent spendable budget.
     pub fn consume_history(&mut self, tokens: usize) -> usize {
-        let remaining = self.global_remaining();
-        let actual = if remaining < self.history_floor {
-            // History floor takes precedence — but never exceed total budget.
-            let floor_adjusted = tokens.min(self.history_floor).min(remaining);
-            self.history_compressed = tokens > floor_adjusted;
-            floor_adjusted
-        } else {
-            let actual = tokens.min(remaining);
-            self.history_compressed = tokens > actual;
-            actual
-        };
+        // History gets: floor (pre-reserved) + any unspent non-history budget
+        let unspent_spendable = self.spendable().saturating_sub(self.non_history_consumed());
+        let history_budget = self.history_floor + unspent_spendable;
+        let actual = tokens.min(history_budget);
+        self.history_compressed = tokens > actual;
         self.history_consumed = actual;
         actual
     }
@@ -352,22 +362,23 @@ mod tests {
             2_000,   // identity
             2_000,   // skills
             2_000,   // memory
-            1_500,   // history_floor
+            1_500,   // history_floor (pre-reserved from spendable)
             500,     // runtime
             500,     // safety
         );
 
-        // Consume everything except history
+        // Consume everything except history.
+        // spendable = available - history_floor = 8000 - 1500 = 6500
         t.consume_identity(2_000);
         t.consume_runtime(500);
         t.consume_safety(500);
         t.consume_memory(2_000);
         t.skills_consumed = 2_000;
-
-        // Only 1000 remaining, but history_floor is 1500.
-        // The corrected behaviour caps at remaining to prevent budget overflow.
+        // non_history_consumed = 2000 + 500 + 500 + 2000 + 2000 = 7000
+        // But spendable is only 6500, so global_remaining = 0
+        // History still gets the pre-reserved floor = 1500
         let actual = t.consume_history(5_000);
-        assert_eq!(actual, 1_000); // capped to remaining (budget invariant)
+        assert_eq!(actual, 1_500, "history should get at least history_floor via pre-reservation");
         assert!(t.report().history_compressed);
     }
 

@@ -6,8 +6,8 @@ author = "ClawDesk"
 tags = ["slack", "team-chat", "bot"]
 
 [model]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+provider = "auto"
+model = "auto"
 fallback = ["openai:gpt-4o", "gemini:gemini-2.5-flash"]
 temperature = 0.5
 max_tokens = 3000

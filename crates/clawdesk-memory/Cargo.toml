@@ -20,6 +20,8 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
 sha2 = { workspace = true }
+lru = { workspace = true }
+parking_lot = { workspace = true }
 
 # MemoryBackend integration — enables atomic writes, graph, temporal,
 # policy, and trace capabilities when the backend supports them.

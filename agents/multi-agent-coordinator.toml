@@ -6,8 +6,8 @@ author = "ClawDesk"
 tags = ["multi-agent", "acp", "orchestration", "coordination"]
 
 [model]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+provider = "auto"
+model = "auto"
 fallback = ["openai:o1"]
 temperature = 0.3
 max_tokens = 8192

@@ -683,6 +683,180 @@ pub fn load_bundled_packs() -> PackRegistry {
         metadata: Default::default(),
     });
 
+    // ── Gap-Closing Packs (v0.1.8) ────────────────────────
+    register_pack(&mut registry, SkillPack {
+        id: PackId::new("engineering", "appstore-deploy"),
+        display_name: "App Store Deployer".into(),
+        description: "Build, sign, validate, and submit apps to Apple App Store and Google Play".into(),
+        version: "1.0.0".into(),
+        tier: PackTier::Engineering,
+        persona_prompt: "You are a mobile release engineer. Manage the full submission pipeline: build → sign → validate → upload → monitor review. Follow Apple and Google signing requirements precisely. Never log credentials or signing identities.".into(),
+        persona_tokens: 60,
+        skills: vec![
+            SkillWeight::required("appstore-submit"),
+            SkillWeight::required("code-execution"),
+            SkillWeight::new("file-processing", 0.7, false),
+        ],
+        pipeline_template: Some("configure → archive → sign → validate → upload → monitor".into()),
+        tool_policy: PackToolPolicy { allow: vec![], deny: vec![], require: vec!["shell_exec".into()] },
+        fallback_providers: vec!["claude".into()],
+        eligibility: PackEligibility {
+            platforms: vec!["macos".into()],
+            ..Default::default()
+        },
+        traits: vec!["systematic".into(), "engineering".into()],
+        tags: vec!["app-store".into(), "ios".into(), "android".into(), "release".into(), "fastlane".into()],
+        author: Some("ClawDesk".into()),
+        content_address: None,
+        trust_level: None,
+        metadata: Default::default(),
+    });
+    register_pack(&mut registry, SkillPack {
+        id: PackId::new("professional", "hipaa-researcher"),
+        display_name: "HIPAA Medical Researcher".into(),
+        description: "Medical research with HIPAA-compliant data handling and FHIR EHR integration".into(),
+        version: "1.0.0".into(),
+        tier: PackTier::Professional,
+        persona_prompt: "You are a HIPAA-compliant medical research assistant. Enforce Safe Harbor de-identification (18 identifiers). Log every PHI access. Cite clinical sources with DOI/PMID. You are NOT a physician — never diagnose.".into(),
+        persona_tokens: 60,
+        skills: vec![
+            SkillWeight::required("hipaa-medical"),
+            SkillWeight::required("web-search"),
+            SkillWeight::new("summarization", 0.8, false),
+            SkillWeight::new("text-generation", 0.6, false),
+        ],
+        pipeline_template: Some("query → de-identify → analyze → cite → audit".into()),
+        tool_policy: PackToolPolicy::default(),
+        fallback_providers: vec!["claude".into()],
+        eligibility: PackEligibility::default(),
+        traits: vec!["hipaa-compliant".into(), "medical".into(), "evidence-based".into(), "audit-logged".into()],
+        tags: vec!["hipaa".into(), "medical".into(), "ehr".into(), "fhir".into(), "research".into()],
+        author: Some("ClawDesk".into()),
+        content_address: None,
+        trust_level: None,
+        metadata: Default::default(),
+    });
+    register_pack(&mut registry, SkillPack {
+        id: PackId::new("business", "ecommerce-operator"),
+        display_name: "E-Commerce Operator".into(),
+        description: "Autonomous e-commerce: catalog, invoicing, inventory, logistics, and scheduling".into(),
+        version: "1.0.0".into(),
+        tier: PackTier::Business,
+        persona_prompt: "You are a one-person-company operations agent. Manage product catalogs, generate invoices, track inventory, fulfill orders, and run scheduled reports. Optimize for profit margins and customer satisfaction.".into(),
+        persona_tokens: 60,
+        skills: vec![
+            SkillWeight::required("ecommerce-ops"),
+            SkillWeight::required("text-generation"),
+            SkillWeight::new("mathematics", 0.7, false),
+            SkillWeight::new("web-search", 0.5, false),
+        ],
+        pipeline_template: Some("orders → inventory → fulfillment → invoice → report".into()),
+        tool_policy: PackToolPolicy { allow: vec![], deny: vec![], require: vec!["http_fetch".into(), "shell_exec".into()] },
+        fallback_providers: vec!["claude".into(), "gpt4".into()],
+        eligibility: PackEligibility::default(),
+        traits: vec!["systematic".into(), "financial".into(), "concise".into()],
+        tags: vec!["ecommerce".into(), "shopify".into(), "invoicing".into(), "inventory".into(), "logistics".into()],
+        author: Some("ClawDesk".into()),
+        content_address: None,
+        trust_level: None,
+        metadata: Default::default(),
+    });
+    register_pack(&mut registry, SkillPack {
+        id: PackId::new("business", "sochdb-crm"),
+        display_name: "SochDB CRM Manager".into(),
+        description: "Contact management, deal pipelines, and relationship tracking powered by SochDB".into(),
+        version: "1.0.0".into(),
+        tier: PackTier::Business,
+        persona_prompt: "You are a CRM manager backed by SochDB. Manage contacts, track deals, log interactions, and surface relationship insights. Use BM25+vector hybrid search for natural-language contact queries. Present data in structured tables.".into(),
+        persona_tokens: 60,
+        skills: vec![
+            SkillWeight::required("sochdb-crm"),
+            SkillWeight::required("text-generation"),
+            SkillWeight::new("summarization", 0.6, false),
+        ],
+        pipeline_template: Some("ingest → enrich → relate → query → report".into()),
+        tool_policy: PackToolPolicy::default(),
+        fallback_providers: vec!["claude".into()],
+        eligibility: PackEligibility::default(),
+        traits: vec!["systematic".into(), "concise".into(), "structured-report".into()],
+        tags: vec!["crm".into(), "contacts".into(), "deals".into(), "sochdb".into(), "sales".into()],
+        author: Some("ClawDesk".into()),
+        content_address: None,
+        trust_level: None,
+        metadata: Default::default(),
+    });
+    register_pack(&mut registry, SkillPack {
+        id: PackId::new("life", "habit-tracker"),
+        display_name: "Habit & Health Tracker".into(),
+        description: "Habit streaks, fitness data from wearables, sleep analysis, and health dashboards".into(),
+        version: "1.0.0".into(),
+        tier: PackTier::Life,
+        persona_prompt: "You are a habit and health tracking coach. Track daily habits, compute streaks, ingest wearable data, and present trends. Be encouraging but evidence-based. You are NOT a medical professional.".into(),
+        persona_tokens: 60,
+        skills: vec![
+            SkillWeight::required("habit-health"),
+            SkillWeight::required("text-generation"),
+            SkillWeight::new("mathematics", 0.5, false),
+        ],
+        pipeline_template: Some("log → analyze → visualize → coach".into()),
+        tool_policy: PackToolPolicy::default(),
+        fallback_providers: vec!["claude".into()],
+        eligibility: PackEligibility::default(),
+        traits: vec!["friendly".into(), "evidence-based".into(), "systematic".into()],
+        tags: vec!["habits".into(), "health".into(), "fitness".into(), "wearables".into(), "streaks".into()],
+        author: Some("ClawDesk".into()),
+        content_address: None,
+        trust_level: None,
+        metadata: Default::default(),
+    });
+    register_pack(&mut registry, SkillPack {
+        id: PackId::new("life", "package-dashboard"),
+        display_name: "Package Tracker".into(),
+        description: "Monitor shipments across carriers, alert on status changes, delivery timeline dashboard".into(),
+        version: "1.0.0".into(),
+        tier: PackTier::Life,
+        persona_prompt: "You are a delivery tracking assistant. Monitor all active shipments, detect carrier from tracking numbers, poll for updates, and alert on status changes. Present a clear delivery timeline.".into(),
+        persona_tokens: 50,
+        skills: vec![
+            SkillWeight::required("package-track"),
+            SkillWeight::new("text-generation", 0.5, false),
+        ],
+        pipeline_template: Some("register → poll → detect-change → alert → dashboard".into()),
+        tool_policy: PackToolPolicy::default(),
+        fallback_providers: vec!["claude".into()],
+        eligibility: PackEligibility::default(),
+        traits: vec!["concise".into(), "systematic".into()],
+        tags: vec!["packages".into(), "shipping".into(), "delivery".into(), "tracking".into()],
+        author: Some("ClawDesk".into()),
+        content_address: None,
+        trust_level: None,
+        metadata: Default::default(),
+    });
+    register_pack(&mut registry, SkillPack {
+        id: PackId::new("life", "voice-journal"),
+        display_name: "Voice Journaler".into(),
+        description: "Record voice, transcribe with Whisper, format and search daily journal entries".into(),
+        version: "1.0.0".into(),
+        tier: PackTier::Life,
+        persona_prompt: "You are a voice journaling assistant. Record voice entries, transcribe them, extract mood and topics, and build a searchable journal archive. Be warm and reflective. Encourage daily practice.".into(),
+        persona_tokens: 50,
+        skills: vec![
+            SkillWeight::required("voice-journal"),
+            SkillWeight::required("text-generation"),
+            SkillWeight::new("summarization", 0.7, false),
+        ],
+        pipeline_template: Some("record → transcribe → structure → store → reflect".into()),
+        tool_policy: PackToolPolicy::default(),
+        fallback_providers: vec!["claude".into()],
+        eligibility: PackEligibility::default(),
+        traits: vec!["friendly".into(), "conversational".into()],
+        tags: vec!["journal".into(), "voice".into(), "whisper".into(), "diary".into(), "transcription".into()],
+        author: Some("ClawDesk".into()),
+        content_address: None,
+        trust_level: None,
+        metadata: Default::default(),
+    });
+
     // ── Meta Tier ──────────────────────────────────────────
     register_pack(&mut registry, SkillPack {
         id: PackId::new("meta", "orchestrator"),
@@ -796,7 +970,7 @@ mod tests {
     fn test_bundled_pack_count() {
         let registry = load_bundled_packs();
         let count = registry.all_packs().len();
-        assert!(count >= 30, "expected ≥30 bundled packs, got {}", count);
+        assert!(count >= 37, "expected ≥37 bundled packs (30 original + 7 gap-closing), got {}", count);
     }
 
     #[test]
@@ -855,5 +1029,32 @@ mod tests {
         let registry = load_bundled_packs();
         let legal = registry.get_by_str("business/legal").expect("legal pack not found");
         assert!(legal.traits.contains(&"no-legal-advice".to_string()));
+    }
+
+    #[test]
+    fn test_gap_closing_packs_present() {
+        let registry = load_bundled_packs();
+        assert!(registry.get_by_str("engineering/appstore-deploy").is_some(), "appstore-deploy pack missing");
+        assert!(registry.get_by_str("professional/hipaa-researcher").is_some(), "hipaa-researcher pack missing");
+        assert!(registry.get_by_str("business/ecommerce-operator").is_some(), "ecommerce-operator pack missing");
+        assert!(registry.get_by_str("business/sochdb-crm").is_some(), "sochdb-crm pack missing");
+        assert!(registry.get_by_str("life/habit-tracker").is_some(), "habit-tracker pack missing");
+        assert!(registry.get_by_str("life/package-dashboard").is_some(), "package-dashboard pack missing");
+        assert!(registry.get_by_str("life/voice-journal").is_some(), "voice-journal pack missing");
+    }
+
+    #[test]
+    fn test_hipaa_pack_has_compliance_trait() {
+        let registry = load_bundled_packs();
+        let hipaa = registry.get_by_str("professional/hipaa-researcher").expect("hipaa pack not found");
+        assert!(hipaa.traits.contains(&"hipaa-compliant".to_string()));
+        assert!(hipaa.traits.contains(&"audit-logged".to_string()));
+    }
+
+    #[test]
+    fn test_crm_pack_references_sochdb() {
+        let registry = load_bundled_packs();
+        let crm = registry.get_by_str("business/sochdb-crm").expect("sochdb-crm pack not found");
+        assert!(crm.display_name.contains("SochDB"), "CRM pack must reference SochDB");
     }
 }

@@ -199,8 +199,10 @@ impl ShardedRateLimiter {
             let current = bucket.load(Ordering::Relaxed);
             let (mut tokens, last_ms) = unpack_bucket(current);
 
-            // Refill based on elapsed time
-            let elapsed_ms = now_ms.wrapping_sub(last_ms);
+            // Refill based on elapsed time.
+            // Cap at 1 hour to handle u32 timestamp wraparound after ~49.7 days:
+            // any elapsed time beyond 1 hour fully refills the bucket regardless.
+            let elapsed_ms = now_ms.wrapping_sub(last_ms).min(3_600_000);
             let elapsed_secs = elapsed_ms as f64 / 1000.0;
             tokens = (tokens + elapsed_secs * self.refill_per_sec).min(self.capacity);
 

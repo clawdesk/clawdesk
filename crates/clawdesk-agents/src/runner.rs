@@ -1920,7 +1920,7 @@ impl AgentRunner {
         );
         for result in &tool_results {
             let mut content_text = result.content.clone();
-            let (truncated, was_truncated) = ctx_budget.truncate_to_budget(&content_text);
+            let (truncated, was_truncated, _measured_tokens) = ctx_budget.truncate_to_budget(&content_text);
             if was_truncated { content_text = truncated; }
 
             let is_external = result.name.contains("browser")

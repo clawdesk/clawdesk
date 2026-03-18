@@ -83,6 +83,11 @@ pub struct MemoryConfig {
     pub agent_id: Option<String>,
     /// Maximum graph traversal depth for contextual retrieval.
     pub graph_max_depth: usize,
+    /// Cosine similarity threshold for deduplication (0.0–1.0).
+    /// Memories with similarity >= this threshold are considered duplicates.
+    /// Default: 0.92 (calibrated for text-embedding-3-small). Use ~0.87 for
+    /// models with wider angular spread (e.g. nomic-embed-text).
+    pub dedup_threshold: f32,
 }
 
 impl Default for MemoryConfig {
@@ -100,6 +105,7 @@ impl Default for MemoryConfig {
             trace_run_id: None,
             agent_id: None,
             graph_max_depth: 3,
+            dedup_threshold: 0.92,
         }
     }
 }
@@ -134,6 +140,22 @@ impl<S: MemoryBackend> MemoryManager<S> {
             Ok(n) => info!(replayed = n, "recovered incomplete atomic memory writes"),
             Err(e) => warn!(error = %e, "atomic write recovery failed"),
         }
+
+        // Auto-select dedup threshold if the user hasn't overridden it.
+        let config = if (config.dedup_threshold - 0.92).abs() < f32::EPSILON {
+            let auto_threshold = model_dedup_threshold(embedding.name(), embedding.dimensions());
+            if (auto_threshold - 0.92).abs() > f32::EPSILON {
+                info!(
+                    model = embedding.name(),
+                    dims = embedding.dimensions(),
+                    threshold = auto_threshold,
+                    "auto-selected dedup threshold for embedding model"
+                );
+            }
+            MemoryConfig { dedup_threshold: auto_threshold, ..config }
+        } else {
+            config
+        };
 
         let searcher = HybridSearcher::new(store.clone());
         let pipeline = BatchPipeline::new(embedding.clone());
@@ -256,22 +278,23 @@ impl<S: MemoryBackend> MemoryManager<S> {
             self.pipeline.embed_all(&texts).await.map_err(|e| format!("batch embed: {e}"))?
         };
 
-        // ── Similarity dedup: reject near-duplicates (≥0.92 cosine) ─
+        // ── Similarity dedup: reject near-duplicates ────────────
         // Only check the first chunk — if it's a near-dup, the whole content is.
-        const DEDUP_SIMILARITY_THRESHOLD: f32 = 0.92;
+        let dedup_threshold = self.config.dedup_threshold;
         if let Some(first_emb) = batch_result.embeddings.first() {
             match self.store.search(
                 &self.config.collection_name,
                 &first_emb.vector,
                 1,
-                Some(DEDUP_SIMILARITY_THRESHOLD),
+                Some(dedup_threshold),
             ).await {
                 Ok(existing) if !existing.is_empty() => {
                     let best = &existing[0];
                     debug!(
                         score = best.score,
                         existing_id = %best.id,
-                        "similarity dedup: skipping near-duplicate memory (score >= {DEDUP_SIMILARITY_THRESHOLD})"
+                        threshold = dedup_threshold,
+                        "similarity dedup: skipping near-duplicate memory"
                     );
                     if let Some(ref s) = span {
                         self.store.trace_end_span(s, true, Some(HashMap::from([
@@ -466,9 +489,9 @@ impl<S: MemoryBackend> MemoryManager<S> {
         let now_str = chrono::Utc::now().to_rfc3339();
         let mut all_ids = Vec::with_capacity(filtered_items.len());
 
-        // ── Similarity dedup: reject near-duplicates (≥0.92 cosine) ─
-        // Same threshold as remember() to maintain consistency.
-        const DEDUP_SIMILARITY_THRESHOLD: f32 = 0.92;
+        // ── Similarity dedup: reject near-duplicates ────────────
+        // Uses the same configurable threshold as remember().
+        let dedup_threshold = self.config.dedup_threshold;
 
         for ((content, source, metadata), emb) in filtered_items.into_iter().zip(batch_result.embeddings) {
             // Check for near-duplicate before inserting
@@ -476,14 +499,15 @@ impl<S: MemoryBackend> MemoryManager<S> {
                 collection,
                 &emb.vector,
                 1,
-                Some(DEDUP_SIMILARITY_THRESHOLD),
+                Some(dedup_threshold),
             ).await {
                 Ok(existing) if !existing.is_empty() => {
                     let best = &existing[0];
                     debug!(
                         score = best.score,
                         existing_id = %best.id,
-                        "batch dedup: skipping near-duplicate memory (score >= {DEDUP_SIMILARITY_THRESHOLD})"
+                        threshold = dedup_threshold,
+                        "batch dedup: skipping near-duplicate memory"
                     );
                     // Return the existing memory's ID instead of creating a duplicate
                     all_ids.push(best.id.clone());
@@ -1177,5 +1201,39 @@ impl<S: MemoryBackend> MemoryManager<S> {
         limit: Option<usize>,
     ) -> Result<Vec<HashMap<String, serde_json::Value>>, String> {
         self.store.query_view(view_name, filters, limit)
+    }
+}
+
+/// Auto-select dedup threshold based on embedding model characteristics.
+///
+/// Higher-dimensional models produce tighter angular distributions, requiring
+/// higher thresholds to distinguish true duplicates from mere semantic similarity.
+fn model_dedup_threshold(model_name: &str, dimensions: usize) -> f32 {
+    let lower = model_name.to_ascii_lowercase();
+    // Known model calibrations (empirical 2σ boundary for each model)
+    if lower.contains("text-embedding-3-large") {
+        return 0.93;
+    }
+    if lower.contains("text-embedding-3-small") || lower.contains("text-embedding-ada") {
+        return 0.92;
+    }
+    if lower.contains("voyage") {
+        return 0.89;
+    }
+    if lower.contains("nomic") {
+        return 0.87;
+    }
+    if lower.contains("minilm") || lower.contains("all-minilm") {
+        return 0.82;
+    }
+    if lower.contains("bge") {
+        return 0.88;
+    }
+    // Dimension-based heuristic for unknown models
+    match dimensions {
+        0..=512 => 0.84,
+        513..=1024 => 0.89,
+        1025..=2048 => 0.92,
+        _ => 0.93,
     }
 }

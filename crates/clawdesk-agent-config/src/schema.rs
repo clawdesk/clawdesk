@@ -71,10 +71,17 @@ pub struct AgentIdentity {
 /// LLM model selection and fallback chain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
-    /// Primary provider (e.g., "anthropic", "openai", "gemini").
+    /// Primary provider. Use `"auto"` to defer to the user's configured
+    /// provider preference or the TurnRouter's bandit-based model selection.
+    /// Explicit values: `"anthropic"`, `"openai"`, `"gemini"`, `"ollama"`, etc.
+    #[serde(default = "default_provider")]
     pub provider: String,
 
-    /// Primary model name (e.g., "claude-sonnet-4-20250514").
+    /// Primary model name. Use `"auto"` to let the TurnRouter (LinUCB bandit)
+    /// select the optimal model per-turn based on task features. Use `"default"`
+    /// to use the user's configured default model. Explicit values are also
+    /// accepted (e.g., `"claude-sonnet-4-20250514"`).
+    #[serde(default = "default_model")]
     pub model: String,
 
     /// Ordered fallback chain: tried in sequence if primary fails.
@@ -303,6 +310,12 @@ pub struct MetadataConfig {
 
 fn default_version() -> String {
     "1.0.0".into()
+}
+fn default_provider() -> String {
+    "auto".into()
+}
+fn default_model() -> String {
+    "auto".into()
 }
 fn default_temperature() -> f64 {
     0.7

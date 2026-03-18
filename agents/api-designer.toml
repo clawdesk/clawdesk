@@ -6,8 +6,8 @@ author = "ClawDesk"
 tags = ["api", "rest", "graphql", "design"]
 
 [model]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+provider = "auto"
+model = "auto"
 fallback = ["openai:gpt-4o"]
 temperature = 0.4
 max_tokens = 8192

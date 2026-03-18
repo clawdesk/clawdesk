@@ -820,10 +820,13 @@ fn configure_desktop_status_bar(session: &str) -> Result<(), String> {
 /// Configure desktop keybindings for quick navigation across 15 windows.
 fn configure_desktop_keybindings(session: &str) -> Result<(), String> {
     // Alt+number bindings as alternative navigation for 0..9
+    // Note: bind-key -n creates root-table bindings (no prefix needed).
+    // We use -T root explicitly for tmux 3.3+ compatibility.
     for i in 0..=9 {
         let _ = tmux_cmd(&[
-            "bind-key", "-t", session, "-n", &format!("M-{i}"),
-            "select-window", "-t", &format!(":{i}"),
+            "bind-key", "-T", "root", &format!("M-{i}"),
+            "if-shell", "-t", session, "true",
+            &format!("select-window -t {session}:{i}"),
         ]);
     }
     // Alt+F1..F5 for windows 10..14 (beyond digit keys)
@@ -836,8 +839,9 @@ fn configure_desktop_keybindings(session: &str) -> Result<(), String> {
     ];
     for (key, win) in &extended {
         let _ = tmux_cmd(&[
-            "bind-key", "-t", session, "-n", &format!("M-{key}"),
-            "select-window", "-t", &format!(":{win}"),
+            "bind-key", "-T", "root", &format!("M-{key}"),
+            "if-shell", "-t", session, "true",
+            &format!("select-window -t {session}:{win}"),
         ]);
     }
     Ok(())
