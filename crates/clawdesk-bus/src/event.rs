@@ -85,6 +85,11 @@ pub enum EventKind {
     CatalogSynced,
     /// Skill install progress event (step started/completed/download)
     SkillInstallProgress,
+    /// Tool produced media artifact (screenshot, generated image, PDF, audio).
+    /// Payload: `{ "tool_name": str, "media_path": str, "mime_type": str, "session_id": str }`.
+    /// Published at Priority::Standard. Channel adapters subscribe to begin
+    /// uploading media concurrently with continued LLM execution.
+    ToolMediaEmitted,
     /// Custom event from plugin or skill
     Custom(String),
 }

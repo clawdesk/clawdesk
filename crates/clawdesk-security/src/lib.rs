@@ -22,6 +22,7 @@ pub mod exec_approval;
 pub mod group_policy;
 pub mod identity;
 pub mod injection;
+pub mod keychain;
 pub mod oauth;
 pub mod rotation;
 pub mod sandbox_policy;
@@ -44,6 +45,7 @@ pub use exec_approval::{ApprovalError, ApprovalRequest, ApprovalStatus, ExecAppr
 pub use group_policy::GroupPolicyManager;
 pub use identity::IdentityContract;
 pub use injection::{InjectionScanner, InjectionScannerConfig, InputSource, ScanAction, ScanResult};
+pub use keychain::KeychainProvider;
 pub use scanner::CascadeScanner;
 pub use secret_ref::{SecretRef, SecretDetector, resolve_or_passthrough, resolve_or_fallback, migrate_env_to_vault};
 pub use skill_verify::SkillVerifier;

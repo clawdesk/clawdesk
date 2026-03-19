@@ -48,6 +48,48 @@ impl WhatsAppChannel {
         )
     }
 
+    /// Download media from WhatsApp Cloud API (2-step flow).
+    ///
+    /// Step 1: GET /{media_id} → { url: "https://..." }
+    /// Step 2: GET {url} → raw bytes
+    async fn download_media(&self, media_id: &str) -> Option<Vec<u8>> {
+        // Step 1: resolve media ID to download URL
+        let meta_url = format!("https://graph.facebook.com/v18.0/{media_id}");
+        let meta_resp = self.client
+            .get(&meta_url)
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .ok()?;
+
+        if !meta_resp.status().is_success() {
+            debug!(media_id, status = %meta_resp.status(), "WhatsApp media metadata fetch failed");
+            return None;
+        }
+
+        let meta: serde_json::Value = meta_resp.json().await.ok()?;
+        let download_url = meta.get("url")?.as_str()?;
+
+        // Step 2: download the actual bytes
+        let bytes = self.client
+            .get(download_url)
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .ok()?
+            .bytes()
+            .await
+            .ok()?;
+
+        if bytes.len() > 50 * 1024 * 1024 {
+            warn!(media_id, size = bytes.len(), "WhatsApp media exceeds 50MB limit, skipping");
+            return None;
+        }
+
+        debug!(media_id, size = bytes.len(), "WhatsApp media downloaded");
+        Some(bytes.to_vec())
+    }
+
     /// Verify token for webhook setup (GET request from Meta).
     pub fn verify_token(&self) -> &str {
         &self.verify_token
@@ -119,10 +161,14 @@ impl WhatsAppChannel {
                                 .and_then(|i| i.get("mime_type"))
                                 .and_then(|m| m.as_str())
                                 .unwrap_or("image/jpeg");
+                            let media_id = msg.get("image").and_then(|i| i.get("id")).and_then(|i| i.as_str());
+                            let data = if let Some(id) = media_id {
+                                self.download_media(id).await
+                            } else { None };
                             media.push(clawdesk_types::message::MediaAttachment {
                                 media_type: clawdesk_types::message::MediaType::Image,
-                                url: msg.get("image").and_then(|i| i.get("id")).and_then(|i| i.as_str()).map(|s| s.to_string()),
-                                data: None,
+                                url: media_id.map(|s| s.to_string()),
+                                data,
                                 mime_type: mime.to_string(),
                                 filename: None,
                                 size_bytes: None,
@@ -133,14 +179,18 @@ impl WhatsAppChannel {
                                 .and_then(|a| a.get("mime_type"))
                                 .and_then(|m| m.as_str())
                                 .unwrap_or("audio/ogg");
+                            let media_id = msg.get(msg_type).and_then(|a| a.get("id")).and_then(|i| i.as_str());
+                            let data = if let Some(id) = media_id {
+                                self.download_media(id).await
+                            } else { None };
                             media.push(clawdesk_types::message::MediaAttachment {
                                 media_type: if msg_type == "voice" {
                                     clawdesk_types::message::MediaType::Voice
                                 } else {
                                     clawdesk_types::message::MediaType::Audio
                                 },
-                                url: msg.get(msg_type).and_then(|a| a.get("id")).and_then(|i| i.as_str()).map(|s| s.to_string()),
-                                data: None,
+                                url: media_id.map(|s| s.to_string()),
+                                data,
                                 mime_type: mime.to_string(),
                                 filename: None,
                                 size_bytes: None,
@@ -155,10 +205,14 @@ impl WhatsAppChannel {
                                 .and_then(|d| d.get("filename"))
                                 .and_then(|f| f.as_str())
                                 .map(|s| s.to_string());
+                            let media_id = msg.get("document").and_then(|d| d.get("id")).and_then(|i| i.as_str());
+                            let data = if let Some(id) = media_id {
+                                self.download_media(id).await
+                            } else { None };
                             media.push(clawdesk_types::message::MediaAttachment {
                                 media_type: clawdesk_types::message::MediaType::Document,
-                                url: msg.get("document").and_then(|d| d.get("id")).and_then(|i| i.as_str()).map(|s| s.to_string()),
-                                data: None,
+                                url: media_id.map(|s| s.to_string()),
+                                data,
                                 mime_type: mime.to_string(),
                                 filename,
                                 size_bytes: None,
@@ -301,12 +355,47 @@ impl Channel for WhatsAppChannel {
             _ => return Err("cannot send WhatsApp message without WhatsApp origin".into()),
         };
 
-        let body = serde_json::json!({
-            "messaging_product": "whatsapp",
-            "to": target,
-            "type": "text",
-            "text": { "body": msg.body }
-        });
+        let body = if let Some(attachment) = msg.media.first() {
+            // Send media message (image, document, audio, video)
+            let media_type = match attachment.media_type {
+                clawdesk_types::message::MediaType::Image => "image",
+                clawdesk_types::message::MediaType::Audio
+                | clawdesk_types::message::MediaType::Voice => "audio",
+                clawdesk_types::message::MediaType::Document => "document",
+                clawdesk_types::message::MediaType::Video => "video",
+                _ => "document", // fallback
+            };
+
+            if let Some(ref media_url) = attachment.url {
+                // Send by URL (link to hosted media)
+                let mut media_obj = serde_json::json!({ "link": media_url });
+                if !msg.body.is_empty() {
+                    media_obj["caption"] = serde_json::json!(msg.body);
+                }
+                serde_json::json!({
+                    "messaging_product": "whatsapp",
+                    "to": target,
+                    "type": media_type,
+                    (media_type): media_obj,
+                })
+            } else {
+                // No URL — fall back to text with description
+                serde_json::json!({
+                    "messaging_product": "whatsapp",
+                    "to": target,
+                    "type": "text",
+                    "text": { "body": msg.body }
+                })
+            }
+        } else {
+            // Plain text message
+            serde_json::json!({
+                "messaging_product": "whatsapp",
+                "to": target,
+                "type": "text",
+                "text": { "body": msg.body }
+            })
+        };
 
         let resp = self
             .client
@@ -345,6 +434,7 @@ impl Channel for WhatsAppChannel {
     }
 
     async fn stop(&self) -> Result<(), String> {
+        *self.sink.write().await = None;
         info!("WhatsApp channel stopped");
         Ok(())
     }

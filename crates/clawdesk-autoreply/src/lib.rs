@@ -18,12 +18,14 @@
 pub mod block_stream;
 pub mod chunking;
 pub mod classifier;
+pub mod command_auth;
 pub mod command_registry;
 pub mod commands;
 pub mod debounce;
 pub mod directive;
 pub mod echo;
 pub mod formatter;
+pub mod media_directive;
 pub mod pipeline;
 pub mod router;
 
@@ -33,5 +35,6 @@ pub use command_registry::{CommandRegistry, CommandDef, ParsedCommand, CommandRe
 pub use directive::{Directives, ThinkLevel, parse_directives, merge_directives};
 pub use echo::{EchoSuppressor, EchoSuppressionConfig, SuppressionReason};
 pub use formatter::ResponseFormatter;
+pub use media_directive::{MediaSplit, parse_media_directives};
 pub use pipeline::ReplyPipeline;
 pub use router::MessageRouter;

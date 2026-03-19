@@ -25,6 +25,7 @@ pub mod browser_tools;
 pub mod btw;
 pub mod builtin_tools;
 pub mod causal_trace;
+pub mod cli_runner;
 pub mod compaction;
 pub mod context;
 pub mod context_budget;

@@ -1838,12 +1838,20 @@ pub struct MessagingToolSend {
 /// Accumulated during `execute_loop()` and attached to `AgentResponse`.
 /// The reply formatter uses this to strip payloads that duplicate
 /// tool-sent content (following the `filterMessagingToolDuplicates`).
+///
+/// ## Media deduplication
+/// Tracks sent media URLs via a `HashSet` for O(1) lookup. Prevents double
+/// delivery when the same media is sent via a tool call and also appears
+/// in the final response `media_urls`.
 #[derive(Debug, Clone, Default)]
 pub struct MessagingToolTracker {
     /// All successful sends during this agent run.
     sends: Vec<MessagingToolSend>,
     /// Normalized sent texts for O(1) substring-match lookups.
     normalized_texts: Vec<String>,
+    /// Canonicalized media URLs that have been sent via tool calls.
+    /// O(1) amortized insert/lookup via FxHashSet.
+    sent_media_urls: rustc_hash::FxHashSet<String>,
     /// Cap on tracked sends (FIFO eviction beyond this).
     max_tracked: usize,
 }
@@ -1853,6 +1861,7 @@ impl MessagingToolTracker {
         Self {
             sends: Vec::new(),
             normalized_texts: Vec::new(),
+            sent_media_urls: rustc_hash::FxHashSet::default(),
             max_tracked: 200,
         }
     }
@@ -1860,6 +1869,12 @@ impl MessagingToolTracker {
     /// Record a successful send.
     pub fn record(&mut self, send: MessagingToolSend) {
         let normalized = Self::normalize_text(&send.content);
+
+        // Track media URLs for deduplication
+        for url in &send.media_urls {
+            self.sent_media_urls.insert(Self::canonicalize_url(url));
+        }
+
         self.sends.push(send);
         self.normalized_texts.push(normalized);
 
@@ -1889,6 +1904,22 @@ impl MessagingToolTracker {
         false
     }
 
+    /// Check if a media URL was already sent via a tool call.
+    ///
+    /// O(1) amortized lookup. Uses canonicalized URL for comparison,
+    /// handling trailing slashes, query parameter ordering differences, etc.
+    pub fn is_media_duplicate(&self, url: &str) -> bool {
+        self.sent_media_urls.contains(&Self::canonicalize_url(url))
+    }
+
+    /// Filter a list of media URLs, removing any already sent via tool calls.
+    pub fn filter_duplicate_media(&self, urls: &[String]) -> Vec<String> {
+        urls.iter()
+            .filter(|url| !self.is_media_duplicate(url))
+            .cloned()
+            .collect()
+    }
+
     /// Check if any send targeted the same channel+target as the originator.
     pub fn sent_to_originator(&self, channel: Option<&str>, target: &str) -> bool {
         self.sends.iter().any(|s| {
@@ -1913,6 +1944,19 @@ impl MessagingToolTracker {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// Canonicalize a URL for dedup comparison.
+    ///
+    /// Strips trailing slashes, normalizes to lowercase for scheme/host,
+    /// and removes fragment identifiers.
+    fn canonicalize_url(url: &str) -> String {
+        let url = url.trim();
+        // Remove fragment
+        let url = url.split('#').next().unwrap_or(url);
+        // Remove trailing slash (but not for root paths)
+        let url = if url.len() > 1 { url.trim_end_matches('/') } else { url };
+        url.to_string()
     }
 }
 

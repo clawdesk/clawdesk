@@ -89,6 +89,19 @@ args = ["-y", "@modelcontextprotocol/server-puppeteer"]
         category: "devtools",
         description: "Browser automation and web scraping",
     },
+    BundledTemplate {
+        name: "clawdesk-browser",
+        toml_content: r#"
+name = "clawdesk-browser"
+description = "ClawDesk native browser automation via CDP with DOM Intelligence"
+[transport]
+type = "stdio"
+command = "clawdesk"
+args = ["mcp", "serve", "--tools", "browser"]
+"#,
+        category: "devtools",
+        description: "Native CDP browser automation with actionability gates, DOM Intelligence (400-1200 tokens vs 12500 for raw HTML), and reliability layer",
+    },
 ];
 
 /// Get a bundled template by name.
@@ -127,7 +140,7 @@ mod tests {
     #[test]
     fn has_bundled_templates() {
         assert!(!BUNDLED_TEMPLATES.is_empty());
-        assert!(BUNDLED_TEMPLATES.len() >= 5);
+        assert!(BUNDLED_TEMPLATES.len() >= 6);
     }
 
     #[test]

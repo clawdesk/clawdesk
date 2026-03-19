@@ -88,6 +88,10 @@ impl ChannelConstraints {
 }
 
 /// A formatted message segment ready for delivery.
+///
+/// Carries the full payload needed by channel adapters: text, media
+/// attachments, threading metadata, voice hints, and error flags.
+/// Zero information loss at the formatting boundary.
 #[derive(Debug, Clone)]
 pub struct FormattedSegment {
     /// The text content.
@@ -96,6 +100,15 @@ pub struct FormattedSegment {
     pub part: usize,
     /// Total number of parts.
     pub total_parts: usize,
+    /// Media attachment URLs for this segment.
+    /// Populated on the first segment when media accompanies the response.
+    pub media_urls: Vec<String>,
+    /// Reply-to message ID for threading support.
+    pub reply_to: Option<String>,
+    /// Whether audio media should be sent as a voice message.
+    pub audio_as_voice: bool,
+    /// Whether this segment represents an error message.
+    pub is_error: bool,
 }
 
 /// Formats agent responses to fit channel constraints.
@@ -107,6 +120,35 @@ impl ResponseFormatter {
         let constraints = ChannelConstraints::for_channel(channel);
         let processed = Self::process_formatting(body, &constraints);
         Self::split_to_segments(&processed, &constraints)
+    }
+
+    /// Format a response with full metadata propagation.
+    ///
+    /// Media URLs are attached to the first segment (channels send media
+    /// before/with the first text chunk). Reply-to and voice hints are
+    /// propagated to all segments for threading consistency.
+    pub fn format_with_media(
+        body: &str,
+        channel: &ChannelId,
+        media_urls: Vec<String>,
+        reply_to: Option<String>,
+        audio_as_voice: bool,
+        is_error: bool,
+    ) -> Vec<FormattedSegment> {
+        let mut segments = Self::format(body, channel);
+
+        // Propagate metadata to all segments
+        for (i, seg) in segments.iter_mut().enumerate() {
+            // Media attached to first segment only
+            if i == 0 {
+                seg.media_urls = media_urls.clone();
+            }
+            seg.reply_to = reply_to.clone();
+            seg.audio_as_voice = audio_as_voice;
+            seg.is_error = is_error;
+        }
+
+        segments
     }
 
     /// Format a single streaming chunk for a specific channel.
@@ -208,6 +250,10 @@ impl ResponseFormatter {
                 text: text.to_string(),
                 part: 1,
                 total_parts: 1,
+                media_urls: Vec::new(),
+                reply_to: None,
+                audio_as_voice: false,
+                is_error: false,
             }];
         }
 
@@ -250,6 +296,10 @@ impl ResponseFormatter {
                 text,
                 part: i + 1,
                 total_parts: total,
+                media_urls: Vec::new(),
+                reply_to: None,
+                audio_as_voice: false,
+                is_error: false,
             })
             .collect()
     }

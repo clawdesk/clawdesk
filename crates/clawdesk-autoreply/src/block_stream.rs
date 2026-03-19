@@ -146,15 +146,55 @@ impl BlockCoalescer {
 
 /// Heartbeat typing indicator scheduler.
 ///
-/// Single timer for all active conversations — O(1) per-tick processing.
+/// Maintains per-channel refresh intervals because each platform requires
+/// different typing indicator cadences:
+/// - Discord: refresh every 10s (typing status expires after 10s)
+/// - Telegram: refresh every 5s (upload_chat_action lasts ~5s)
+/// - Slack: refresh every 3s
+/// - WhatsApp: single indicator per message (no refresh needed)
+/// - Default: 8s
 pub struct TypingHeartbeat {
-    /// Interval per channel type (e.g., Telegram: 5s, Discord: 10s).
+    /// Default interval for channels without a specific override.
     pub default_interval: Duration,
+    /// Per-channel interval overrides.
+    channel_intervals: std::collections::HashMap<String, Duration>,
 }
 
 impl TypingHeartbeat {
-    pub fn new(interval_secs: u64) -> Self {
-        Self { default_interval: Duration::from_secs(interval_secs) }
+    pub fn new(default_interval_secs: u64) -> Self {
+        Self {
+            default_interval: Duration::from_secs(default_interval_secs),
+            channel_intervals: Self::default_channel_intervals(),
+        }
+    }
+
+    /// Get the typing indicator refresh interval for a specific channel.
+    pub fn interval_for(&self, channel: &str) -> Duration {
+        self.channel_intervals
+            .get(&channel.to_lowercase())
+            .copied()
+            .unwrap_or(self.default_interval)
+    }
+
+    /// Override the interval for a specific channel.
+    pub fn set_channel_interval(&mut self, channel: &str, interval: Duration) {
+        self.channel_intervals.insert(channel.to_lowercase(), interval);
+    }
+
+    /// Whether a channel needs periodic typing refresh (false = fire-and-forget).
+    pub fn needs_refresh(&self, channel: &str) -> bool {
+        // WhatsApp and email don't need periodic refresh.
+        !matches!(channel.to_lowercase().as_str(), "whatsapp" | "email" | "sms")
+    }
+
+    fn default_channel_intervals() -> std::collections::HashMap<String, Duration> {
+        let mut m = std::collections::HashMap::new();
+        m.insert("discord".to_string(), Duration::from_secs(10));
+        m.insert("telegram".to_string(), Duration::from_secs(5));
+        m.insert("slack".to_string(), Duration::from_secs(3));
+        m.insert("matrix".to_string(), Duration::from_secs(8));
+        m.insert("teams".to_string(), Duration::from_secs(5));
+        m
     }
 }
 
@@ -180,5 +220,24 @@ mod tests {
         c.push(Block::Text { content: "end".into() });
         let deliveries = c.flush_all();
         assert!(deliveries.len() >= 2); // at least text + code
+    }
+
+    #[test]
+    fn typing_heartbeat_per_channel() {
+        let hb = TypingHeartbeat::new(8);
+        assert_eq!(hb.interval_for("discord"), Duration::from_secs(10));
+        assert_eq!(hb.interval_for("telegram"), Duration::from_secs(5));
+        assert_eq!(hb.interval_for("slack"), Duration::from_secs(3));
+        // Unknown channel uses default.
+        assert_eq!(hb.interval_for("irc"), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn typing_heartbeat_no_refresh_for_whatsapp() {
+        let hb = TypingHeartbeat::new(8);
+        assert!(!hb.needs_refresh("whatsapp"));
+        assert!(!hb.needs_refresh("email"));
+        assert!(hb.needs_refresh("discord"));
+        assert!(hb.needs_refresh("telegram"));
     }
 }

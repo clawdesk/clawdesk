@@ -25,6 +25,7 @@ pub mod headless;
 pub mod manager;
 pub mod page;
 pub mod profile;
+pub mod reliability;
 pub mod route_dispatcher;
 pub mod safety;
 pub mod session_registry;
@@ -48,3 +49,4 @@ pub use extension_relay::{ExtensionRelay, RelayConfig, RelayState, RelaySession}
 pub use session_registry::{SessionTabRegistry, ProfileId, TargetId, TabState, TabEntry};
 pub use route_dispatcher::{AgentRoute, RouteRequest, RouteResponse, NavigationGuard};
 pub use headless::{RemoteCdpConfig, PageAction, ActionBatch, ActionOutcome, PageState, ActivityTracker, DownloadCapture, rewrite_cdp_url};
+pub use reliability::{ReliabilityConfig, ErrorClass, ActionabilityResult, NetworkIdleTracker, classify_cdp_error, with_retry};

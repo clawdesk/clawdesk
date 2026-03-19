@@ -24,10 +24,11 @@ pub mod limits {
     pub const DEFAULT_MAX: usize = 4096;
 }
 
-/// A chunk envelope that carries threading metadata through message splitting.
+/// A chunk envelope that carries threading and media metadata through message splitting.
 ///
 /// Ensures all chunks in a split delivery reference the same `reply_to` ID,
-/// maintaining conversational context in group chats.
+/// maintaining conversational context in group chats. Media URLs are attached
+/// to the first chunk only (channels send media before/with the first text).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkEnvelope {
     /// The chunk content text.
@@ -42,6 +43,12 @@ pub struct ChunkEnvelope {
     pub total: usize,
     /// Channel-specific metadata (e.g., chat_id for Telegram).
     pub channel_id: Option<String>,
+    /// Media attachment URLs — attached to the first chunk only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_urls: Vec<String>,
+    /// Whether audio media should be sent as a voice message.
+    #[serde(default)]
+    pub audio_as_voice: bool,
 }
 
 impl ChunkEnvelope {
@@ -54,6 +61,8 @@ impl ChunkEnvelope {
             sequence: 0,
             total: 1,
             channel_id: None,
+            media_urls: Vec::new(),
+            audio_as_voice: false,
         }
     }
 
@@ -104,6 +113,8 @@ pub fn split_with_threading(
             sequence: i,
             total,
             channel_id: None,
+            media_urls: Vec::new(),
+            audio_as_voice: false,
         })
         .collect()
 }
@@ -264,6 +275,8 @@ mod tests {
             sequence: 0,
             total: 3,
             channel_id: None,
+            media_urls: Vec::new(),
+            audio_as_voice: false,
         };
         assert!(chunk.is_first());
         assert!(!chunk.is_last());

@@ -16,6 +16,9 @@ pub struct ClassifierConfig {
     pub auto_reply_dms: bool,
     /// Channels where the bot responds to all messages.
     pub auto_reply_channels: Vec<ChannelId>,
+    /// Keyword triggers — if any of these appear in a group message, activate.
+    /// Case-insensitive substring matching. Empty = keyword gating disabled.
+    pub keyword_triggers: Vec<String>,
 }
 
 impl Default for ClassifierConfig {
@@ -25,6 +28,7 @@ impl Default for ClassifierConfig {
             command_prefix: "/".to_string(),
             auto_reply_dms: true,
             auto_reply_channels: vec![],
+            keyword_triggers: vec![],
         }
     }
 }
@@ -103,6 +107,24 @@ impl TriggerClassifier {
                     confidence: 0.95,
                     should_reply: true,
                 });
+            }
+        }
+
+        // Check for keyword triggers — activate in groups when a trigger
+        // phrase appears. Uses the same zero-allocation ASCII search.
+        if !self.config.keyword_triggers.is_empty() && !self.is_dm(msg) {
+            for keyword in &self.config.keyword_triggers {
+                if ascii_contains_ignore_case(body, keyword) {
+                    return Some(TriggerClassification {
+                        trigger: TriggerType::ChannelSpecific {
+                            channel: msg.sender.channel.to_string(),
+                            trigger: format!("keyword:{}", keyword),
+                        },
+                        priority: ReplyPriority::Normal,
+                        confidence: 0.9,
+                        should_reply: true,
+                    });
+                }
             }
         }
 
@@ -227,5 +249,37 @@ mod tests {
         });
         let msg = test_msg("random message", ChannelId::Telegram);
         assert!(classifier.classify(&msg).is_none());
+    }
+
+    #[test]
+    fn test_keyword_trigger_in_group() {
+        let classifier = TriggerClassifier::new(ClassifierConfig {
+            keyword_triggers: vec!["deploy".to_string(), "rollback".to_string()],
+            auto_reply_dms: false,
+            ..Default::default()
+        });
+        // Telegram group message with keyword.
+        let msg = test_msg("we need to deploy the latest build", ChannelId::Telegram);
+        let result = classifier.classify(&msg);
+        assert!(result.is_some());
+        let classification = result.unwrap();
+        assert!(matches!(
+            classification.trigger,
+            TriggerType::ChannelSpecific { ref trigger, .. } if trigger.contains("keyword:deploy")
+        ));
+    }
+
+    #[test]
+    fn test_keyword_not_triggered_in_dm() {
+        // Keywords should only trigger in group context, not DMs.
+        let classifier = TriggerClassifier::new(ClassifierConfig {
+            keyword_triggers: vec!["deploy".to_string()],
+            auto_reply_dms: false,
+            ..Default::default()
+        });
+        let msg = test_msg("deploy now", ChannelId::Internal);
+        // Internal is a DM, keyword should not trigger.
+        let result = classifier.classify(&msg);
+        assert!(result.is_none());
     }
 }

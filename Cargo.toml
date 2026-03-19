@@ -199,6 +199,9 @@ argon2 = "0.5"
 zeroize = { version = "1", features = ["derive"] }
 rand = "0.8"
 
+# --- Image processing ---
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
 # --- Directory walking ---
 walkdir = "2"
 

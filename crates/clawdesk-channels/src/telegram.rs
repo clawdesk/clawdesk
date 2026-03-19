@@ -49,8 +49,8 @@ pub struct TelegramChannel {
     enable_groups: bool,
     /// Last processed update offset for long-polling.
     offset: AtomicI64,
-    /// Shutdown signal.
-    running: AtomicBool,
+    /// Shutdown signal (shared with poll loop so stop() propagates).
+    running: Arc<AtomicBool>,
     /// Shutdown notifier.
     shutdown: Notify,
     /// Auto-discovered chat ID from `getUpdates` probe at startup.
@@ -70,7 +70,7 @@ impl TelegramChannel {
             allowed_chat_ids,
             enable_groups,
             offset: AtomicI64::new(0),
-            running: AtomicBool::new(false),
+            running: Arc::new(AtomicBool::new(false)),
             shutdown: Notify::new(),
             discovered_chat_id: AtomicI64::new(0),
         }
@@ -100,7 +100,7 @@ impl TelegramChannel {
                 .json(&serde_json::json!({
                     "offset": offset,
                     "timeout": 30,
-                    "allowed_updates": ["message", "edited_message"]
+                    "allowed_updates": ["message", "edited_message", "callback_query", "poll_answer", "message_reaction"]
                 }))
                 .send()
                 .await;
@@ -370,19 +370,22 @@ impl Channel for TelegramChannel {
         }
 
         // Spawn the long-polling loop on a background task.
-        // We create a new TelegramChannel instance so the spawned future
-        // has 'static lifetime and owns its state independently.
-        let poll_channel = Arc::new(TelegramChannel::new(
-            self.bot_token.clone(),
-            self.allowed_chat_ids.clone(),
-            self.enable_groups,
-        ));
-        // Propagate the discovered chat_id to the poll instance
-        poll_channel.discovered_chat_id.store(
-            self.discovered_chat_id.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-        poll_channel.running.store(true, Ordering::Relaxed);
+        // Share the running flag so stop() can signal the poll loop.
+        let poll_channel = Arc::new(TelegramChannel {
+            client: Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("failed to build HTTP client"),
+            bot_token: self.bot_token.clone(),
+            allowed_chat_ids: self.allowed_chat_ids.clone(),
+            enable_groups: self.enable_groups,
+            offset: AtomicI64::new(0),
+            running: self.running.clone(),
+            shutdown: Notify::new(),
+            discovered_chat_id: AtomicI64::new(
+                self.discovered_chat_id.load(Ordering::Relaxed),
+            ),
+        });
 
         tokio::spawn(async move {
             poll_channel.poll_loop(sink).await;
@@ -475,19 +478,39 @@ impl Channel for TelegramChannel {
 #[async_trait]
 impl Streaming for TelegramChannel {
     async fn send_streaming(&self, initial: OutboundMessage) -> Result<StreamHandle, String> {
+        // Extract chat_id before consuming initial in send()
+        let chat_id = match &initial.origin {
+            clawdesk_types::message::MessageOrigin::Telegram { chat_id, .. } => *chat_id,
+            _ => return Err("streaming requires Telegram origin with chat_id".into()),
+        };
+
         // Send initial placeholder message
         let receipt = self.send(initial).await?;
         let msg_id = receipt.message_id.clone();
-        let _client = self.client.clone();
-        let _bot_token = self.bot_token.clone();
 
-        // Return a handle that can update the message via editMessageText
+        let client = self.client.clone();
+        let bot_token = self.bot_token.clone();
+        let msg_id_for_edit = msg_id.clone();
+
         Ok(StreamHandle {
-            message_id: msg_id.clone(),
-            update_fn: Box::new(move |_text: &str| {
-                // Note: Telegram edit requires chat_id. In a real impl,
-                // we'd capture it in the closure. For now, this is a
-                // structural placeholder showing the pattern.
+            message_id: msg_id,
+            update_fn: Box::new(move |text: &str| {
+                let url = format!(
+                    "https://api.telegram.org/bot{}/editMessageText",
+                    bot_token
+                );
+                let body = serde_json::json!({
+                    "chat_id": chat_id,
+                    "message_id": msg_id_for_edit.parse::<i64>().unwrap_or(0),
+                    "text": text,
+                    "parse_mode": "Markdown",
+                });
+                // Fire-and-forget edit (Telegram rate-limits edits to 1/sec per message;
+                // the caller should debounce at 1Hz)
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let _ = client.post(&url).json(&body).send().await;
+                });
                 Ok(())
             }),
         })
@@ -497,15 +520,67 @@ impl Streaming for TelegramChannel {
 #[async_trait]
 impl Reactions for TelegramChannel {
     async fn add_reaction(&self, msg_id: &str, emoji: &str) -> Result<(), String> {
-        let _url = self.api_url("setMessageReaction");
-        // Telegram Bot API supports reactions via setMessageReaction
-        // This requires bot API 7.0+
-        debug!(msg_id, emoji, "adding Telegram reaction");
+        // msg_id format: "chat_id:message_id"
+        let parts: Vec<&str> = msg_id.splitn(2, ':').collect();
+        let (chat_id, message_id) = if parts.len() == 2 {
+            (parts[0], parts[1])
+        } else {
+            return Err("msg_id must be chat_id:message_id format".into());
+        };
+
+        let url = self.api_url("setMessageReaction");
+        let body = serde_json::json!({
+            "chat_id": chat_id.parse::<i64>().unwrap_or(0),
+            "message_id": message_id.parse::<i64>().unwrap_or(0),
+            "reaction": [{ "type": "emoji", "emoji": emoji }],
+        });
+
+        let resp = self.client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Telegram setMessageReaction failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("Telegram reaction failed ({status}): {err}"));
+        }
+
+        debug!(msg_id, emoji, "Telegram reaction added");
         Ok(())
     }
 
-    async fn remove_reaction(&self, msg_id: &str, emoji: &str) -> Result<(), String> {
-        debug!(msg_id, emoji, "removing Telegram reaction");
+    async fn remove_reaction(&self, msg_id: &str, _emoji: &str) -> Result<(), String> {
+        let parts: Vec<&str> = msg_id.splitn(2, ':').collect();
+        let (chat_id, message_id) = if parts.len() == 2 {
+            (parts[0], parts[1])
+        } else {
+            return Err("msg_id must be chat_id:message_id format".into());
+        };
+
+        let url = self.api_url("setMessageReaction");
+        let body = serde_json::json!({
+            "chat_id": chat_id.parse::<i64>().unwrap_or(0),
+            "message_id": message_id.parse::<i64>().unwrap_or(0),
+            "reaction": [],
+        });
+
+        let resp = self.client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Telegram removeReaction failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("Telegram remove reaction failed ({status}): {err}"));
+        }
+
+        debug!(msg_id, "Telegram reaction removed");
         Ok(())
     }
 }

@@ -1,4 +1,4 @@
-[agent]
+ [agent]
 name = "architect"
 description = "Systems architect for design decisions, trade-off analysis, and technical strategy"
 version = "1.0.0"

@@ -171,6 +171,10 @@ impl Sandbox for DockerSandbox {
         // Network isolation (default: none)
         if !request.network_allowed {
             docker_args.push("--network=none".to_string());
+        } else {
+            // Enable host gateway so containers can reach host-local services
+            // (e.g., the ClawDesk gateway API, local databases, dev servers).
+            docker_args.push("--add-host=host.docker.internal:host-gateway".to_string());
         }
 
         // Mount workspace read-write at /workspace
@@ -253,7 +257,7 @@ impl Sandbox for DockerSandbox {
                 "ps",
                 "-aq",
                 "--filter",
-                &format!("name={}*", self.name_prefix),
+                &format!("name={}", self.name_prefix),
             ])
             .output()
             .await

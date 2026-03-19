@@ -3,15 +3,24 @@
 //! Combines conversation history, vector search results, and system prompts
 //! into a context payload that fits within the model's token budget.
 //!
+//! ## Pluggable Context Sources
+//!
+//! Implement `ContextSource` and register with `ContextAssembler::register()`
+//! to add new context sources (RAG, link understanding, hooks, etc.) without
+//! modifying the core assembly pipeline. Each source declares a priority and
+//! token budget; the assembler allocates budget proportionally.
+//!
 //! ## Zero-Copy Design
 //!
 //! `PromptRope` stores prompt fragments as `Cow<'a, str>` references,
 //! deferring concatenation until final IO. Context assembly is O(K)
 //! where K is the number of fragments, not O(N) total bytes.
 
+use async_trait::async_trait;
 use clawdesk_providers::ChatMessage;
 use clawdesk_types::estimate_tokens;
 use std::borrow::Cow;
+use std::sync::Arc;
 use tracing::debug;
 
 /// Token budget configuration for context assembly.
@@ -146,17 +155,248 @@ impl<'a> Default for PromptRope<'a> {
 /// Assembles context for LLM calls from multiple sources.
 pub struct ContextAssembler {
     budget: ContextBudget,
+    /// Pluggable context sources, sorted by priority at assembly time.
+    sources: Vec<Arc<dyn ContextSource>>,
+}
+
+// ---------------------------------------------------------------------------
+// Pluggable context source trait
+// ---------------------------------------------------------------------------
+
+/// A context block produced by a `ContextSource`.
+#[derive(Debug, Clone)]
+pub struct ContextBlock {
+    /// Source identifier for debugging/observability.
+    pub source_id: String,
+    /// The rendered content to inject into the context.
+    pub content: String,
+    /// Actual tokens used.
+    pub tokens_used: usize,
+}
+
+/// Session context available to context sources during rendering.
+pub struct SessionContext<'a> {
+    /// Current conversation history.
+    pub history: &'a [ChatMessage],
+    /// Session key/ID.
+    pub session_key: &'a str,
+    /// Agent ID.
+    pub agent_id: &'a str,
+}
+
+/// Trait for pluggable context sources.
+///
+/// Implement this trait and register with `ContextAssembler::register()` to
+/// inject context from new sources (RAG results, link previews, hooks, etc.)
+/// without modifying the core assembly pipeline.
+#[async_trait]
+pub trait ContextSource: Send + Sync {
+    /// Unique identifier for this source (used in logs and budgeting).
+    fn id(&self) -> &str;
+
+    /// Priority (lower = higher priority, rendered first). System prompt = 0,
+    /// conversation history = 10, vector results = 20. User sources should
+    /// use 30+ unless overriding core behavior.
+    fn priority(&self) -> u32;
+
+    /// Minimum tokens this source needs to be useful. If the budget cannot
+    /// accommodate this minimum, the source is dropped entirely.
+    fn min_tokens(&self) -> usize { 0 }
+
+    /// Preferred token budget (the source will get up to this much).
+    fn preferred_tokens(&self) -> usize { 2000 }
+
+    /// Render the context content within the given token budget.
+    async fn render(&self, ctx: &SessionContext<'_>, budget: usize) -> Option<ContextBlock>;
+}
+
+// ---------------------------------------------------------------------------
+// Built-in context sources
+// ---------------------------------------------------------------------------
+
+/// Built-in: conversation history (priority 10).
+pub struct HistorySource;
+
+#[async_trait]
+impl ContextSource for HistorySource {
+    fn id(&self) -> &str { "history" }
+    fn priority(&self) -> u32 { 10 }
+    fn min_tokens(&self) -> usize { 100 }
+    fn preferred_tokens(&self) -> usize { 64_000 }
+
+    async fn render(&self, ctx: &SessionContext<'_>, budget: usize) -> Option<ContextBlock> {
+        let mut messages_text = Vec::new();
+        let mut used = 0;
+        for msg in ctx.history.iter().rev() {
+            let tokens = estimate_tokens(&msg.content);
+            if used + tokens > budget { break; }
+            messages_text.push(msg.content.clone());
+            used += tokens;
+        }
+        messages_text.reverse();
+        if messages_text.is_empty() { return None; }
+        Some(ContextBlock {
+            source_id: self.id().to_string(),
+            content: messages_text.join("\n"),
+            tokens_used: used,
+        })
+    }
+}
+
+/// Built-in: vector search results (priority 20).
+pub struct VectorSource {
+    pub results: Vec<String>,
+}
+
+#[async_trait]
+impl ContextSource for VectorSource {
+    fn id(&self) -> &str { "vector_search" }
+    fn priority(&self) -> u32 { 20 }
+    fn preferred_tokens(&self) -> usize { 4_000 }
+
+    async fn render(&self, _ctx: &SessionContext<'_>, budget: usize) -> Option<ContextBlock> {
+        if self.results.is_empty() { return None; }
+        let mut content = String::from("<relevant_context>\n");
+        let mut used = 0;
+        for result in &self.results {
+            let tokens = estimate_tokens(result);
+            if used + tokens > budget { break; }
+            content.push_str(result);
+            content.push('\n');
+            used += tokens;
+        }
+        content.push_str("</relevant_context>");
+        if used == 0 { return None; }
+        Some(ContextBlock {
+            source_id: self.id().to_string(),
+            content,
+            tokens_used: used,
+        })
+    }
 }
 
 impl ContextAssembler {
     pub fn new(budget: ContextBudget) -> Self {
-        Self { budget }
+        Self { budget, sources: Vec::new() }
+    }
+
+    /// Register a pluggable context source.
+    pub fn register(&mut self, source: Arc<dyn ContextSource>) {
+        self.sources.push(source);
+    }
+
+    /// Build context using registered sources with priority-weighted budget allocation.
+    ///
+    /// Algorithm:
+    /// 1. Sort sources by priority (lower = higher priority).
+    /// 2. Phase 1: allocate min_tokens to each source; drop lowest-priority
+    ///    sources if total exceeds available budget.
+    /// 3. Phase 2: distribute remaining budget proportionally by priority.
+    /// 4. Phase 3: redistribute unclaimed budget from capped sources.
+    /// 5. Render each source within its allocated budget.
+    pub async fn assemble_pluggable(
+        &self,
+        system_prompt: &str,
+        session: &SessionContext<'_>,
+    ) -> AssembledContext {
+        let available = self.budget.max_tokens
+            .saturating_sub(self.budget.system_reserve)
+            .saturating_sub(self.budget.response_reserve);
+
+        // Sort sources by priority.
+        let mut indexed_sources: Vec<(usize, &Arc<dyn ContextSource>)> =
+            self.sources.iter().enumerate().collect();
+        indexed_sources.sort_by_key(|(_, s)| s.priority());
+
+        // Phase 1: allocate minimums, dropping lowest-priority if over budget.
+        let mut allocations: Vec<(usize, usize)> = Vec::new(); // (source_idx, budget)
+        let mut total_min = 0;
+        for &(idx, ref source) in &indexed_sources {
+            let min = source.min_tokens();
+            if total_min + min > available {
+                // Drop this source — not enough budget.
+                continue;
+            }
+            total_min += min;
+            allocations.push((idx, min));
+        }
+
+        // Phase 2: distribute remaining budget proportionally.
+        let remaining = available.saturating_sub(total_min);
+        if remaining > 0 {
+            let total_priority: u32 = allocations.iter()
+                .map(|(idx, _)| {
+                    let p = self.sources[*idx].priority();
+                    // Invert priority so lower number = higher weight.
+                    100u32.saturating_sub(p).max(1)
+                })
+                .sum();
+
+            for alloc in allocations.iter_mut() {
+                let source = &self.sources[alloc.0];
+                let weight = 100u32.saturating_sub(source.priority()).max(1);
+                let extra = (remaining as u64 * weight as u64 / total_priority.max(1) as u64) as usize;
+                let preferred = source.preferred_tokens();
+                let capped_extra = extra.min(preferred.saturating_sub(alloc.1));
+                alloc.1 += capped_extra;
+            }
+        }
+
+        // Render sources.
+        let mut context_blocks: Vec<ContextBlock> = Vec::new();
+        for (idx, budget) in &allocations {
+            let source = &self.sources[*idx];
+            if let Some(block) = source.render(session, *budget).await {
+                context_blocks.push(block);
+            }
+        }
+
+        // Build the final assembled context.
+        let mut system = system_prompt.to_string();
+        let mut total_tokens = estimate_tokens(&system);
+        let mut messages = Vec::new();
+
+        for block in &context_blocks {
+            if block.source_id == "history" {
+                // History goes as messages, not system prompt.
+                for msg in session.history.iter().rev() {
+                    let tokens = estimate_tokens(&msg.content);
+                    if total_tokens + tokens > available + self.budget.system_reserve {
+                        break;
+                    }
+                    messages.push(msg.clone());
+                    total_tokens += tokens;
+                }
+                messages.reverse();
+            } else {
+                // Other sources get appended to system prompt.
+                system.push_str("\n\n");
+                system.push_str(&block.content);
+                total_tokens += block.tokens_used;
+            }
+        }
+
+        debug!(
+            sources = context_blocks.len(),
+            history_msgs = messages.len(),
+            estimated_tokens = total_tokens,
+            "pluggable context assembled"
+        );
+
+        AssembledContext {
+            system_prompt: system,
+            messages,
+            estimated_tokens: total_tokens,
+        }
     }
 
     /// Build context from conversation history and optional vector search results.
     ///
     /// Uses a greedy approach: recent messages have priority, then vector results
     /// fill remaining budget.
+    ///
+    /// **Preserved for backwards compatibility.** New callers should prefer
+    /// `assemble_pluggable()` with registered `ContextSource` implementations.
     pub fn assemble(
         &self,
         system_prompt: &str,

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Entry in the process registry.
 #[derive(Debug)]
@@ -49,6 +49,9 @@ pub struct ManagedProcess {
     exit_code: Mutex<Option<i32>>,
     /// Maximum output buffer size (prevents memory exhaustion).
     max_buffer_bytes: usize,
+    /// Channel to reset the silence watchdog timer on output activity.
+    /// Each send resets the watchdog countdown — O(1) per output chunk.
+    watchdog_reset_tx: tokio::sync::mpsc::Sender<()>,
 }
 
 /// Process status snapshot.
@@ -71,6 +74,8 @@ pub struct ProcessManager {
     max_processes: usize,
     /// Maximum output buffer per process.
     max_buffer_bytes: usize,
+    /// Output silence timeout — kill process if no output for this long.
+    output_silence_timeout: std::time::Duration,
 }
 
 impl ProcessManager {
@@ -79,7 +84,15 @@ impl ProcessManager {
             processes: DashMap::new(),
             max_processes,
             max_buffer_bytes,
+            output_silence_timeout: std::time::Duration::from_secs(30),
         }
+    }
+
+    /// Set the output silence timeout (kill processes that produce no output
+    /// for this duration). Default: 30 seconds.
+    pub fn with_silence_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.output_silence_timeout = timeout;
+        self
     }
 
     /// Start a new managed process.
@@ -126,6 +139,10 @@ impl ProcessManager {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
+        // Timer-reset watchdog channel: each send resets the countdown.
+        // Buffer of 16 to avoid blocking output readers under burst.
+        let (watchdog_tx, watchdog_rx) = tokio::sync::mpsc::channel::<()>(16);
+
         let managed = Arc::new(ManagedProcess {
             child: Mutex::new(Some(child)),
             stdout_new: Mutex::new(String::new()),
@@ -137,6 +154,7 @@ impl ProcessManager {
             command: command.to_string(),
             exit_code: Mutex::new(None),
             max_buffer_bytes: self.max_buffer_bytes,
+            watchdog_reset_tx: watchdog_tx,
         });
 
         // Spawn output readers
@@ -155,6 +173,18 @@ impl ProcessManager {
 
         {
             self.processes.insert(process_id.clone(), managed);
+        }
+
+        // Spawn timer-reset silence watchdog.
+        // The watchdog fires if and only if no output arrives for exactly
+        // `timeout` seconds — no polling, zero wakeups during normal output.
+        {
+            let processes = self.processes.clone();
+            let pid = process_id.clone();
+            let timeout = self.output_silence_timeout;
+            tokio::spawn(async move {
+                Self::timer_reset_watchdog(processes, pid, watchdog_rx, timeout).await;
+            });
         }
 
         info!(process_id = %process_id, command = %command, "process started");
@@ -224,22 +254,198 @@ impl ProcessManager {
         }
     }
 
-    /// Kill a managed process.
+    /// Kill a managed process and all its children (kill-tree).
     pub async fn kill(&self, process_id: &str) -> Result<(), String> {
         let proc = self.processes
             .remove(process_id)
             .map(|(_, v)| v)
             .ok_or_else(|| format!("process '{}' not found", process_id))?;
 
-        let mut child_guard = proc.child.lock().await;
-        if let Some(ref mut child) = *child_guard {
-            // Try graceful SIGTERM first
-            let _ = child.kill().await;
-            info!(process_id = %process_id, "process killed");
-        }
-        *child_guard = None;
+        Self::kill_process_tree(&proc).await;
+        info!(process_id = %process_id, "process tree killed");
 
         Ok(())
+    }
+
+    /// Kill a process and all of its descendant processes.
+    ///
+    /// On Unix: walks `/proc/{pid}/children` (Linux 4.2+) or falls back to
+    /// parsing `pgrep -P <pid>` to find descendants. Sends SIGTERM to all
+    /// descendants (leaves first), then SIGKILL after a 2-second grace period.
+    async fn kill_process_tree(proc: &ManagedProcess) {
+        let mut child_guard = proc.child.lock().await;
+        if let Some(ref mut child) = *child_guard {
+            if let Some(pid) = child.id() {
+                // Collect all descendant PIDs.
+                let descendants = Self::collect_descendants(pid);
+
+                // Kill descendants first (leaves → root).
+                for &dpid in descendants.iter().rev() {
+                    Self::send_signal(dpid, "TERM");
+                }
+
+                // SIGTERM the root process.
+                let _ = child.kill().await;
+
+                // Grace period, then SIGKILL stragglers.
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                for &dpid in descendants.iter().rev() {
+                    Self::send_signal(dpid, "KILL");
+                }
+            } else {
+                let _ = child.kill().await;
+            }
+        }
+        *child_guard = None;
+    }
+
+    /// Collect all descendant PIDs of a given process.
+    #[cfg(unix)]
+    fn collect_descendants(pid: u32) -> Vec<u32> {
+        let mut descendants = Vec::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(pid);
+
+        while let Some(parent) = queue.pop_front() {
+            // Try /proc/{pid}/task/{tid}/children (Linux 4.2+)
+            let children_path = format!("/proc/{}/task/{}/children", parent, parent);
+            let children: Vec<u32> = std::fs::read_to_string(&children_path)
+                .unwrap_or_default()
+                .split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+
+            if !children.is_empty() {
+                for cpid in children {
+                    descendants.push(cpid);
+                    queue.push_back(cpid);
+                }
+            } else {
+                // Fallback: pgrep -P <pid>
+                if let Ok(output) = std::process::Command::new("pgrep")
+                    .args(["-P", &parent.to_string()])
+                    .output()
+                {
+                    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+                        .split_whitespace()
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+                    for cpid in pids {
+                        descendants.push(cpid);
+                        queue.push_back(cpid);
+                    }
+                }
+            }
+        }
+        descendants
+    }
+
+    #[cfg(not(unix))]
+    fn collect_descendants(_pid: u32) -> Vec<u32> {
+        // On non-Unix, we cannot walk the process tree portably.
+        Vec::new()
+    }
+
+    /// Send a signal to a process by PID.
+    #[cfg(unix)]
+    fn send_signal(pid: u32, signal: &str) {
+        let sig = match signal {
+            "TERM" => 15,
+            "KILL" => 9,
+            _ => return,
+        };
+        // Safety: sending a signal to a known PID.
+        unsafe {
+            libc::kill(pid as i32, sig);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn send_signal(_pid: u32, _signal: &str) {
+        // No-op on non-Unix.
+    }
+
+    /// Timer-reset silence watchdog: kills a process if it produces no output
+    /// for exactly `timeout` duration. Each output chunk resets the timer.
+    ///
+    /// # Model
+    /// Formally a retriggerable monostable: each input event (stdout chunk via
+    /// `touch_output()`) resets the countdown. The output fires only on timeout.
+    /// State machine: {Armed, Fired}. Armed + input → Armed (reset),
+    /// Armed + timeout → Fired.
+    ///
+    /// # Liveness
+    /// If the reset channel sender is dropped (process task panics or output
+    /// readers complete), `recv()` returns `None` and the watchdog fires
+    /// immediately — ensuring no resource leak under any failure mode.
+    async fn timer_reset_watchdog(
+        processes: DashMap<String, Arc<ManagedProcess>>,
+        process_id: String,
+        mut reset_rx: tokio::sync::mpsc::Receiver<()>,
+        timeout: std::time::Duration,
+    ) {
+        loop {
+            tokio::select! {
+                // Arm the timer — fires after `timeout` with no resets.
+                _ = tokio::time::sleep(timeout) => {
+                    // Check if process still exists.
+                    let proc = match processes.get(&process_id) {
+                        Some(p) => p.value().clone(),
+                        None => return,
+                    };
+
+                    // Check if process has already exited.
+                    {
+                        let exit = proc.exit_code.lock().await;
+                        if exit.is_some() {
+                            return;
+                        }
+                    }
+
+                    // Timeout fired — kill the process.
+                    warn!(
+                        process_id = %process_id,
+                        timeout_secs = timeout.as_secs(),
+                        "process killed due to output silence (timer-reset watchdog)"
+                    );
+                    if let Some((_, proc)) = processes.remove(&process_id) {
+                        Self::kill_process_tree(&proc).await;
+                    }
+                    return;
+                }
+                // Reset signal received — restart the timer.
+                result = reset_rx.recv() => {
+                    match result {
+                        Some(()) => {
+                            // Output received — continue loop to reset timer.
+                            continue;
+                        }
+                        None => {
+                            // Channel closed — all senders dropped.
+                            // Process output readers are done. Check if exited cleanly.
+                            let proc = match processes.get(&process_id) {
+                                Some(p) => p.value().clone(),
+                                None => return,
+                            };
+                            let exit = proc.exit_code.lock().await;
+                            if exit.is_some() {
+                                return; // Clean exit.
+                            }
+                            // Senders dropped but process didn't exit — kill it.
+                            warn!(
+                                process_id = %process_id,
+                                "watchdog reset channel closed, killing orphaned process"
+                            );
+                            drop(exit);
+                            if let Some((_, proc)) = processes.remove(&process_id) {
+                                Self::kill_process_tree(&proc).await;
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// List all active processes.
@@ -296,6 +502,10 @@ impl ProcessManager {
 
         while let Ok(Some(line)) = lines.next_line().await {
             let line_with_newline = format!("{}\n", line);
+
+            // Reset the watchdog timer — O(1) per output chunk.
+            // try_send avoids blocking if the channel is full (burst output).
+            let _ = proc.watchdog_reset_tx.try_send(());
 
             if is_stdout {
                 let mut new_buf = proc.stdout_new.lock().await;
