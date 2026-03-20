@@ -204,7 +204,11 @@
 }
 
 /* Light theme interactive state overrides */
-:root[data-theme="light"],
+:root[data-theme="light"] {
+  --interactive-hover: rgba(0, 0, 0, 0.04);
+  --interactive-active: rgba(0, 0, 0, 0.06);
+  --interactive-focus: rgba(79, 70, 229, 0.25);
+}
 @media (prefers-color-scheme: light) {
   :root {
     --interactive-hover: rgba(0, 0, 0, 0.04);
