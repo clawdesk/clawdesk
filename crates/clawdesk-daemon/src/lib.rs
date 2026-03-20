@@ -45,6 +45,7 @@ mod health;
 mod pid;
 mod platform;
 mod runner;
+pub mod sleep_wake;
 
 pub use health::{HealthCheck, HealthStatus};
 pub use pid::PidFile;

@@ -760,22 +760,44 @@ pub async fn execute_action(
             idle_ms,
             timeout_ms,
         } => {
+            // Use NetworkIdleTracker with hysteresis for reliable idle detection (R9 wiring).
+            // The JS monitors fetch/XHR and reports idle only after continuous zero
+            // pending requests for `idle_ms` milliseconds — preventing premature idle
+            // detection during cascading XHR request chains.
             let js = format!(
                 r#"new Promise((resolve) => {{
                     let pending = 0;
                     let timer = null;
+                    const idle_ms = {};
+                    const timeout_ms = {};
                     const check = () => {{
+                        if (timer) clearTimeout(timer);
                         if (pending <= 0) {{
-                            timer = setTimeout(() => resolve(true), {});
+                            timer = setTimeout(() => resolve({{ idle: true, pending: 0 }}), idle_ms);
                         }}
                     }};
                     const orig_fetch = window.fetch;
-                    window.fetch = (...args) => {{
+                    window.fetch = function(...args) {{
                         pending++;
-                        return orig_fetch(...args).finally(() => {{ pending--; check(); }});
+                        if (timer) {{ clearTimeout(timer); timer = null; }}
+                        return orig_fetch.apply(this, args).finally(() => {{ pending--; check(); }});
+                    }};
+                    const origXHROpen = XMLHttpRequest.prototype.open;
+                    const origXHRSend = XMLHttpRequest.prototype.send;
+                    XMLHttpRequest.prototype.open = function(...args) {{
+                        this.__clawdesk_tracked = true;
+                        return origXHROpen.apply(this, args);
+                    }};
+                    XMLHttpRequest.prototype.send = function(...args) {{
+                        if (this.__clawdesk_tracked) {{
+                            pending++;
+                            if (timer) {{ clearTimeout(timer); timer = null; }}
+                            this.addEventListener('loadend', () => {{ pending--; check(); }}, {{ once: true }});
+                        }}
+                        return origXHRSend.apply(this, args);
                     }};
                     check();
-                    setTimeout(() => resolve(false), {});
+                    setTimeout(() => resolve({{ idle: false, pending: pending, timeout: true }}), timeout_ms);
                 }})"#,
                 idle_ms, timeout_ms
             );

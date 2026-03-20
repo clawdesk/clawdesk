@@ -31,6 +31,7 @@
 pub mod dtgg;
 pub mod heft;
 pub mod rewrite;
+pub mod visual_orchestrator;
 
 pub use dtgg::*;
 pub use heft::*;

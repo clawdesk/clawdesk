@@ -176,6 +176,37 @@ pub enum A2UIComponent {
     Card(CardComponent),
     /// Raw HTML (sandboxed iframe).
     Html(HtmlComponent),
+
+    // === Expanded Widget Vocabulary (A2UI v2.0) ===
+
+    /// Date picker input.
+    DatePicker(DatePickerComponent),
+    /// File upload input.
+    FileUpload(FileUploadComponent),
+    /// Checkbox input.
+    Checkbox(CheckboxComponent),
+    /// Radio button group.
+    RadioGroup(RadioGroupComponent),
+    /// Approval buttons (approve/reject pair).
+    ApprovalButtons(ApprovalButtonsComponent),
+    /// Star rating (1-5).
+    StarRating(StarRatingComponent),
+    /// Parameter slider.
+    Slider(SliderComponent),
+    /// KPI metric card.
+    Metric(MetricComponent),
+    /// Audio player.
+    AudioPlayer(AudioPlayerComponent),
+    /// Image carousel.
+    ImageCarousel(ImageCarouselComponent),
+    /// Accordion (collapsible sections).
+    Accordion(AccordionComponent),
+    /// Tabs container.
+    Tabs(TabsComponent),
+    /// Badge/tag.
+    Badge(BadgeComponent),
+    /// Alert/notification banner.
+    Alert(AlertComponent),
 }
 
 impl A2UIComponent {
@@ -198,6 +229,20 @@ impl A2UIComponent {
             Self::Spacer(_) => "Spacer",
             Self::Card(_) => "Card",
             Self::Html(_) => "Html",
+            Self::DatePicker(_) => "DatePicker",
+            Self::FileUpload(_) => "FileUpload",
+            Self::Checkbox(_) => "Checkbox",
+            Self::RadioGroup(_) => "RadioGroup",
+            Self::ApprovalButtons(_) => "ApprovalButtons",
+            Self::StarRating(_) => "StarRating",
+            Self::Slider(_) => "Slider",
+            Self::Metric(_) => "Metric",
+            Self::AudioPlayer(_) => "AudioPlayer",
+            Self::ImageCarousel(_) => "ImageCarousel",
+            Self::Accordion(_) => "Accordion",
+            Self::Tabs(_) => "Tabs",
+            Self::Badge(_) => "Badge",
+            Self::Alert(_) => "Alert",
         }
     }
 }
@@ -400,6 +445,193 @@ pub struct HtmlComponent {
     pub html: String,
     #[serde(default)]
     pub sandbox: bool,
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Expanded Widget Vocabulary (A2UI v2.0)
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatePickerComponent {
+    pub binding: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub min_date: Option<String>,
+    #[serde(default)]
+    pub max_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileUploadComponent {
+    pub binding: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub accept: Option<String>,
+    #[serde(default)]
+    pub multiple: bool,
+    #[serde(default)]
+    pub max_size_mb: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckboxComponent {
+    pub label: String,
+    pub binding: String,
+    #[serde(default)]
+    pub checked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RadioGroupComponent {
+    pub options: Vec<SelectOption>,
+    pub binding: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub layout: Option<String>, // "horizontal" or "vertical"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalButtonsComponent {
+    pub approve_label: String,
+    pub reject_label: String,
+    pub approve_action_id: String,
+    pub reject_action_id: String,
+    #[serde(default)]
+    pub context: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StarRatingComponent {
+    pub binding: String,
+    #[serde(default)]
+    pub max_stars: Option<u32>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub current: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SliderComponent {
+    pub binding: String,
+    pub min: f64,
+    pub max: f64,
+    #[serde(default)]
+    pub step: Option<f64>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub current: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricComponent {
+    pub label: String,
+    pub value: String,
+    #[serde(default)]
+    pub unit: Option<String>,
+    #[serde(default)]
+    pub trend: Option<String>,        // "up", "down", "neutral"
+    #[serde(default)]
+    pub trend_value: Option<String>,   // "+12%", "-3%"
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPlayerComponent {
+    pub src: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub autoplay: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCarouselComponent {
+    pub images: Vec<CarouselImage>,
+    #[serde(default)]
+    pub auto_advance_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarouselImage {
+    pub src: String,
+    #[serde(default)]
+    pub alt: Option<String>,
+    #[serde(default)]
+    pub caption: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccordionComponent {
+    pub sections: Vec<AccordionSection>,
+    #[serde(default)]
+    pub allow_multiple: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccordionSection {
+    pub title: String,
+    pub children: Vec<ComponentId>,
+    #[serde(default)]
+    pub expanded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabsComponent {
+    pub tabs: Vec<TabItem>,
+    #[serde(default)]
+    pub active_tab: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabItem {
+    pub id: String,
+    pub label: String,
+    pub children: Vec<ComponentId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BadgeComponent {
+    pub text: String,
+    #[serde(default)]
+    pub variant: Option<String>,  // "success", "warning", "error", "info", "neutral"
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertComponent {
+    pub message: String,
+    #[serde(default)]
+    pub severity: Option<String>,     // "info", "success", "warning", "error"
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub dismissible: bool,
+    #[serde(default)]
+    pub action: Option<ButtonComponent>,
 }
 
 // ═══════════════════════════════════════════════════════════════

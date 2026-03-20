@@ -81,6 +81,30 @@ impl Default for ProviderRegistry {
     }
 }
 
+// ─── Plugin-based provider registration ───────────────────────────────────
+
+/// Register providers from a `ProviderPluginRegistry` by hydrating all
+/// plugins with the given catalog context.
+///
+/// This is the plugin-system equivalent of `auto_register_from_env`:
+/// instead of hardcoding env-var → provider mappings, each provider plugin
+/// declares its own env vars and handles its own construction.
+///
+/// Returns the count of providers registered.
+pub async fn register_from_plugins(
+    registry: &mut ProviderRegistry,
+    plugins: &crate::plugin_provider::ProviderPluginRegistry,
+    ctx: &crate::plugin_provider::ProviderCatalogContext,
+) -> usize {
+    let hydrated = plugins.hydrate(ctx).await;
+    let count = hydrated.len();
+    for (id, provider) in hydrated {
+        tracing::info!(provider = id.as_str(), "registering from plugin");
+        registry.register(provider);
+    }
+    count
+}
+
 // ─── Auto-registration from environment variables ─────────────────────────
 
 /// Scan environment variables and register all discovered providers.

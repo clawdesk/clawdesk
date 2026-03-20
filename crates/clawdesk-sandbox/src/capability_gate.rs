@@ -326,6 +326,234 @@ impl CapabilityGate {
 }
 
 // ---------------------------------------------------------------------------
+// Effective Permission Computation — Capability Algebra
+// ---------------------------------------------------------------------------
+
+/// Computes the effective permission set for a skill invocation.
+///
+/// The capability algebra defines a lattice `(P, ⊆, ∩, ∪)` where:
+/// - `P_effective = P_skill_declared ∩ P_user_policy ∩ P_agent_granted`
+/// - `P_effective ⊂ P_skill_declared` ⟹ permission dialog required
+///
+/// Subsumption checking is `O(1)` via bitwise AND on u128.
+/// Total overhead: `O(|P_max| × 3) = O(|P_max|)`, typically <100 entries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectivePermission {
+    /// What the skill declared it needs
+    pub skill_declared: CapabilitySet,
+    /// What the user's security policy allows
+    pub user_policy: CapabilitySet,
+    /// What the invoking agent can grant
+    pub agent_granted: CapabilitySet,
+    /// The computed effective set: intersection of all three
+    pub effective: CapabilitySet,
+    /// Capabilities the skill wants but cannot get
+    pub denied: CapabilitySet,
+    /// Whether all requested permissions are satisfied
+    pub fully_satisfied: bool,
+}
+
+impl EffectivePermission {
+    /// Compute effective permissions using the capability algebra.
+    ///
+    /// `P_effective = P_declared ∩ P_policy ∩ P_granted`
+    pub fn compute(
+        skill_declared: CapabilitySet,
+        user_policy: CapabilitySet,
+        agent_granted: CapabilitySet,
+    ) -> Self {
+        let effective = skill_declared.meet(user_policy).meet(agent_granted);
+        let denied = CapabilitySet::from_bits(skill_declared.bits() & !effective.bits());
+        let fully_satisfied = denied.is_empty();
+
+        Self {
+            skill_declared,
+            user_policy,
+            agent_granted,
+            effective,
+            denied,
+            fully_satisfied,
+        }
+    }
+
+    /// List which specific capabilities are denied, for permission dialog.
+    pub fn denied_capabilities(&self) -> Vec<&'static str> {
+        let bits = [
+            (caps::FILE_READ, "file_read"),
+            (caps::FILE_WRITE, "file_write"),
+            (caps::FILE_DELETE, "file_delete"),
+            (caps::SHELL_EXEC, "shell_exec"),
+            (caps::NETWORK, "network"),
+            (caps::NETWORK_LISTEN, "network_listen"),
+            (caps::ENV_READ, "env_read"),
+            (caps::PROCESS_SPAWN, "process_spawn"),
+            (caps::CLIPBOARD, "clipboard"),
+            (caps::MEMORY_READ, "memory_read"),
+            (caps::MEMORY_WRITE, "memory_write"),
+            (caps::TOOL_INVOKE, "tool_invoke"),
+            (caps::BROWSER, "browser"),
+            (caps::CHANNEL_SEND, "channel_send"),
+            (caps::CRON, "cron"),
+            (caps::ADMIN, "admin"),
+            (caps::DELEGATE, "delegate"),
+            (caps::CRYPTO_SIGN, "crypto_sign"),
+            (caps::WASM_EXEC, "wasm_exec"),
+            (caps::MOUNT, "mount"),
+        ];
+        bits.iter()
+            .filter(|(bit, _)| self.denied.has(*bit))
+            .map(|(_, name)| *name)
+            .collect()
+    }
+
+    /// List which capabilities are granted.
+    pub fn granted_capabilities(&self) -> Vec<&'static str> {
+        let bits = [
+            (caps::FILE_READ, "file_read"),
+            (caps::FILE_WRITE, "file_write"),
+            (caps::FILE_DELETE, "file_delete"),
+            (caps::SHELL_EXEC, "shell_exec"),
+            (caps::NETWORK, "network"),
+            (caps::NETWORK_LISTEN, "network_listen"),
+            (caps::ENV_READ, "env_read"),
+            (caps::PROCESS_SPAWN, "process_spawn"),
+            (caps::CLIPBOARD, "clipboard"),
+            (caps::MEMORY_READ, "memory_read"),
+            (caps::MEMORY_WRITE, "memory_write"),
+            (caps::TOOL_INVOKE, "tool_invoke"),
+            (caps::BROWSER, "browser"),
+            (caps::CHANNEL_SEND, "channel_send"),
+            (caps::CRON, "cron"),
+            (caps::ADMIN, "admin"),
+            (caps::DELEGATE, "delegate"),
+            (caps::CRYPTO_SIGN, "crypto_sign"),
+            (caps::WASM_EXEC, "wasm_exec"),
+            (caps::MOUNT, "mount"),
+        ];
+        bits.iter()
+            .filter(|(bit, _)| self.effective.has(*bit))
+            .map(|(_, name)| *name)
+            .collect()
+    }
+}
+
+/// Permission grant cache — caches per skill version.
+///
+/// If a skill updates and its permission set changes, the grant is invalidated
+/// and the permission dialog re-appears.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionGrantCache {
+    entries: rustc_hash::FxHashMap<String, CachedGrant>,
+}
+
+/// A cached permission grant keyed by skill_id + version hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedGrant {
+    /// Skill version hash at the time of grant
+    pub version_hash: String,
+    /// The granted capability set
+    pub granted: CapabilitySet,
+    /// When the grant was issued (epoch seconds)
+    pub granted_at: u64,
+}
+
+impl PermissionGrantCache {
+    pub fn new() -> Self {
+        Self {
+            entries: rustc_hash::FxHashMap::default(),
+        }
+    }
+
+    /// Look up a cached grant for a skill.
+    ///
+    /// Returns `None` if no grant cached or version hash changed (skill updated).
+    pub fn lookup(&self, skill_id: &str, current_version_hash: &str) -> Option<CapabilitySet> {
+        self.entries.get(skill_id).and_then(|grant| {
+            if grant.version_hash == current_version_hash {
+                Some(grant.granted)
+            } else {
+                None // Skill updated — re-prompt
+            }
+        })
+    }
+
+    /// Store a permission grant.
+    pub fn store(&mut self, skill_id: String, version_hash: String, granted: CapabilitySet) {
+        self.entries.insert(skill_id, CachedGrant {
+            version_hash,
+            granted,
+            granted_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
+    }
+
+    /// Revoke a grant (e.g., user manually removes permission).
+    pub fn revoke(&mut self, skill_id: &str) {
+        self.entries.remove(skill_id);
+    }
+
+    /// Revoke all grants.
+    pub fn revoke_all(&mut self) {
+        self.entries.clear();
+    }
+}
+
+impl Default for PermissionGrantCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Pre-defined capability profiles for common skill types.
+///
+/// These safe-default profiles provide a starting point — skills can
+/// request additional capabilities which will trigger a permission dialog.
+pub mod profiles {
+    use super::{CapabilitySet, caps};
+
+    /// Read-only skill: can read files and memory, nothing else.
+    pub const READ_ONLY: CapabilitySet = CapabilitySet(
+        caps::FILE_READ | caps::MEMORY_READ
+    );
+
+    /// Standard skill: read/write files, memory, invoke tools.
+    pub const STANDARD: CapabilitySet = CapabilitySet(
+        caps::FILE_READ | caps::FILE_WRITE | caps::MEMORY_READ
+        | caps::MEMORY_WRITE | caps::TOOL_INVOKE
+    );
+
+    /// Network skill: standard + network access.
+    pub const NETWORK_ENABLED: CapabilitySet = CapabilitySet(
+        caps::FILE_READ | caps::FILE_WRITE | caps::MEMORY_READ
+        | caps::MEMORY_WRITE | caps::TOOL_INVOKE | caps::NETWORK
+    );
+
+    /// Shell skill: standard + shell execution + process spawn.
+    pub const SHELL_ENABLED: CapabilitySet = CapabilitySet(
+        caps::FILE_READ | caps::FILE_WRITE | caps::MEMORY_READ
+        | caps::MEMORY_WRITE | caps::TOOL_INVOKE | caps::SHELL_EXEC
+        | caps::PROCESS_SPAWN
+    );
+
+    /// Automation skill: network + shell + channel send + cron.
+    pub const AUTOMATION: CapabilitySet = CapabilitySet(
+        caps::FILE_READ | caps::FILE_WRITE | caps::MEMORY_READ
+        | caps::MEMORY_WRITE | caps::TOOL_INVOKE | caps::NETWORK
+        | caps::SHELL_EXEC | caps::PROCESS_SPAWN | caps::CHANNEL_SEND
+        | caps::CRON
+    );
+
+    /// Browser skill: standard + network + browser.
+    pub const BROWSER_ENABLED: CapabilitySet = CapabilitySet(
+        caps::FILE_READ | caps::FILE_WRITE | caps::MEMORY_READ
+        | caps::MEMORY_WRITE | caps::TOOL_INVOKE | caps::NETWORK
+        | caps::BROWSER
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

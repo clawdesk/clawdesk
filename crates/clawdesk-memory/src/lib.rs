@@ -34,6 +34,7 @@ pub mod retrieval_stage;
 pub mod session_indexer;
 pub mod temporal_decay;
 pub mod tiered;
+pub mod transparent;
 
 pub use bm25::Bm25Index;
 pub use bm25_store::{PersistentBm25, Bm25Stats};

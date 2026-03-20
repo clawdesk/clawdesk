@@ -21,6 +21,9 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::warn;
 
+// Re-import base64 engine traits for screenshot decode
+use base64::Engine as _;
+
 /// Escape a string for safe interpolation into JavaScript string literals.
 fn escape_js_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
@@ -252,37 +255,33 @@ impl Tool for BrowserClickTool {
         let mut s = session.lock().await;
         s.last_active = std::time::Instant::now();
 
-        // Determine click target
+        // Determine click target — use batched_click_js for actionability+scroll+click
+        // in a single CDP round-trip (R9 wiring)
         let js = if let Some(index) = args.get("index").and_then(|v| v.as_u64()) {
-            // Index-based: O(1) attribute lookup
-            format!(
-                r#"(() => {{
-                    const el = document.querySelector('[data-ci="{}"]');
-                    if (!el) return {{ success: false, error: 'element [{}] not found — page may have changed, call browser_observe again' }};
-                    el.scrollIntoView({{ block: 'center' }});
-                    el.click();
-                    return {{ success: true, tag: el.tagName, text: (el.textContent||'').trim().slice(0,60) }};
-                }})()"#,
-                index, index
+            clawdesk_browser::reliability::batched_click_js(
+                &format!("[data-ci='{}']", index),
+                clawdesk_browser::reliability::ReliabilityConfig::default().min_opacity,
             )
         } else if let Some(selector) = args.get("selector").and_then(|v| v.as_str()) {
-            // CSS selector fallback
             let escaped = escape_js_string(selector);
-            format!(
-                r#"(() => {{
-                    const el = document.querySelector('{}');
-                    if (!el) return {{ success: false, error: 'selector not found: {}' }};
-                    el.scrollIntoView({{ block: 'center' }});
-                    el.click();
-                    return {{ success: true, tag: el.tagName, text: (el.textContent||'').trim().slice(0,60) }};
-                }})()"#,
-                escaped, escaped
+            clawdesk_browser::reliability::batched_click_js(
+                &escaped,
+                clawdesk_browser::reliability::ReliabilityConfig::default().min_opacity,
             )
         } else {
             return Err("provide either 'index' (preferred) or 'selector'".to_string());
         };
 
-        let result = s.cdp.eval(&js).await?;
+        // Execute with CDP retry for transient errors (R9 wiring)
+        let config = clawdesk_browser::reliability::ReliabilityConfig::default();
+        let result = clawdesk_browser::reliability::with_retry(&config, "browser_click", || {
+            let js_clone = js.clone();
+            let session_clone = session.clone();
+            async move {
+                let mut s = session_clone.lock().await;
+                s.cdp.eval(&js_clone).await.map_err(|e| (-32000i64, e))
+            }
+        }).await?;
 
         // Check if this was a purchase action
         let clicked_text = result
@@ -524,7 +523,28 @@ impl Tool for BrowserScreenshotTool {
         s.last_active = std::time::Instant::now();
 
         let b64 = s.cdp.take_screenshot().await?;
-        Ok(format!("data:image/png;base64,{}", b64))
+
+        // Decode raw base64 screenshot
+        let raw_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD, &b64
+        ).map_err(|e| format!("base64 decode: {}", e))?;
+
+        // Normalize: Lanczos3 downscale + JPEG quality ladder
+        let config = clawdesk_media::image::NormalizeConfig::default();
+        let normalized = clawdesk_media::image::normalize_screenshot(&raw_bytes, &config)
+            .map_err(|e| format!("normalize: {}", e))?;
+
+        // Write to staging path
+        let filename = format!("{}.{}", uuid::Uuid::new_v4(),
+            if normalized.mime_type == "image/jpeg" { "jpg" } else { "png" });
+        let path = format!("/tmp/clawdesk/screenshots/{}", filename);
+        std::fs::create_dir_all("/tmp/clawdesk/screenshots")
+            .map_err(|e| format!("mkdir: {}", e))?;
+        std::fs::write(&path, &normalized.data)
+            .map_err(|e| format!("write: {}", e))?;
+
+        // Return MEDIA: directive + lightweight placeholder for LLM context
+        Ok(format!("MEDIA:{}\n{}", path, normalized.placeholder()))
     }
 }
 

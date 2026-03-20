@@ -27,6 +27,7 @@ pub mod pipeline;
 pub mod processor;
 pub mod recorder;
 pub mod selector;
+pub mod image_gen;
 pub mod talk_mode;
 pub mod tts;
 pub mod understanding;
@@ -45,3 +46,7 @@ pub use voice::{VoicePipeline, VoiceActivityDetector, VoicePipelineConfig, Voice
 pub use talk_mode::{TalkModeController, TalkModeConfig, TalkPhase, TalkEvent, ActivationSource};
 pub use link_understanding::{LinkUnderstanding, LinkPreview, LinkConfig};
 pub use understanding::{UnderstandingDispatcher, UnderstandingProvider, MediaCapability, UnderstandingResult};
+pub use image_gen::{
+    ImageGenProvider, ImageGenRegistry, ImageGenRequest, ImageGenResponse,
+    ImageGenCapabilities, ImageGenError, ImageModel, GeneratedImage,
+};

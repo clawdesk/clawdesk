@@ -106,6 +106,11 @@ impl CliAgentRunner {
         }
     }
 
+    /// Get a reference to the backend configuration.
+    pub fn config(&self) -> &CliBackendConfig {
+        &self.config
+    }
+
     /// Run the CLI agent with a user message.
     ///
     /// Handles session resume, structured output parsing, and failover.

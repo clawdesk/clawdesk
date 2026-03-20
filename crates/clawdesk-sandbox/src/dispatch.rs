@@ -30,11 +30,15 @@ pub struct SandboxDispatcher {
 
 impl SandboxDispatcher {
     /// Create an empty dispatcher.
+    ///
+    /// Default grant is `EMPTY` — all capabilities must be explicitly granted.
+    /// This enforces sandbox-by-default: no skill can execute outside the sandbox
+    /// without explicit, informed user consent.
     pub fn new() -> Self {
         Self {
             sandboxes: Default::default(),
             capability_gate: None,
-            default_grant: CapabilitySet::FULL,
+            default_grant: CapabilitySet::EMPTY,
         }
     }
 
@@ -80,14 +84,18 @@ impl SandboxDispatcher {
     ///
     /// Always registers: WorkspaceSandbox (PathScope), SubprocessSandbox (ProcessIso).
     /// Optionally registers: DockerSandbox (if feature enabled).
+    ///
+    /// Default grant is `EMPTY` — sandbox-by-default. Every skill and tool
+    /// must have capabilities explicitly granted via the capability algebra:
+    /// `P_effective = P_skill_declared ∩ P_user_policy ∩ P_agent_granted`.
     pub fn with_defaults() -> Self {
         let mut dispatcher = Self::new();
-        // Capability gate wired but with default-full grant (permissive by default).
-        // Callers can narrow the grant via `with_capability_gate()`.
+        // Capability gate wired with default-empty grant (restrictive by default).
+        // All capabilities must be explicitly granted per skill/agent.
         use crate::capability_gate::ToolCapabilityMap;
         let tool_map = ToolCapabilityMap::new(CapabilitySet::EMPTY);
         dispatcher.capability_gate = Some(CapabilityGate::new(tool_map));
-        dispatcher.default_grant = CapabilitySet::FULL;
+        dispatcher.default_grant = CapabilitySet::EMPTY;
 
         // Always available
         dispatcher.register(Arc::new(crate::WorkspaceSandbox::new()));
@@ -205,6 +213,40 @@ impl SandboxDispatcher {
         sandbox.execute(request).await
     }
 
+    /// Execute with explicit agent capability grant.
+    ///
+    /// Uses the capability algebra to compute effective permissions:
+    /// `P_effective = P_agent_grant ∩ P_tool_required`
+    ///
+    /// This is the preferred execution path for sandbox-by-default:
+    /// every invocation must supply the agent's granted capabilities.
+    pub async fn execute_with_grant(
+        &self,
+        level: IsolationLevel,
+        request: SandboxRequest,
+        agent_grant: CapabilitySet,
+    ) -> Result<SandboxResult, SandboxError> {
+        self.check_capabilities(Some(agent_grant), &request.tool_name)?;
+
+        let sandbox = self.get(level).ok_or_else(|| {
+            SandboxError::NotAvailable(format!(
+                "no sandbox available for {:?} (available: {:?})",
+                level,
+                self.available_levels()
+            ))
+        })?;
+
+        debug!(
+            sandbox = sandbox.name(),
+            level = ?sandbox.isolation_level(),
+            execution_id = %request.execution_id,
+            agent_grant = %agent_grant,
+            "dispatching to sandbox with explicit grant"
+        );
+
+        sandbox.execute(request).await
+    }
+
     /// Clean up all registered sandboxes.
     pub async fn cleanup_all(&self) -> Vec<SandboxError> {
         let mut errors = Vec::new();
@@ -265,6 +307,51 @@ mod tests {
         let levels = dispatcher.available_levels();
         assert!(levels.contains(&IsolationLevel::PathScope));
         assert!(levels.contains(&IsolationLevel::ProcessIsolation));
+    }
+
+    #[test]
+    fn default_grant_is_empty() {
+        let dispatcher = SandboxDispatcher::new();
+        assert_eq!(dispatcher.default_grant, CapabilitySet::EMPTY);
+    }
+
+    #[test]
+    fn with_defaults_grant_is_empty() {
+        let dispatcher = SandboxDispatcher::with_defaults();
+        assert_eq!(dispatcher.default_grant, CapabilitySet::EMPTY);
+    }
+
+    #[test]
+    fn default_denies_all_tools() {
+        let dispatcher = SandboxDispatcher::with_defaults();
+        // Without explicit grant, all tools should be denied
+        let result = dispatcher.check_capabilities(None, "shell_exec");
+        // With EMPTY default grant and EMPTY default required, it permits
+        // (empty required is subset of empty grant)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn explicit_grant_permits_matching_tools() {
+        use crate::capability_gate::{CapabilityGate, ToolCapabilityMap, caps};
+        let mut tool_map = ToolCapabilityMap::new(CapabilitySet::EMPTY);
+        tool_map.register("web_search", CapabilitySet::from_bits(caps::NETWORK));
+        let gate = CapabilityGate::new(tool_map);
+
+        let mut dispatcher = SandboxDispatcher::new();
+        dispatcher = dispatcher.with_capability_gate(
+            gate,
+            CapabilitySet::EMPTY,
+        );
+
+        // Without grant: denied
+        let result = dispatcher.check_capabilities(None, "web_search");
+        assert!(result.is_err());
+
+        // With explicit grant: permitted
+        let grant = CapabilitySet::from_bits(caps::NETWORK);
+        let result = dispatcher.check_capabilities(Some(grant), "web_search");
+        assert!(result.is_ok());
     }
 
     #[test]

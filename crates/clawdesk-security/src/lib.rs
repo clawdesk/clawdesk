@@ -20,6 +20,7 @@ pub mod crypto;
 pub mod dm_pairing;
 pub mod exec_approval;
 pub mod group_policy;
+pub mod health_dashboard;
 pub mod identity;
 pub mod injection;
 pub mod keychain;
@@ -43,6 +44,10 @@ pub use command_policy::{CommandDecision, CommandPolicyConfig, CommandPolicyEngi
 pub use dm_pairing::DmPairingManager;
 pub use exec_approval::{ApprovalError, ApprovalRequest, ApprovalStatus, ExecApprovalManager};
 pub use group_policy::GroupPolicyManager;
+pub use health_dashboard::{
+    CheckCategory, CheckSeverity, SecurityCheck, SecurityHealthEvaluator,
+    SecurityHealthReport, SecurityState,
+};
 pub use identity::IdentityContract;
 pub use injection::{InjectionScanner, InjectionScannerConfig, InputSource, ScanAction, ScanResult};
 pub use keychain::KeychainProvider;

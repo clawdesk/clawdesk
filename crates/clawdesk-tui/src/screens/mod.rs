@@ -7,8 +7,10 @@ pub mod agents;
 pub mod channels;
 pub mod chat;
 pub mod dashboard;
+pub mod health;
 pub mod logs;
 pub mod memory;
+pub mod resources;
 pub mod security;
 pub mod sessions;
 pub mod settings;
@@ -42,6 +44,8 @@ pub enum Tab {
     Settings,
     Logs,
     Security,
+    Health,
+    Resources,
 }
 
 impl Tab {
@@ -57,6 +61,8 @@ impl Tab {
         Tab::Settings,
         Tab::Logs,
         Tab::Security,
+        Tab::Health,
+        Tab::Resources,
     ];
 
     /// One-char shortcut for each tab.
@@ -72,6 +78,8 @@ impl Tab {
             Tab::Settings => ',',
             Tab::Logs => 'l',
             Tab::Security => 'x',
+            Tab::Health => 'z',
+            Tab::Resources => 'r',
         }
     }
 
@@ -110,6 +118,8 @@ impl fmt::Display for Tab {
             Tab::Settings => write!(f, "Settings"),
             Tab::Logs => write!(f, "Logs"),
             Tab::Security => write!(f, "Security"),
+            Tab::Health => write!(f, "Health"),
+            Tab::Resources => write!(f, "Resources"),
         }
     }
 }
@@ -167,6 +177,8 @@ pub struct Router {
     pub settings: settings::SettingsScreen,
     pub logs: logs::LogsScreen,
     pub security: security::SecurityScreen,
+    pub health: health::HealthDashboardScreen,
+    pub resources: resources::ResourceMonitorScreen,
 }
 
 impl Router {
@@ -184,6 +196,8 @@ impl Router {
             settings: settings::SettingsScreen::new(),
             logs: logs::LogsScreen::new(),
             security: security::SecurityScreen::new(),
+            health: health::HealthDashboardScreen::new(),
+            resources: resources::ResourceMonitorScreen::new(),
         }
     }
 
@@ -200,6 +214,8 @@ impl Router {
             Tab::Settings => &mut self.settings,
             Tab::Logs => &mut self.logs,
             Tab::Security => &mut self.security,
+            Tab::Health => &mut self.health,
+            Tab::Resources => &mut self.resources,
         }
     }
 
@@ -216,6 +232,8 @@ impl Router {
             Tab::Settings => &self.settings,
             Tab::Logs => &self.logs,
             Tab::Security => &self.security,
+            Tab::Health => &self.health,
+            Tab::Resources => &self.resources,
         }
     }
 

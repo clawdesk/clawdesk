@@ -21,7 +21,7 @@ pub fn generate_summary(state: &WizardState) -> String {
 
     lines.push(String::new());
     lines.push(format!("  Steps completed: {}", state.completed_steps.len()));
-    lines.push(format!("  Risk acknowledged: {}", if state.risk_acknowledged { "yes" } else { "no" }));
+    lines.push(format!("  Visible steps completed: {}", state.visible_steps_completed()));
     lines.push(String::new());
     lines.push("Review above and confirm to finalize.".to_string());
 
@@ -53,11 +53,8 @@ pub async fn finalize_config(
 
 /// Execute the completion step.
 pub fn execute_completion(state: &WizardState) -> StepResult {
-    if !state.risk_acknowledged {
-        return StepResult::Error {
-            message: "Cannot finalize: security risk acknowledgement is required.".into(),
-        };
-    }
+    // In the new 3-step wizard, sandbox is enabled by default (no risk ack needed).
+    // Security setup is a background task — always runs with safe defaults.
 
     if state.accumulated_config.is_empty() {
         return StepResult::Error {
@@ -75,31 +72,29 @@ mod tests {
     #[test]
     fn summary_includes_config() {
         let mut state = WizardState::default();
-        state.risk_acknowledged = true;
         state.set_config("provider", serde_json::json!("anthropic"));
         state.set_config("gateway_port", serde_json::json!(18789));
         let summary = generate_summary(&state);
         assert!(summary.contains("provider"));
         assert!(summary.contains("18789"));
-        assert!(summary.contains("Risk acknowledged: yes"));
-    }
-
-    #[test]
-    fn completion_requires_risk_ack() {
-        let state = WizardState::default();
-        match execute_completion(&state) {
-            StepResult::Error { message } => assert!(message.contains("risk")),
-            _ => panic!("should require risk ack"),
-        }
     }
 
     #[test]
     fn completion_requires_config() {
-        let mut state = WizardState::default();
-        state.risk_acknowledged = true;
+        let state = WizardState::default();
         match execute_completion(&state) {
             StepResult::Error { message } => assert!(message.contains("no configuration")),
             _ => panic!("should require config"),
+        }
+    }
+
+    #[test]
+    fn completion_succeeds_with_config() {
+        let mut state = WizardState::default();
+        state.set_config("model", serde_json::json!("ollama"));
+        match execute_completion(&state) {
+            StepResult::Continue => {} // expected
+            other => panic!("expected Continue, got {:?}", other),
         }
     }
 }

@@ -26,6 +26,7 @@ pub mod orchestrator_bridge;
 pub mod priority;
 pub mod skill_events;
 pub mod subscription;
+pub mod surface;
 pub mod topic;
 pub mod typed_event;
 pub mod workflow;

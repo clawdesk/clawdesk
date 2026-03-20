@@ -84,6 +84,32 @@ fn is_valid_media_path(path: &str) -> bool {
     VALID_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
 }
 
+/// Convert media URL strings to typed `MediaAttachment` structs for channel delivery.
+///
+/// Delegates to [`clawdesk_types::message::media_urls_to_attachments`] — the
+/// canonical implementation. This re-export preserves backward compatibility.
+pub fn media_urls_to_attachments(urls: &[String]) -> Vec<clawdesk_types::message::MediaAttachment> {
+    clawdesk_types::message::media_urls_to_attachments(urls)
+}
+
+/// Infer MIME type from file path extension.
+fn mime_from_path(path: &str) -> String {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

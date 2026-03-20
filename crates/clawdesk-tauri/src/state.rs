@@ -2107,10 +2107,18 @@ impl clawdesk_channel::MessageSink for ChannelMessageSink {
             return;
         }
 
+        // Collect media URLs from response segments (populated by extract_media_lines
+        // in build_final_response when agent output contains MEDIA: directives).
+        let media_urls: Vec<String> = response
+            .segments
+            .iter()
+            .flat_map(|s| s.media_urls.iter().cloned())
+            .collect();
+
         let outbound = clawdesk_types::message::OutboundMessage {
             origin: msg.origin.clone(),
             body: response.content,
-            media: vec![],
+            media: clawdesk_types::message::media_urls_to_attachments(&media_urls),
             reply_to: None,
             thread_id: None,
         };
@@ -3062,6 +3070,36 @@ impl AppState {
         // only requires editing clawdesk_providers::registry::auto_register_from_env().
         clawdesk_providers::registry::auto_register_from_env(&mut provider_registry);
 
+        // Auto-detect CLI agent providers (Claude Code, Codex) on PATH.
+        // Uses os-keychain for credential auto-discovery. Registration is
+        // best-effort — if the binary isn't installed, we silently skip.
+        {
+            let keychain = Arc::new(clawdesk_security::KeychainProvider::default_ttl());
+            // (factory_fn, binary_name) pairs
+            let cli_candidates: Vec<(
+                fn(Arc<clawdesk_security::KeychainProvider>) -> Result<clawdesk_agents::cli_provider::CliProvider, String>,
+                &str,
+            )> = vec![
+                (clawdesk_agents::cli_provider::CliProvider::claude_code, "claude"),
+                (clawdesk_agents::cli_provider::CliProvider::codex, "codex"),
+            ];
+            for (factory, binary) in cli_candidates {
+                let exists = std::process::Command::new("which")
+                    .arg(binary)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if exists {
+                    if let Ok(cli_provider) = factory(Arc::clone(&keychain)) {
+                        info!(provider = binary, "CLI agent provider detected on PATH");
+                        provider_registry.register(Arc::new(cli_provider));
+                    }
+                }
+            }
+        }
+
         let provider_count = provider_registry.list().len();
         info!(providers = provider_count, "Provider auto-registration complete");
 
@@ -3081,6 +3119,12 @@ impl AppState {
                     ]),
                     "gemini" => (GEMINI_CAPS, vec![
                         ProviderWeight { provider: "gemini".into(), model: "gemini-2.0-flash".into(), cost_per_m_input: 0.075, cost_per_m_output: 0.30, latency_p50_ms: 200, caps: GEMINI_CAPS, quality_tier: 2 },
+                    ]),
+                    "claude-code" => (OLLAMA_CAPS, vec![
+                        ProviderWeight { provider: "claude-code".into(), model: "claude-code-cli".into(), cost_per_m_input: 0.0, cost_per_m_output: 0.0, latency_p50_ms: 3000, caps: OLLAMA_CAPS, quality_tier: 3 },
+                    ]),
+                    "codex" => (OLLAMA_CAPS, vec![
+                        ProviderWeight { provider: "codex".into(), model: "codex-cli".into(), cost_per_m_input: 0.0, cost_per_m_output: 0.0, latency_p50_ms: 3000, caps: OLLAMA_CAPS, quality_tier: 3 },
                     ]),
                     _ => (OLLAMA_CAPS, vec![
                         ProviderWeight { provider: name.clone(), model: "llama3.2".into(), cost_per_m_input: 0.0, cost_per_m_output: 0.0, latency_p50_ms: 1000, caps: OLLAMA_CAPS, quality_tier: 1 },

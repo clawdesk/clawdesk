@@ -24,6 +24,7 @@
 //! - Global rate limit: 50 requests/second
 //! - Message content: 2000 chars
 
+pub mod guild;
 pub mod interactions;
 
 use async_trait::async_trait;
@@ -271,6 +272,68 @@ impl DiscordChannel {
             }
         }
         Ok(())
+    }
+
+    /// Upload a file attachment to a Discord channel via multipart/form-data.
+    async fn send_file_attachment(
+        &self,
+        channel_id: &str,
+        attachment: &clawdesk_types::message::MediaAttachment,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        let url = self.api_url(&format!("/channels/{channel_id}/messages"));
+        let bytes = self.read_attachment_bytes(attachment).await?;
+        let filename = attachment
+            .filename
+            .clone()
+            .unwrap_or_else(|| "file".into());
+
+        let mut form = reqwest::multipart::Form::new();
+
+        // Discord expects a JSON payload_json field for message metadata
+        let mut payload = json!({});
+        if let Some(reply_id) = reply_to {
+            payload["message_reference"] = json!({ "message_id": reply_id });
+        }
+        form = form.text("payload_json", payload.to_string());
+
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename)
+            .mime_str(&attachment.mime_type)
+            .map_err(|e| format!("mime: {e}"))?;
+        form = form.part("files[0]", part);
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bot {}", self.bot_token))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Discord file upload failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("Discord file upload error ({status}): {err}"));
+        }
+        Ok(())
+    }
+
+    /// Read bytes from a MediaAttachment (inline data or local file path).
+    async fn read_attachment_bytes(
+        &self,
+        attachment: &clawdesk_types::message::MediaAttachment,
+    ) -> Result<Vec<u8>, String> {
+        if let Some(ref data) = attachment.data {
+            Ok(data.clone())
+        } else if let Some(ref path) = attachment.url {
+            tokio::fs::read(path)
+                .await
+                .map_err(|e| format!("read media file {path}: {e}"))
+        } else {
+            Err("attachment has neither data nor url".into())
+        }
     }
 
     /// Connect to Discord Gateway WebSocket and dispatch inbound messages.
@@ -752,6 +815,23 @@ impl Channel for DiscordChannel {
             }
             _ => return Err("cannot send Discord message without Discord origin".into()),
         };
+
+        // Send media attachments first (each as a separate message with file upload)
+        for attachment in &msg.media {
+            self.send_file_attachment(&channel_id, attachment, msg.reply_to.as_deref())
+                .await?;
+        }
+
+        // Skip text if only media with empty body
+        if msg.body.trim().is_empty() && !msg.media.is_empty() {
+            return Ok(DeliveryReceipt {
+                channel: ChannelId::Discord,
+                message_id: String::new(),
+                timestamp: chrono::Utc::now(),
+                success: true,
+                error: None,
+            });
+        }
 
         let chunks = split_message_for_discord(&msg.body);
 

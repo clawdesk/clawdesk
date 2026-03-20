@@ -50,8 +50,49 @@ fn safe_prefix(input: &str, max_bytes: usize) -> &str {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Channel context — injected into system prompt for channel-aware responses
+// Inline media directive extraction
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Valid MEDIA: path prefixes — prevents arbitrary path injection.
+const MEDIA_VALID_PREFIXES: &[&str] = &[
+    "/tmp/clawdesk/",
+    "/tmp/clawdesk-",
+    "data:image/",
+    "data:audio/",
+    "data:video/",
+    "data:application/pdf",
+    "https://",
+    "http://localhost",
+];
+
+/// Lightweight inline extraction of `MEDIA:` lines from tool output.
+/// Mirrors `clawdesk_autoreply::parse_media_directives` without circular dependency.
+fn extract_media_lines(content: &str) -> (String, Vec<String>, bool) {
+    let mut text_lines = Vec::new();
+    let mut media_urls = Vec::new();
+    let mut audio_as_voice = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(media_ref) = trimmed.strip_prefix("MEDIA:") {
+            let media_ref = media_ref.trim();
+            let (path, is_voice) = if media_ref.ends_with(" VOICE") {
+                (&media_ref[..media_ref.len() - 6], true)
+            } else {
+                (media_ref, false)
+            };
+            if MEDIA_VALID_PREFIXES.iter().any(|p| path.starts_with(p)) {
+                media_urls.push(path.to_string());
+                if is_voice { audio_as_voice = true; }
+            } else {
+                text_lines.push(line);
+            }
+        } else {
+            text_lines.push(line);
+        }
+    }
+    (text_lines.join("\n"), media_urls, audio_as_voice)
+}
 
 /// Channel context for channel-aware prompt injection.
 ///
@@ -535,6 +576,7 @@ pub struct AgentRunnerBuilder<S = SandboxUnconfigured> {
     channel_context: Option<ChannelContext>,
     skill_provider: Option<Arc<dyn SkillProvider>>,
     memory_recall_fn: Option<MemoryRecallFn>,
+    event_bus: Option<Arc<clawdesk_bus::dispatch::EventBus>>,
     _sandbox: std::marker::PhantomData<S>,
 }
 
@@ -601,6 +643,12 @@ impl<S> AgentRunnerBuilder<S> {
         self.memory_recall_fn = Some(recall_fn);
         self
     }
+
+    /// Inject an event bus for publishing ToolMediaEmitted and other structured events.
+    pub fn with_event_bus(mut self, bus: Arc<clawdesk_bus::dispatch::EventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
 }
 
 /// Sandbox policy transitions — only available in `SandboxUnconfigured` state.
@@ -630,6 +678,7 @@ impl AgentRunnerBuilder<SandboxUnconfigured> {
             channel_context: self.channel_context,
             skill_provider: self.skill_provider,
             memory_recall_fn: self.memory_recall_fn,
+            event_bus: self.event_bus,
             _sandbox: std::marker::PhantomData,
         }
     }
@@ -658,6 +707,7 @@ impl AgentRunnerBuilder<SandboxUnconfigured> {
             channel_context: self.channel_context,
             skill_provider: self.skill_provider,
             memory_recall_fn: self.memory_recall_fn,
+            event_bus: self.event_bus,
             _sandbox: std::marker::PhantomData,
         }
     }
@@ -702,6 +752,7 @@ impl AgentRunnerBuilder<SandboxConfigured> {
             memory_recall_fn: self.memory_recall_fn,
             approval_session_cache: Arc::new(dashmap::DashMap::new()),
             images: Vec::new(),
+            event_bus: self.event_bus,
         }
     }
 }
@@ -767,6 +818,10 @@ pub struct AgentRunner {
     /// Passed through to `ProviderRequest.images` so vision-capable models
     /// receive native image content blocks.
     images: Vec<clawdesk_providers::ImageContent>,
+    /// Optional event bus for publishing structured events (e.g., ToolMediaEmitted).
+    /// When present, tool-produced media artifacts are published to the bus
+    /// for concurrent channel upload during continued LLM execution.
+    event_bus: Option<Arc<clawdesk_bus::dispatch::EventBus>>,
 }
 
 impl AgentRunner {
@@ -800,6 +855,7 @@ impl AgentRunner {
             memory_recall_fn: None,
             approval_session_cache: Arc::new(dashmap::DashMap::new()),
             images: Vec::new(),
+            event_bus: None,
         }
     }
 
@@ -952,6 +1008,7 @@ impl AgentRunner {
             channel_context: None,
             skill_provider: None,
             memory_recall_fn: None,
+            event_bus: None,
             _sandbox: std::marker::PhantomData,
         }
     }
@@ -1910,6 +1967,29 @@ impl AgentRunner {
             }
         }
 
+        // Emit ToolMediaEmitted events for concurrent channel upload (R5 wiring)
+        if let Some(ref bus) = self.event_bus {
+            for result in &tool_results {
+                if result.content.contains("MEDIA:") {
+                    let (_, media_urls, _) = extract_media_lines(&result.content);
+                    for media_url in &media_urls {
+                        let event = clawdesk_bus::event::Event::new(
+                            "agent.media",
+                            clawdesk_bus::event::EventKind::ToolMediaEmitted,
+                            clawdesk_bus::event::Priority::Standard,
+                            serde_json::json!({
+                                "tool_name": &result.name,
+                                "media_path": media_url,
+                                "session_id": self.session_id.as_deref().unwrap_or("unknown"),
+                            }),
+                            "agent_runner",
+                        );
+                        let _ = bus.publish(event).await;
+                    }
+                }
+            }
+        }
+
         // Context budget + push tool results to messages
         let mut ctx_budget = crate::context_budget::ContextBudget::new(
             crate::context_budget::ContextBudgetConfig::default(),
@@ -1974,7 +2054,22 @@ impl AgentRunner {
         };
         let segments = if let Some(ref ch_ctx) = self.channel_context {
             let max_len = ch_ctx.max_message_length.unwrap_or(4096);
-            Self::chunk_response(&content, max_len)
+
+            // Parse MEDIA: directives from LLM output (R1 wiring)
+            let (clean_text, media_urls, audio_as_voice) = extract_media_lines(&content);
+
+            // Filter out media already sent via tool calls (R4 dedup)
+            let deduped_media = loop_state.messaging_tracker
+                .filter_duplicate_media(&media_urls);
+
+            Self::chunk_response_with_meta(
+                &clean_text,
+                max_len,
+                deduped_media,
+                None,
+                false,
+                audio_as_voice,
+            )
         } else {
             Vec::new()
         };

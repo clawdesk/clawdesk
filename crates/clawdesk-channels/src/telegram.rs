@@ -142,6 +142,45 @@ impl TelegramChannel {
                                         sink.on_message(normalized).await;
                                     }
                                 }
+
+                                // Handle callback query (inline button presses)
+                                if let Some(cb) = update.callback_query {
+                                    if let (Some(msg), Some(data)) = (&cb.message, &cb.data) {
+                                        let chat_id = msg.chat.id;
+                                        if self.is_allowed(chat_id) {
+                                            let sender = SenderIdentity {
+                                                id: cb.from.id.to_string(),
+                                                display_name: cb.from.first_name.clone(),
+                                                channel: ChannelId::Telegram,
+                                            };
+                                            let session_key = clawdesk_types::session::SessionKey::new(
+                                                ChannelId::Telegram,
+                                                &chat_id.to_string(),
+                                            );
+                                            let origin = clawdesk_types::message::MessageOrigin::Telegram {
+                                                chat_id,
+                                                message_id: msg.message_id,
+                                                thread_id: msg.message_thread_id,
+                                            };
+                                            let normalized = NormalizedMessage {
+                                                id: uuid::Uuid::new_v4(),
+                                                session_key,
+                                                body: format!("[callback:{}]", data),
+                                                body_for_agent: Some(format!(
+                                                    "User pressed inline button with callback data: {}",
+                                                    data,
+                                                )),
+                                                sender,
+                                                media: vec![],
+                                                artifact_refs: vec![],
+                                                reply_context: None,
+                                                origin,
+                                                timestamp: chrono::Utc::now(),
+                                            };
+                                            sink.on_message(normalized).await;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -405,6 +444,32 @@ impl Channel for TelegramChannel {
             _ => return Err("cannot send Telegram message without Telegram origin".into()),
         };
 
+        // Send media attachments first (R5 wiring: screenshots reach users)
+        for attachment in &msg.media {
+            match attachment.media_type {
+                clawdesk_types::message::MediaType::Image => {
+                    self.send_photo(chat_id, attachment, msg.reply_to.as_deref()).await?;
+                }
+                clawdesk_types::message::MediaType::Voice | clawdesk_types::message::MediaType::Audio => {
+                    self.send_voice_or_audio(chat_id, attachment, msg.reply_to.as_deref()).await?;
+                }
+                _ => {
+                    self.send_document_attachment(chat_id, attachment, msg.reply_to.as_deref()).await?;
+                }
+            }
+        }
+
+        // Skip text if only media with empty body
+        if msg.body.trim().is_empty() && !msg.media.is_empty() {
+            return Ok(DeliveryReceipt {
+                channel: ChannelId::Telegram,
+                message_id: String::new(),
+                timestamp: chrono::Utc::now(),
+                success: true,
+                error: None,
+            });
+        }
+
         let mut body = serde_json::json!({
             "chat_id": chat_id,
             "text": msg.body,
@@ -587,6 +652,362 @@ impl Reactions for TelegramChannel {
 
 // ─── Telegram API types ─────────────────────────────────────────────
 
+// ─── Telegram Rich Actions ──────────────────────────────────────────
+//
+// Agent-accessible Telegram actions beyond basic sendMessage.
+// Each action maps to a Telegram Bot API method.
+
+impl TelegramChannel {
+    /// Send a message with inline keyboard buttons.
+    ///
+    /// `buttons` is a grid: outer Vec = rows, inner Vec = buttons per row.
+    /// Each button is `(label, callback_data)`.
+    pub async fn send_with_buttons(
+        &self,
+        chat_id: i64,
+        text: &str,
+        buttons: Vec<Vec<(String, String)>>,
+        reply_to: Option<i64>,
+    ) -> Result<String, String> {
+        let keyboard: Vec<Vec<serde_json::Value>> = buttons
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|(label, data)| {
+                        serde_json::json!({ "text": label, "callback_data": data })
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": { "inline_keyboard": keyboard },
+        });
+        if let Some(r) = reply_to {
+            body["reply_to_message_id"] = serde_json::json!(r);
+        }
+
+        let resp = self.client
+            .post(&self.api_url("sendMessage"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Telegram sendMessage+buttons failed: {e}"))?;
+        self.parse_message_id(resp).await
+    }
+
+    /// Create a poll.
+    pub async fn send_poll(
+        &self,
+        chat_id: i64,
+        question: &str,
+        options: Vec<String>,
+        allows_multiple: bool,
+        is_anonymous: bool,
+    ) -> Result<String, String> {
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "question": question,
+            "options": options,
+            "allows_multiple_answers": allows_multiple,
+            "is_anonymous": is_anonymous,
+        });
+
+        let resp = self.client
+            .post(&self.api_url("sendPoll"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Telegram sendPoll failed: {e}"))?;
+        self.parse_message_id(resp).await
+    }
+
+    /// Send a sticker by file_id.
+    pub async fn send_sticker(
+        &self,
+        chat_id: i64,
+        sticker_id: &str,
+    ) -> Result<String, String> {
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "sticker": sticker_id,
+        });
+
+        let resp = self.client
+            .post(&self.api_url("sendSticker"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Telegram sendSticker failed: {e}"))?;
+        self.parse_message_id(resp).await
+    }
+
+    /// Edit a message's text.
+    pub async fn edit_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+    ) -> Result<(), String> {
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "Markdown",
+        });
+        self.post_void("editMessageText", &body).await
+    }
+
+    /// Delete a message.
+    pub async fn delete_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> Result<(), String> {
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+        });
+        self.post_void("deleteMessage", &body).await
+    }
+
+    /// Pin a message.
+    pub async fn pin_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        silent: bool,
+    ) -> Result<(), String> {
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "disable_notification": silent,
+        });
+        self.post_void("pinChatMessage", &body).await
+    }
+
+    /// Create a forum topic (supergroup with topics enabled).
+    pub async fn create_forum_topic(
+        &self,
+        chat_id: i64,
+        name: &str,
+        icon_emoji: Option<&str>,
+    ) -> Result<i64, String> {
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "name": name,
+        });
+        if let Some(emoji) = icon_emoji {
+            body["icon_custom_emoji_id"] = serde_json::json!(emoji);
+        }
+
+        let resp = self.client
+            .post(&self.api_url("createForumTopic"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Telegram createForumTopic failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("createForumTopic failed: {err}"));
+        }
+
+        let data: TelegramResponse<serde_json::Value> = resp
+            .json()
+            .await
+            .map_err(|e| format!("parse createForumTopic: {e}"))?;
+
+        data.result
+            .and_then(|v| v.get("message_thread_id")?.as_i64())
+            .ok_or_else(|| "missing thread_id in response".into())
+    }
+
+    /// Answer an inline button callback query.
+    pub async fn answer_callback_query(
+        &self,
+        callback_query_id: &str,
+        text: Option<&str>,
+        show_alert: bool,
+    ) -> Result<(), String> {
+        let mut body = serde_json::json!({
+            "callback_query_id": callback_query_id,
+            "show_alert": show_alert,
+        });
+        if let Some(t) = text {
+            body["text"] = serde_json::json!(t);
+        }
+        self.post_void("answerCallbackQuery", &body).await
+    }
+
+    // ── Helpers ──────────────────────────────────────────────
+
+    /// POST to a Telegram API method, check success, discard result.
+    async fn post_void(&self, method: &str, body: &serde_json::Value) -> Result<(), String> {
+        let resp = self.client
+            .post(&self.api_url(method))
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("Telegram {method} failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("Telegram {method} ({status}): {err}"));
+        }
+        Ok(())
+    }
+
+    /// Parse a message_id from a Telegram sendXxx response.
+    async fn parse_message_id(&self, resp: reqwest::Response) -> Result<String, String> {
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("Telegram API ({status}): {err}"));
+        }
+
+        let data: TelegramResponse<serde_json::Value> = resp
+            .json()
+            .await
+            .map_err(|e| format!("parse response: {e}"))?;
+
+        Ok(data.result
+            .and_then(|v| v.get("message_id")?.as_i64())
+            .map(|id| id.to_string())
+            .unwrap_or_default())
+    }
+
+    /// Send a photo via Telegram Bot API `sendPhoto`.
+    /// Reads bytes from `attachment.url` (file path) or uses `attachment.data`.
+    async fn send_photo(
+        &self,
+        chat_id: i64,
+        attachment: &MediaAttachment,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        let url = self.api_url("sendPhoto");
+
+        let bytes = self.read_attachment_bytes(attachment).await?;
+        let filename = attachment.filename.clone().unwrap_or_else(|| "photo.jpg".into());
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string());
+
+        if let Some(reply_id) = reply_to {
+            if let Ok(id) = reply_id.parse::<i64>() {
+                form = form.text("reply_to_message_id", id.to_string());
+            }
+        }
+
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename)
+            .mime_str(&attachment.mime_type)
+            .map_err(|e| format!("mime: {e}"))?;
+        form = form.part("photo", part);
+
+        let resp = self.client.post(&url).multipart(form).send().await
+            .map_err(|e| format!("sendPhoto failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("sendPhoto error: {err}"));
+        }
+        Ok(())
+    }
+
+    /// Send a document via Telegram Bot API `sendDocument`.
+    async fn send_document_attachment(
+        &self,
+        chat_id: i64,
+        attachment: &MediaAttachment,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        let url = self.api_url("sendDocument");
+
+        let bytes = self.read_attachment_bytes(attachment).await?;
+        let filename = attachment.filename.clone().unwrap_or_else(|| "file".into());
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string());
+
+        if let Some(reply_id) = reply_to {
+            if let Ok(id) = reply_id.parse::<i64>() {
+                form = form.text("reply_to_message_id", id.to_string());
+            }
+        }
+
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename)
+            .mime_str(&attachment.mime_type)
+            .map_err(|e| format!("mime: {e}"))?;
+        form = form.part("document", part);
+
+        let resp = self.client.post(&url).multipart(form).send().await
+            .map_err(|e| format!("sendDocument failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("sendDocument error: {err}"));
+        }
+        Ok(())
+    }
+
+    /// Send a voice/audio via Telegram Bot API `sendVoice`.
+    async fn send_voice_or_audio(
+        &self,
+        chat_id: i64,
+        attachment: &MediaAttachment,
+        reply_to: Option<&str>,
+    ) -> Result<(), String> {
+        let url = self.api_url("sendVoice");
+
+        let bytes = self.read_attachment_bytes(attachment).await?;
+        let filename = attachment.filename.clone().unwrap_or_else(|| "audio.ogg".into());
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string());
+
+        if let Some(reply_id) = reply_to {
+            if let Ok(id) = reply_id.parse::<i64>() {
+                form = form.text("reply_to_message_id", id.to_string());
+            }
+        }
+
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename)
+            .mime_str(&attachment.mime_type)
+            .map_err(|e| format!("mime: {e}"))?;
+        form = form.part("voice", part);
+
+        let resp = self.client.post(&url).multipart(form).send().await
+            .map_err(|e| format!("sendVoice failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("sendVoice error: {err}"));
+        }
+        Ok(())
+    }
+
+    /// Read bytes from a MediaAttachment — either from `data` or from `url` (file path).
+    async fn read_attachment_bytes(&self, attachment: &MediaAttachment) -> Result<Vec<u8>, String> {
+        if let Some(ref data) = attachment.data {
+            Ok(data.clone())
+        } else if let Some(ref path) = attachment.url {
+            tokio::fs::read(path).await
+                .map_err(|e| format!("read media file {path}: {e}"))
+        } else {
+            Err("attachment has neither data nor url".into())
+        }
+    }
+}
+
+// ─── Telegram API types ─────────────────────────────────────────────
+
 #[derive(Debug, Deserialize)]
 struct TelegramResponse<T> {
     ok: bool,
@@ -598,6 +1019,16 @@ struct TelegramResponse<T> {
 struct TelegramUpdate {
     update_id: i64,
     message: Option<TgMessage>,
+    callback_query: Option<TgCallbackQuery>,
+}
+
+/// Telegram callback query from an inline button press.
+#[derive(Debug, Deserialize)]
+struct TgCallbackQuery {
+    id: String,
+    from: TgUser,
+    message: Option<TgMessage>,
+    data: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

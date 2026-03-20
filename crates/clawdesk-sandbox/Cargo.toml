@@ -18,7 +18,7 @@ workspace = []
 clawdesk-types = { workspace = true }
 
 # Async
-tokio = { workspace = true, features = ["process", "fs"] }
+tokio = { workspace = true, features = ["process", "fs", "io-util", "time"] }
 async-trait = { workspace = true }
 
 # Error handling
@@ -38,8 +38,9 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rustc-hash = { workspace = true }
+dashmap = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]

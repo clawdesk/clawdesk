@@ -13,6 +13,7 @@
 //! capability grants, resource limits, and lifecycle state transitions.
 
 pub mod abi;
+pub mod hook_policy;
 pub mod hooks;
 pub mod host;
 pub mod resolver;
@@ -26,6 +27,7 @@ pub use versioning::{SemVer, VersionConstraint, PluginDependency, UpgradeCompati
 pub use resolver::DependencyResolver;
 pub use sandbox::PluginSandbox;
 pub use hooks::{Hook, HookContext, HookManager, HookOverrides, HookResult, Phase, ProactiveMemoryHook};
+pub use hook_policy::{HookPolicy, PolicyDecision, SlotClaimResult, SlotOccupant};
 pub use registry::PluginRegistry;
 pub use abi::{AbiVersion, AbiCapability, CapabilityBitmap, AbiCheckResult, check_compatibility};
 pub use sdk::{ClawDeskPlugin, PluginContext, PluginEvent, PluginManifest, PluginResponse, PluginSdkError};

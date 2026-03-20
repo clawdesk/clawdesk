@@ -24,7 +24,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 /// Check status for display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     Ok,
     Warn,
@@ -659,6 +660,162 @@ fn format_bytes(bytes: u64) -> String {
 
 // Removed: duplicated default_data_dir() and dirs_home().
 // All path resolution now uses clawdesk_types::dirs::{data, dot_clawdesk, sochdb, threads, agents}.
+
+// ---------------------------------------------------------------------------
+// GUI-friendly diagnostic surface — self-healing doctor for Tauri frontend
+// ---------------------------------------------------------------------------
+
+/// Serializable diagnostic result for GUI consumption.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GuiDiagResult {
+    pub name: String,
+    pub status: CheckStatus,
+    pub detail: String,
+    pub duration_ms: u64,
+    /// Action label for one-click fix button (None = no fix available)
+    pub fix_action: Option<FixAction>,
+}
+
+/// Self-healing fix action — maps to a remediation button in the UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FixAction {
+    /// Button label shown in UI
+    pub label: String,
+    /// Machine-readable action identifier
+    pub action_id: String,
+    /// Estimated success probability (0.0–1.0)
+    pub success_probability: f64,
+}
+
+impl From<&DiagResult> for GuiDiagResult {
+    fn from(r: &DiagResult) -> Self {
+        let fix_action = r.repair_hint.as_ref().map(|hint| {
+            // Map known repair hints to actionable UI buttons
+            let (label, action_id, prob) = if hint.contains("clawdesk init") {
+                ("Create Directories", "create_dirs", 0.95)
+            } else if hint.contains("ollama") || hint.contains("https://ollama.com") {
+                ("Install Ollama", "install_ollama", 0.85)
+            } else if hint.contains("gateway") {
+                ("Start Gateway", "start_gateway", 0.90)
+            } else if hint.contains("set $") {
+                ("Configure API Key", "configure_key", 0.80)
+            } else if hint.contains("pruning") {
+                ("Clean Up Storage", "prune_storage", 0.95)
+            } else if hint.contains("network") || hint.contains("proxy") {
+                ("Check Network", "check_network", 0.60)
+            } else {
+                ("View Details", "view_details", 0.50)
+            };
+            FixAction {
+                label: label.to_string(),
+                action_id: action_id.to_string(),
+                success_probability: prob,
+            }
+        });
+
+        GuiDiagResult {
+            name: r.name.clone(),
+            status: r.status,
+            detail: r.detail.clone(),
+            duration_ms: r.duration_ms,
+            fix_action,
+        }
+    }
+}
+
+/// Full diagnostic report for GUI consumption.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GuiDiagReport {
+    pub results: Vec<GuiDiagResult>,
+    pub ok_count: usize,
+    pub warn_count: usize,
+    pub fail_count: usize,
+    pub total_duration_ms: u64,
+}
+
+impl GuiDiagReport {
+    /// Convert CLI diagnostic results to GUI-friendly format.
+    pub fn from_results(results: &[DiagResult]) -> Self {
+        let gui_results: Vec<GuiDiagResult> = results.iter().map(GuiDiagResult::from).collect();
+        let ok_count = gui_results.iter().filter(|r| r.status == CheckStatus::Ok).count();
+        let warn_count = gui_results.iter().filter(|r| r.status == CheckStatus::Warn).count();
+        let fail_count = gui_results.iter().filter(|r| r.status == CheckStatus::Fail).count();
+        let total_duration_ms = gui_results.iter().map(|r| r.duration_ms).sum();
+
+        Self {
+            results: gui_results,
+            ok_count,
+            warn_count,
+            fail_count,
+            total_duration_ms,
+        }
+    }
+}
+
+/// Run diagnostics and return GUI-friendly report.
+pub async fn run_doctor_gui() -> GuiDiagReport {
+    let registry = DiagnosticRegistry::with_builtins();
+    let results = registry.run_all().await;
+    GuiDiagReport::from_results(&results)
+}
+
+/// Execute a fix action by ID.
+///
+/// Returns Ok with success message, or Err with failure reason.
+pub async fn execute_fix(action_id: &str) -> Result<String, String> {
+    match action_id {
+        "create_dirs" => {
+            let check = DataDirCheck;
+            check.repair().await
+        }
+        "start_gateway" => {
+            // Start gateway via daemon
+            tokio::process::Command::new("clawdesk")
+                .args(["gateway", "run"])
+                .spawn()
+                .map_err(|e| format!("failed to start gateway: {}", e))?;
+            Ok("Gateway starting...".into())
+        }
+        "install_ollama" => {
+            // Attempt to install Ollama
+            let output = tokio::process::Command::new("sh")
+                .args(["-c", "curl -fsSL https://ollama.ai/install.sh | sh"])
+                .output()
+                .await
+                .map_err(|e| format!("failed to install Ollama: {}", e))?;
+            if output.status.success() {
+                Ok("Ollama installed successfully".into())
+            } else {
+                Err(format!("Ollama install failed: {}", String::from_utf8_lossy(&output.stderr)))
+            }
+        }
+        "prune_storage" => {
+            // Prune old sessions
+            let threads_dir = clawdesk_types::dirs::dot_clawdesk().join("threads");
+            if threads_dir.exists() {
+                let mut removed = 0;
+                if let Ok(entries) = std::fs::read_dir(&threads_dir) {
+                    let cutoff = std::time::SystemTime::now()
+                        - std::time::Duration::from_secs(30 * 24 * 3600); // 30 days
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                if modified < cutoff {
+                                    let _ = std::fs::remove_file(entry.path());
+                                    removed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(format!("Removed {} old session(s)", removed))
+            } else {
+                Ok("No sessions to prune".into())
+            }
+        }
+        _ => Err(format!("Unknown action: {}", action_id)),
+    }
+}
 
 #[cfg(test)]
 mod tests {

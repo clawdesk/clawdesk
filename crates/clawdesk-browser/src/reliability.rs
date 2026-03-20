@@ -77,6 +77,7 @@ pub fn classify_cdp_error(code: i64, message: &str) -> ErrorClass {
                 || msg_lower.contains("destroyed")
                 || msg_lower.contains("not found")
                 || msg_lower.contains("frame was detached")
+                || msg_lower.contains("navigation")
             {
                 ErrorClass::Retriable
             } else {
@@ -86,6 +87,8 @@ pub fn classify_cdp_error(code: i64, message: &str) -> ErrorClass {
         -32602 => ErrorClass::Retriable, // Invalid params (stale nodeId)
         -32601 => ErrorClass::Terminal,    // Method not found
         -32700 => ErrorClass::Terminal,    // Parse error
+        // net:: errors from navigation (DNS failure, refused, etc.)
+        -32000..=-31000 => ErrorClass::Retriable,
         _ => ErrorClass::Terminal,         // Unknown — don't retry
     }
 }

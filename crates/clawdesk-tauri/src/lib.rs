@@ -11,12 +11,15 @@ pub mod commands;
 pub mod commands_a2a;
 pub mod commands_canvas;
 pub mod commands_debug;
+pub mod commands_diagnostics;
 pub mod commands_discovery;
 pub mod commands_domain;
+pub mod commands_health_dashboard;
 pub mod commands_infra;
 pub mod commands_journal;
 pub mod commands_media;
 pub mod commands_memory;
+pub mod commands_memory_transparency;
 pub mod commands_observability;
 pub mod commands_plugin;
 pub mod commands_runtime;
@@ -40,10 +43,15 @@ pub mod commands_skills_admin;
 pub mod commands_local_models;
 pub mod commands_rag;
 pub mod commands_preview;
+pub mod commands_resource_monitor;
+pub mod commands_skill_builder;
+pub mod commands_visual_orchestrator;
+pub mod commands_wizard;
 pub mod deep_link;
 pub mod engine;
 pub mod enriched_backend;
 pub mod error;
+#[allow(dead_code)]
 pub mod message_pipeline;
 pub mod i18n;
 pub mod persistence;
@@ -481,6 +489,38 @@ pub fn run() {
             commands_preview::preview_list,
             commands_preview::preview_remove,
             commands_preview::preview_check_port,
+            // ── Security Health Dashboard (Phase 1.4) ──────────────────
+            commands_health_dashboard::get_security_health,
+            commands_health_dashboard::get_security_score,
+            // ── Diagnostic Engine GUI (Phase 1.5) ──────────────────────
+            commands_diagnostics::run_diagnostics,
+            commands_diagnostics::execute_diagnostic_fix,
+            // ── Wizard Flow (Phase 1.2) ────────────────────────────────
+            commands_wizard::wizard_get_state,
+            commands_wizard::wizard_advance,
+            commands_wizard::wizard_set_personalization,
+            commands_wizard::wizard_get_use_cases,
+            commands_wizard::wizard_get_defaults,
+            commands_wizard::wizard_get_progress,
+            // ── Resource Monitor (Phase 1.6) ───────────────────────────
+            commands_resource_monitor::get_resource_snapshot,
+            commands_resource_monitor::get_memory_usage,
+            commands_resource_monitor::get_cost_savings,
+            // ── No-Code Skill Builder (Phase 2.2) ──────────────────────
+            commands_skill_builder::skill_builder_get_templates,
+            commands_skill_builder::skill_builder_validate,
+            commands_skill_builder::skill_builder_compile,
+            commands_skill_builder::skill_builder_deploy,
+            // ── Transparent Memory (Phase 3.4) ─────────────────────────
+            commands_memory_transparency::memory_get_knowledge_base,
+            commands_memory_transparency::memory_get_categories,
+            commands_memory_transparency::memory_apply_action,
+            commands_memory_transparency::memory_compute_confidence,
+            // ── Visual DAG Orchestrator (Phase 4.2) ────────────────────
+            commands_visual_orchestrator::orchestrator_get_view,
+            commands_visual_orchestrator::orchestrator_apply_action,
+            commands_visual_orchestrator::orchestrator_compute_layout,
+            commands_visual_orchestrator::orchestrator_critical_path,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

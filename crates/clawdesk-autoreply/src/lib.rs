@@ -35,6 +35,6 @@ pub use command_registry::{CommandRegistry, CommandDef, ParsedCommand, CommandRe
 pub use directive::{Directives, ThinkLevel, parse_directives, merge_directives};
 pub use echo::{EchoSuppressor, EchoSuppressionConfig, SuppressionReason};
 pub use formatter::ResponseFormatter;
-pub use media_directive::{MediaSplit, parse_media_directives};
+pub use media_directive::{MediaSplit, parse_media_directives, media_urls_to_attachments};
 pub use pipeline::ReplyPipeline;
 pub use router::MessageRouter;

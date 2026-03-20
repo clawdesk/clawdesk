@@ -292,6 +292,54 @@ pub struct OutboundMessage {
     pub thread_id: Option<String>,
 }
 
+/// Convert media URL strings to typed [`MediaAttachment`] structs for channel delivery.
+///
+/// Infers MIME type from file extension and media type from MIME prefix.
+/// Channel adapters read bytes at send time via `attachment.url`.
+pub fn media_urls_to_attachments(urls: &[String]) -> Vec<MediaAttachment> {
+    urls.iter()
+        .map(|url| {
+            let mime = mime_from_path(url);
+            let media_type = if mime.starts_with("image/") {
+                MediaType::Image
+            } else if mime.starts_with("audio/") {
+                MediaType::Audio
+            } else if mime.starts_with("video/") {
+                MediaType::Video
+            } else {
+                MediaType::Document
+            };
+            MediaAttachment {
+                media_type,
+                url: Some(url.clone()),
+                data: None,
+                mime_type: mime,
+                filename: url.rsplit('/').next().map(String::from),
+                size_bytes: std::fs::metadata(url).ok().map(|m| m.len()),
+            }
+        })
+        .collect()
+}
+
+/// Infer MIME type from file path extension.
+fn mime_from_path(path: &str) -> String {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
 /// Confirmation that a message was delivered.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryReceipt {

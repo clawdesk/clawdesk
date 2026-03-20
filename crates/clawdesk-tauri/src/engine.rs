@@ -355,20 +355,29 @@ pub(crate) fn inject_memory_context(history: &mut Vec<ChatMessage>, memory_text:
 pub(crate) fn build_skill_provider(
     active_skills: Vec<Arc<clawdesk_skills::Skill>>,
 ) -> Option<Arc<dyn clawdesk_agents::runner::SkillProvider>> {
-    if active_skills.is_empty() {
-        return None;
-    }
-
     use clawdesk_skills::env_injection::EnvResolver;
     use clawdesk_skills::orchestrator::SkillOrchestrator;
     use clawdesk_skills::skill_provider::OrchestratorSkillProvider;
+    use clawdesk_skills::{BrowserSkillProvider, CompositeSkillProvider};
+
+    let browser_provider: Arc<dyn clawdesk_agents::runner::SkillProvider> =
+        Arc::new(BrowserSkillProvider::new());
+
+    if active_skills.is_empty() {
+        // Even with no user skills, browser tools should be available
+        // when Chrome/Chromium/Edge is installed on the system.
+        return Some(browser_provider);
+    }
 
     let orchestrator = SkillOrchestrator::new(active_skills, 8_000);
     let env_resolver = EnvResolver::default();
-    Some(Arc::new(OrchestratorSkillProvider::new(
-        orchestrator,
-        env_resolver,
-    )))
+    let orchestrator_provider: Arc<dyn clawdesk_agents::runner::SkillProvider> =
+        Arc::new(OrchestratorSkillProvider::new(orchestrator, env_resolver));
+
+    Some(Arc::new(CompositeSkillProvider::new(vec![
+        orchestrator_provider,
+        browser_provider,
+    ])))
 }
 
 /// Load active skills from the skill registry.

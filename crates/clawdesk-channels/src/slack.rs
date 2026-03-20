@@ -62,6 +62,71 @@ impl SlackChannel {
         format!("{}/{}", SLACK_API_BASE, method)
     }
 
+    /// Upload a file to a Slack channel via files.upload (multipart/form-data).
+    async fn upload_file(
+        &self,
+        channel_id: &str,
+        attachment: &clawdesk_types::message::MediaAttachment,
+        thread_ts: Option<&str>,
+    ) -> Result<(), String> {
+        let bytes = self.read_attachment_bytes(attachment).await?;
+        let filename = attachment
+            .filename
+            .clone()
+            .unwrap_or_else(|| "file".into());
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("channels", channel_id.to_string());
+
+        if let Some(ts) = thread_ts {
+            form = form.text("thread_ts", ts.to_string());
+        }
+
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename)
+            .mime_str(&attachment.mime_type)
+            .map_err(|e| format!("mime: {e}"))?;
+        form = form.part("file", part);
+
+        let resp = self
+            .client
+            .post(&self.api_url("files.upload"))
+            .header("Authorization", format!("Bearer {}", self.bot_token))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Slack file upload failed: {e}"))?;
+
+        let result: SlackApiResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse Slack upload response: {e}"))?;
+
+        if !result.ok {
+            return Err(format!(
+                "Slack files.upload error: {}",
+                result.error.unwrap_or_default()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Read bytes from a MediaAttachment (inline data or local file path).
+    async fn read_attachment_bytes(
+        &self,
+        attachment: &clawdesk_types::message::MediaAttachment,
+    ) -> Result<Vec<u8>, String> {
+        if let Some(ref data) = attachment.data {
+            Ok(data.clone())
+        } else if let Some(ref path) = attachment.url {
+            tokio::fs::read(path)
+                .await
+                .map_err(|e| format!("read media file {path}: {e}"))
+        } else {
+            Err("attachment has neither data nor url".into())
+        }
+    }
+
     /// Normalize a Slack event to NormalizedMessage.
     fn normalize_event(
         &self,
@@ -336,6 +401,23 @@ impl Channel for SlackChannel {
             clawdesk_types::message::MessageOrigin::Slack { channel_id, .. } => channel_id.clone(),
             _ => return Err("cannot send Slack message without Slack origin".into()),
         };
+
+        // Upload media attachments first via files.upload
+        for attachment in &msg.media {
+            self.upload_file(&channel_id, attachment, msg.thread_id.as_deref())
+                .await?;
+        }
+
+        // Skip text if only media with empty body
+        if msg.body.trim().is_empty() && !msg.media.is_empty() {
+            return Ok(DeliveryReceipt {
+                channel: ChannelId::Slack,
+                message_id: String::new(),
+                timestamp: chrono::Utc::now(),
+                success: true,
+                error: None,
+            });
+        }
 
         let mut body = serde_json::json!({
             "channel": channel_id,

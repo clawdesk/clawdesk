@@ -12,6 +12,7 @@ pub mod executor;
 pub mod heartbeat;
 pub mod parser;
 pub mod manager;
+pub mod notification_queue;
 pub mod persistence;
 pub mod dep_resolver;
 pub mod proactive;

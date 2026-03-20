@@ -24,7 +24,9 @@ pub mod confinement;
 pub mod dispatch;
 #[cfg(feature = "sandbox-docker")]
 pub mod docker;
+pub mod pty;
 pub mod seccomp;
+pub mod session;
 pub mod subprocess;
 #[cfg(feature = "sandbox-wasm")]
 pub mod wasm;
@@ -38,6 +40,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 // Re-exports
+pub use capability_gate::{
+    CapabilityGate, CapabilitySet, CachedGrant, EffectivePermission, GateVerdict,
+    PermissionGrantCache, ToolCapabilityMap, caps, profiles,
+};
 pub use dispatch::SandboxDispatcher;
 pub use subprocess::SubprocessSandbox;
 #[cfg(feature = "sandbox-wasm")]

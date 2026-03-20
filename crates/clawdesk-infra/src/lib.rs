@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod notifications;
 pub mod notify_overlay;
 pub mod registry_client;
+pub mod resource_monitor;
 pub mod retry;
 pub mod task_scope;
 pub mod tls;

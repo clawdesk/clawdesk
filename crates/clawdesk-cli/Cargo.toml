@@ -39,6 +39,8 @@ clawdesk-cron = { workspace = true }
 clawdesk-daemon = { workspace = true }
 clawdesk-runtime = { workspace = true }
 clawdesk-bus = { workspace = true }
+clawdesk-security = { workspace = true }
+clawdesk-wizard = { workspace = true }
 clawdesk-tui = { workspace = true, optional = true }
 clawdesk-browser = { workspace = true, optional = true }
 clawdesk-mcp = { workspace = true, optional = true }

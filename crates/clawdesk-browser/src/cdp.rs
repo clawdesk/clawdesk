@@ -238,6 +238,9 @@ impl CdpSession {
     }
 
     /// Build command-line args for launching browser in debug mode.
+    ///
+    /// Includes stealth flags to reduce bot detection by news sites and
+    /// other anti-automation pages (nypost.com, news.yahoo.com, etc.).
     pub fn browser_launch_args(port: u16, headless: bool, user_data_dir: &str) -> Vec<String> {
         let mut args = vec![
             format!("--remote-debugging-port={}", port),
@@ -246,6 +249,12 @@ impl CdpSession {
             "--no-default-browser-check".to_string(),
             "--disable-background-networking".to_string(),
             "--disable-sync".to_string(),
+            // Stealth: hide automation signals from bot-detection scripts
+            "--disable-blink-features=AutomationControlled".to_string(),
+            "--disable-dev-shm-usage".to_string(),
+            "--disable-infobars".to_string(),
+            // Realistic window size prevents viewport-based detection
+            "--window-size=1920,1080".to_string(),
         ];
         if headless {
             args.push("--headless=new".to_string());
@@ -421,9 +430,63 @@ impl CdpSession {
     }
 
     /// Navigate to a URL and wait for the page to load.
+    ///
+    /// Uses retry with exponential backoff for transient failures (context
+    /// destroyed during navigation, timeout on slow sites). Injects a
+    /// realistic user-agent to avoid bot detection by news/media sites.
     pub async fn navigate_and_wait(&mut self, url: &str) -> Result<CdpResponse, String> {
-        let cmd = self.navigate(url);
-        self.send(cmd).await
+        // Set realistic user-agent before navigation to evade bot detection
+        let ua_cmd = self.build_command(
+            "Network.setUserAgentOverride",
+            serde_json::json!({
+                "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "platform": "macOS"
+            }),
+        );
+        let _ = self.send(ua_cmd).await; // Best-effort; don't fail on UA set
+
+        // Hide webdriver flag via CDP command
+        let stealth_js = self.build_command(
+            "Page.addScriptToEvaluateOnNewDocument",
+            serde_json::json!({
+                "source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            }),
+        );
+        let _ = self.send(stealth_js).await;
+
+        // Retry navigation up to 3 times with backoff
+        let mut attempt = 0u32;
+        let max_retries = 3u32;
+        loop {
+            let cmd = self.navigate(url);
+            match self.send(cmd).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    let is_retriable = e.contains("context")
+                        || e.contains("detached")
+                        || e.contains("destroyed")
+                        || e.contains("timeout")
+                        || e.contains("net::ERR_")
+                        || e.contains("Navigation");
+
+                    if !is_retriable || attempt >= max_retries {
+                        return Err(format!("CDP navigation error for {}: {}", url, e));
+                    }
+
+                    let delay = std::time::Duration::from_millis(500 * 2u64.pow(attempt));
+                    tracing::warn!(
+                        url = url,
+                        attempt = attempt + 1,
+                        max = max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %e,
+                        "navigation failed, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
     }
 
     /// Execute JavaScript and return the result value.

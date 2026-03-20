@@ -19,6 +19,8 @@ pub struct PipelineResult {
     pub delivery: DeliveryStatus,
     /// The formatted response parts, if any.
     pub response_parts: Vec<String>,
+    /// Full formatted segments with media metadata for channel delivery.
+    pub formatted_segments: Vec<crate::formatter::FormattedSegment>,
 }
 
 /// Agent execution function type.
@@ -118,6 +120,7 @@ impl ReplyPipeline {
                         error: Some("no trigger matched".to_string()),
                     },
                     response_parts: vec![],
+                    formatted_segments: vec![],
                 };
             }
         };
@@ -145,6 +148,7 @@ impl ReplyPipeline {
                         error: Some(reason),
                     },
                     response_parts: vec![],
+                    formatted_segments: vec![],
                 };
             }
             RoutingDecision::Queue { reason } => {
@@ -160,6 +164,7 @@ impl ReplyPipeline {
                         error: Some(reason),
                     },
                     response_parts: vec![],
+                    formatted_segments: vec![],
                 };
             }
         };
@@ -256,6 +261,7 @@ impl ReplyPipeline {
                             error: Some(e),
                         },
                         response_parts: vec![],
+                        formatted_segments: vec![],
                     };
                 }
             }
@@ -279,6 +285,7 @@ impl ReplyPipeline {
                     error: Some("no agent executor registered".to_string()),
                 },
                 response_parts: vec![],
+                formatted_segments: vec![],
             };
         };
         timings.push(("execute", t.elapsed()));
@@ -286,8 +293,20 @@ impl ReplyPipeline {
         // Stage 6: Format.
         let t = Instant::now();
         let channel = &msg.sender.channel;
-        let segments = ResponseFormatter::format(&agent_response, channel);
-        let response_parts: Vec<String> = segments.into_iter().map(|s| s.text).collect();
+
+        // Parse MEDIA: directives from agent response (R1 wiring)
+        let parsed = crate::media_directive::parse_media_directives(&agent_response);
+
+        let segments = ResponseFormatter::format_with_media(
+            &parsed.text,
+            channel,
+            parsed.media_urls,
+            None,
+            parsed.audio_as_voice,
+            false,
+        );
+
+        let response_parts: Vec<String> = segments.iter().map(|s| s.text.clone()).collect();
         timings.push(("format", t.elapsed()));
 
         // Stage 7: Deliver.
@@ -310,6 +329,7 @@ impl ReplyPipeline {
                 error: None,
             },
             response_parts,
+            formatted_segments: segments,
         }
     }
 

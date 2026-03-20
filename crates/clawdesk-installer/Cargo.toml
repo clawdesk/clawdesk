@@ -1,0 +1,43 @@
+[package]
+name = "clawdesk-installer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Single-binary installer with embedded Ollama bootstrap for ClawDesk"
+
+[dependencies]
+# Internal
+clawdesk-local-models = { workspace = true }
+clawdesk-wizard = { workspace = true }
+clawdesk-types = { workspace = true }
+
+# Async
+tokio = { workspace = true, features = ["process", "fs", "io-util", "time", "sync"] }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# HTTP for downloads
+reqwest = { workspace = true, features = ["stream"] }
+
+# Crypto
+sha2 = { workspace = true }
+
+# Progress
+indicatif = "0.17"
+
+# Platform detection
+which = "7"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

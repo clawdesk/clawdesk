@@ -49,6 +49,39 @@ pub async fn init_event_bus() -> Arc<EventBus> {
         "skill.lifecycle",
         "system.startup",
         "system.shutdown",
+        // Phase 1: Security & health
+        "security.health.check",
+        "security.permission.denied",
+        "security.permission.granted",
+        "diagnostics.check.completed",
+        "diagnostics.fix.applied",
+        // Phase 2: Skill ecosystem
+        "skill.builder.compiled",
+        "skill.builder.deployed",
+        "skill.marketplace.installed",
+        "skill.signature.verified",
+        "skill.signature.failed",
+        // Phase 3: Voice & proactive
+        "voice.speech.detected",
+        "voice.transcription.ready",
+        "voice.tts.started",
+        "voice.tts.completed",
+        "voice.barge_in",
+        "proactive.notification.pushed",
+        "proactive.notification.dismissed",
+        "memory.entry.created",
+        "memory.entry.edited",
+        "memory.entry.deleted",
+        // Phase 4: Orchestration
+        "orchestrator.task.started",
+        "orchestrator.task.completed",
+        "orchestrator.task.failed",
+        "orchestrator.graph.rewritten",
+        "orchestrator.checkpoint.awaiting",
+        // Architecture: resource monitoring
+        "resource.snapshot.updated",
+        "daemon.sleep.entered",
+        "daemon.wake.triggered",
     ];
 
     for topic in &standard_topics {
@@ -231,6 +264,105 @@ pub async fn register_trigger(
         "Registered reactive trigger"
     );
     bus.subscribe(sub).await;
+}
+
+// ── Strategic feature event emitters ─────────────────────────
+
+/// Emit a security health check event.
+pub async fn emit_security_health_check(
+    bus: &EventBus,
+    score: u32,
+    grade: &str,
+    critical_issues: usize,
+) {
+    let payload = serde_json::json!({
+        "score": score,
+        "grade": grade,
+        "critical_issues": critical_issues,
+    });
+    bus.emit("security.health.check", EventKind::MemoryStored, Priority::Standard, payload, "security").await;
+}
+
+/// Emit a sandbox permission event.
+pub async fn emit_permission_event(
+    bus: &EventBus,
+    tool_name: &str,
+    granted: bool,
+    capabilities: &str,
+) {
+    let topic = if granted { "security.permission.granted" } else { "security.permission.denied" };
+    let payload = serde_json::json!({
+        "tool": tool_name,
+        "granted": granted,
+        "capabilities": capabilities,
+    });
+    let priority = if granted { Priority::Standard } else { Priority::Urgent };
+    bus.emit(topic, EventKind::ApprovalResolved, priority, payload, "sandbox").await;
+}
+
+/// Emit a voice pipeline event.
+pub async fn emit_voice_event(
+    bus: &EventBus,
+    event_type: &str,
+    detail: &str,
+) {
+    let topic = format!("voice.{}", event_type);
+    let payload = serde_json::json!({ "detail": detail });
+    bus.emit(&topic, EventKind::MessageReceived, Priority::Standard, payload, "voice").await;
+}
+
+/// Emit a skill builder event (compiled or deployed).
+pub async fn emit_skill_builder_event(
+    bus: &EventBus,
+    action: &str,
+    skill_id: &str,
+    node_count: usize,
+) {
+    let topic = format!("skill.builder.{}", action);
+    let payload = serde_json::json!({
+        "skill_id": skill_id,
+        "node_count": node_count,
+    });
+    bus.emit(&topic, EventKind::SkillActivated, Priority::Standard, payload, "skill_builder").await;
+}
+
+/// Emit an orchestrator task status change.
+pub async fn emit_orchestrator_event(
+    bus: &EventBus,
+    event_type: &str,
+    task_id: &str,
+    agent_id: Option<&str>,
+) {
+    let topic = format!("orchestrator.{}", event_type);
+    let payload = serde_json::json!({
+        "task_id": task_id,
+        "agent_id": agent_id,
+    });
+    bus.emit(&topic, EventKind::PipelineCompleted, Priority::Standard, payload, "orchestrator").await;
+}
+
+/// Emit a daemon power state change.
+pub async fn emit_daemon_power_event(
+    bus: &EventBus,
+    event_type: &str,
+) {
+    let topic = format!("daemon.{}", event_type);
+    bus.emit(&topic, EventKind::HeartbeatFired, Priority::Standard, serde_json::json!({}), "daemon").await;
+}
+
+/// Emit a memory transparency event (entry created, edited, deleted).
+pub async fn emit_memory_event(
+    bus: &EventBus,
+    action: &str,
+    entry_id: &str,
+    category: &str,
+) {
+    let topic = format!("memory.entry.{}", action);
+    let payload = serde_json::json!({
+        "entry_id": entry_id,
+        "category": category,
+    });
+    bus.emit(&topic, EventKind::MemoryStored, Priority::Standard, payload, "memory").await;
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ pub mod btw;
 pub mod builtin_tools;
 pub mod causal_trace;
 pub mod cli_runner;
+pub mod cli_provider;
 pub mod compaction;
 pub mod context;
 pub mod context_budget;
@@ -88,6 +89,7 @@ pub mod coherence;
 pub mod cli_orchestration;
 pub mod a2ui;
 pub mod auto_compose;
+pub mod web_search;
 
 pub use agent_backend_bridge::{RunnerBackend, PipelineAgentConfig};
 pub use context::ContextAssembler;

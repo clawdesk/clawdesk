@@ -32,6 +32,7 @@
 pub mod archetype;
 pub mod browser_skill;
 pub mod bundled;
+pub mod composite_provider;
 pub mod capability;
 pub mod bundled_design;
 pub mod bundled_packs;
@@ -73,6 +74,7 @@ pub mod templates;
 pub mod tool_manifest;
 pub mod trigger;
 pub mod trigram_index;
+pub mod visual_builder;
 pub mod watcher;
 pub mod verification;
 
@@ -95,6 +97,7 @@ pub use store_sync::{SyncConfig, SyncState, SyncResult, SyncError, compute_merkl
 pub use store_cache::{StoreCache, CacheError};
 pub use archetype::{Archetype, ArchetypeRegistry, ResolvedArchetype};
 pub use browser_skill::BrowserSkillProvider;
+pub use composite_provider::CompositeSkillProvider;
 pub use bundled_packs::load_bundled_packs;
 pub use pack::{PackId, PackRegistry, PackTier, SkillPack};
 pub use pack_distribution::{PackContentAddress, PackResolver, PackSourceTier};
