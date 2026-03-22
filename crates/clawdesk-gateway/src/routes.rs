@@ -15,7 +15,7 @@ use clawdesk_types::channel::ChannelId;
 use clawdesk_types::session::{Session, SessionFilter, SessionKey};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 use crate::thread_ownership::AcquireResult;
 
 #[derive(Serialize)]
@@ -389,7 +389,64 @@ pub async fn send_message(
 
     debug!(%session_id, input_tokens = agent_response.input_tokens, output_tokens = agent_response.output_tokens, "message processed via agent runner");
 
-        Ok(Json(SendMessageResponse {
+    // ── Auto-reply to originating channel ────────────────────
+    // If the session belongs to a non-internal channel (Telegram, Slack, etc.),
+    // deliver the reply directly via Channel::send(). HTTP/WebChat callers
+    // consume the JSON response directly; external channels need active push.
+    if session.channel != ChannelId::Internal && session.channel != ChannelId::WebChat {
+        let channels = state.channels.load();
+        if let Some(channel) = channels.get(&session.channel) {
+            use clawdesk_types::message::{MessageOrigin, OutboundMessage};
+            let origin = match session.channel {
+                ChannelId::Telegram => {
+                    // Extract chat_id from the session identifier
+                    let chat_id = session.key.identifier().parse::<i64>().unwrap_or(0);
+                    MessageOrigin::Telegram {
+                        chat_id,
+                        message_id: 0,
+                        thread_id: None,
+                    }
+                }
+                ChannelId::Slack => MessageOrigin::Slack {
+                    team_id: String::new(),
+                    channel_id: session.key.identifier().to_string(),
+                    user_id: String::new(),
+                    ts: String::new(),
+                    thread_ts: None,
+                },
+                ChannelId::Discord => MessageOrigin::Discord {
+                    guild_id: 0,
+                    channel_id: session.key.identifier().parse::<u64>().unwrap_or(0),
+                    message_id: 0,
+                    is_dm: true,
+                    thread_id: None,
+                },
+                _ => MessageOrigin::Internal {
+                    source: "gateway".to_string(),
+                },
+            };
+
+            let outbound = OutboundMessage {
+                origin,
+                body: formatted_reply.clone(),
+                media: Vec::new(),
+                reply_to: None,
+                thread_id: None,
+            };
+
+            if let Err(e) = channel.send(outbound).await {
+                warn!(
+                    channel = %session.channel,
+                    error = %e,
+                    "Failed to auto-reply to originating channel"
+                );
+            } else {
+                debug!(channel = %session.channel, "Auto-reply delivered to channel");
+            }
+        }
+    }
+
+    Ok(Json(SendMessageResponse {
             reply: formatted_reply,
             session_id,
             thread_id: thread_id.clone(),

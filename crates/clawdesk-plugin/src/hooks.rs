@@ -46,6 +46,11 @@ pub enum Phase {
     /// receive the full turn summary in `data` and can perform
     /// fire-and-forget work like proactive memory storage.
     PostTurn,
+    /// Fires after the complete agent execution is finished (including PostTurn).
+    /// Designed for cron/background tasks to auto-deliver results to channels.
+    /// Hooks receive the full response content, delivery targets, and origin context.
+    /// Unlike PostTurn, this phase is specifically for cross-system delivery routing.
+    AfterExecution,
     SessionEnd,
     Shutdown,
 }
@@ -65,6 +70,7 @@ impl fmt::Display for Phase {
             Phase::AfterCompaction => write!(f, "after_compaction"),
             Phase::MessageSend => write!(f, "message_send"),
             Phase::PostTurn => write!(f, "post_turn"),
+            Phase::AfterExecution => write!(f, "after_execution"),
             Phase::SessionEnd => write!(f, "session_end"),
             Phase::Shutdown => write!(f, "shutdown"),
         }

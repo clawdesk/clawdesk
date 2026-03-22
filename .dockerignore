@@ -1,5 +1,9 @@
 # Build artifacts
 target/
+target_cli/
+node_modules/
+crates/ui/node_modules/
+crates/ui/dist/
 *.swp
 *.swo
 *~
@@ -34,3 +38,8 @@ lcov.info
 # Debug symbols
 *.dSYM/
 *.pdb
+
+# Large scratch files
+watch_*
+fuzz/
+bench/

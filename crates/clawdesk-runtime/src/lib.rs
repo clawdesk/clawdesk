@@ -63,6 +63,10 @@ pub mod backpressure;
 pub mod sandbox;
 pub mod scope;
 pub mod shutdown;
+pub mod shell_dispatch;
+pub mod wsl_bridge;
+pub mod shell_detect;
+pub mod terminal_caps;
 
 // Re-exports for ergonomic use.
 pub use checkpoint::CheckpointStore;
@@ -81,6 +85,10 @@ pub use session_mux::{
 pub use recovery::RecoveryManager;
 pub use scope::{CancellationToken, FailureStrategy, ScopeConfig, ScopeResult, TaskOutcome, TaskScope};
 pub use shutdown::{ShutdownCoordinator, ShutdownConfig, ShutdownToken, ShutdownResult, SubsystemResult};
+pub use shell_dispatch::build_command as shell_build_command;
+pub use shell_detect::UserShell;
+pub use terminal_caps::TerminalCapabilities;
+pub use wsl_bridge::WslBridge;
 pub use backpressure::{BackpressureController, BackpressureConfig, Admission, BackpressureMetrics, TokenBucket};
 pub use types::*;
 pub use supervisor::{ProcessSupervisor, ProcessInfo, SpawnConfig, ProcessState};

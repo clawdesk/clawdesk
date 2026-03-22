@@ -195,8 +195,8 @@ pub fn detect_cycle(
         }
 
         if visiting.contains(&current) {
-            visited.insert(current);
-            visiting.remove(path.first().unwrap_or(&String::new()));
+            visited.insert(current.clone());
+            visiting.remove(&current);
             continue;
         }
 

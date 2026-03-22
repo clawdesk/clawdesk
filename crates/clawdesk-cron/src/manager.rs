@@ -4,8 +4,9 @@ use crate::dep_resolver;
 use crate::executor::{AgentExecutor, CronExecutor, DeliveryHandler};
 use crate::parser;
 use crate::persistence::CronPersistence;
+use crate::proactive::{ProactiveOrchestrator, SystemContext};
 use chrono::Utc;
-use clawdesk_types::cron::{ChainMode, CronRunLog, CronRunStatus, CronTask};
+use clawdesk_types::cron::{ChainMode, CronRunLog, CronRunStatus, CronTask, DeliveryTarget};
 use clawdesk_types::error::CronError;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,6 +26,12 @@ pub struct CronManager {
     cancel: CancellationToken,
     /// Optional durable persistence backend (GAP-C).
     persistence: Option<Arc<dyn CronPersistence>>,
+    /// Optional proactive notification orchestrator — Thompson Sampling.
+    /// When set, each tick evaluates system context and fires proactive
+    /// notifications (morning briefings, habit reminders, etc.) via agents.
+    proactive: RwLock<Option<ProactiveOrchestrator>>,
+    /// Default delivery targets for proactive notifications.
+    proactive_delivery_targets: RwLock<Vec<DeliveryTarget>>,
 }
 
 impl CronManager {
@@ -37,6 +44,8 @@ impl CronManager {
             executor: Arc::new(CronExecutor::new(agent, delivery)),
             cancel: CancellationToken::new(),
             persistence: None,
+            proactive: RwLock::new(None),
+            proactive_delivery_targets: RwLock::new(Vec::new()),
         }
     }
 
@@ -51,6 +60,29 @@ impl CronManager {
             executor: Arc::new(CronExecutor::new(agent, delivery)),
             cancel: CancellationToken::new(),
             persistence: Some(persistence),
+            proactive: RwLock::new(None),
+            proactive_delivery_targets: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Enable the proactive notification orchestrator with default Life OS types.
+    ///
+    /// When enabled, each tick evaluates the system context and fires proactive
+    /// agent prompts for selected notification types (morning briefings, habit
+    /// reminders, relationship decay alerts, etc.).
+    pub async fn enable_proactive(&self, delivery_targets: Vec<DeliveryTarget>) {
+        let mut proactive = self.proactive.write().await;
+        *proactive = Some(ProactiveOrchestrator::with_defaults());
+        let mut targets = self.proactive_delivery_targets.write().await;
+        *targets = delivery_targets;
+        info!("Proactive notification orchestrator enabled (Thompson Sampling)");
+    }
+
+    /// Record user feedback for a proactive notification type.
+    pub async fn record_proactive_feedback(&self, type_id: &str, positive: bool) {
+        let mut proactive = self.proactive.write().await;
+        if let Some(ref mut orch) = *proactive {
+            orch.record_feedback(type_id, positive);
         }
     }
 
@@ -165,6 +197,7 @@ impl CronManager {
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
                     self.tick().await;
+                    self.proactive_tick().await;
                 }
             }
         }
@@ -294,6 +327,79 @@ impl CronManager {
     /// Stop the scheduling loop.
     pub fn stop(&self) {
         self.cancel.cancel();
+    }
+
+    /// Evaluate the proactive notification orchestrator.
+    ///
+    /// Runs Thompson Sampling on registered notification types with the current
+    /// system context. Selected notifications spawn one-shot agent tasks with
+    /// prompts tailored to the notification type.
+    async fn proactive_tick(&self) {
+        let mut proactive = self.proactive.write().await;
+        let Some(ref mut orchestrator) = *proactive else {
+            return; // Proactive not enabled
+        };
+
+        // Build system context — currently uses defaults.
+        // In a fully wired system, this would query email counts, contact health, etc.
+        let context = SystemContext::default();
+
+        let selected = orchestrator.evaluate(&context);
+        if selected.is_empty() {
+            return;
+        }
+
+        let delivery_targets = self.proactive_delivery_targets.read().await.clone();
+        let executor = self.executor.clone();
+
+        for notification in selected {
+            debug!(
+                type_id = %notification.type_id,
+                type_name = %notification.type_name,
+                score = notification.score,
+                "Proactive notification selected"
+            );
+
+            // Create a one-shot agent prompt based on the notification type
+            let prompt = match notification.type_id.as_str() {
+                "morning_briefing" => "Generate a morning briefing: summarize today's agenda, urgent emails, and top priorities. Keep it concise and actionable.".to_string(),
+                "evening_review" => "Generate an evening review: summarize what was accomplished today, pending items, and tomorrow's agenda.".to_string(),
+                "weekly_summary" => "Generate a weekly summary: key accomplishments, metrics, pending items, and priorities for next week.".to_string(),
+                "habit_reminder" => "Check in on daily habits: ask about exercise, reading, hydration, and any tracked habits. Be encouraging.".to_string(),
+                "email_urgent" => "Check for urgent emails that need attention. Summarize any high-priority messages.".to_string(),
+                "health_insight" => "Provide a health insight or wellness tip based on recent activity patterns.".to_string(),
+                other => format!("Generate a '{}' notification based on current context.", other),
+            };
+
+            // Create a transient task for execution
+            let task = CronTask {
+                id: format!("proactive:{}", notification.type_id),
+                name: notification.type_name.clone(),
+                schedule: String::new(), // one-shot, no schedule
+                prompt,
+                agent_id: None,
+                delivery_targets: delivery_targets.clone(),
+                skip_if_running: true,
+                timeout_secs: 120,
+                enabled: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                depends_on: vec![],
+                chain_mode: ChainMode::Independent,
+                max_retained_logs: 0,
+            };
+
+            let exec = executor.clone();
+            tokio::spawn(async move {
+                if let Err(e) = exec.execute_task(&task).await {
+                    warn!(
+                        type_id = %notification.type_id,
+                        error = %e,
+                        "Proactive notification execution failed"
+                    );
+                }
+            });
+        }
     }
 
     /// Get recent logs.

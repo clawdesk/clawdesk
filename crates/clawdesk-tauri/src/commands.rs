@@ -67,6 +67,43 @@ impl clawdesk_agents::runner::SandboxGate for SandboxGateAdapter {
 }
 
 // ═══════════════════════════════════════════════════════════
+// EgressGate adapter — bridges NetworkEgressPolicy → EgressGate trait
+// ═══════════════════════════════════════════════════════════
+
+/// Adapter implementing the runner's `EgressGate` trait by delegating to
+/// `NetworkEgressPolicy::evaluate()`. Provides per-endpoint, per-tool
+/// network access control with SSRF prevention and approval workflows.
+pub(crate) struct EgressGateAdapter {
+    pub(crate) policy: Arc<std::sync::RwLock<clawdesk_security::NetworkEgressPolicy>>,
+}
+
+#[async_trait::async_trait]
+impl clawdesk_agents::runner::EgressGate for EgressGateAdapter {
+    fn check_egress(
+        &self,
+        tool_name: &str,
+        host: &str,
+        port: u16,
+        method: Option<&str>,
+        is_tls: bool,
+    ) -> Result<bool, String> {
+        let policy = self.policy.read().map_err(|e| format!("egress policy lock poisoned: {e}"))?;
+        let http_method = method.and_then(clawdesk_security::HttpMethod::from_str_loose);
+        match policy.evaluate(tool_name, host, port, http_method, is_tls) {
+            clawdesk_security::EgressDecision::Allow { .. } => Ok(true),
+            clawdesk_security::EgressDecision::RequireApproval { reason, .. } => {
+                tracing::info!(tool_name, host, port, %reason, "Egress requires approval");
+                Ok(false)
+            }
+            clawdesk_security::EgressDecision::Deny { reason } => {
+                tracing::warn!(tool_name, host, port, %reason, "Egress denied");
+                Err(reason)
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
 // Health — queries real backend service state
 // ═══════════════════════════════════════════════════════════
 
@@ -2623,6 +2660,12 @@ interact with web UIs, or capture visual output for the user.\n"
     // exceeds platform capability are blocked before execution.
     .with_sandbox_gate(Arc::new(crate::commands::SandboxGateAdapter {
         engine: Arc::clone(&state.sandbox_engine),
+    }))
+    // Wire egress gate — endpoint-level network access control with
+    // SSRF prevention (blocks RFC1918, cloud metadata, link-local),
+    // tool-endpoint bindings, and TLS/method enforcement.
+    .with_egress_gate(Arc::new(crate::commands::EgressGateAdapter {
+        policy: Arc::clone(&state.egress_policy),
     }));
 
     if let Some(ch_ctx) = channel_context {

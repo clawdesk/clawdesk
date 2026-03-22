@@ -527,6 +527,34 @@ pub trait SandboxGate: Send + Sync + 'static {
     fn check_policy(&self, tool_name: &str) -> Result<(), String>;
 }
 
+/// Trait for network egress policy decisions — injected into the runner to
+/// gate outbound network connections at the endpoint level.
+///
+/// This adds per-endpoint, per-tool network access control on top of the
+/// sandbox's binary `allow_network` flag. Even if a tool is allowed network
+/// access by the sandbox, the egress gate controls which specific endpoints
+/// it can reach.
+///
+/// Three possible outcomes:
+/// - `Ok(true)` — connection allowed by policy binding
+/// - `Ok(false)` — connection requires operator approval (returned for UI prompt)
+/// - `Err(reason)` — connection denied (SSRF blocklist or no binding in enforce mode)
+#[async_trait::async_trait]
+pub trait EgressGate: Send + Sync + 'static {
+    /// Check whether a tool may connect to the given host:port.
+    ///
+    /// `method` is the HTTP method if known (None for raw TCP).
+    /// `is_tls` indicates whether the connection uses TLS.
+    fn check_egress(
+        &self,
+        tool_name: &str,
+        host: &str,
+        port: u16,
+        method: Option<&str>,
+        is_tls: bool,
+    ) -> Result<bool, String>;
+}
+
 // ═══════════════════════════════════════════════════════════
 // Type-state builder for AgentRunner
 // ═══════════════════════════════════════════════════════════
@@ -573,10 +601,12 @@ pub struct AgentRunnerBuilder<S = SandboxUnconfigured> {
     agent_id: Option<String>,
     profile_rotator: Option<Arc<ProfileRotator>>,
     sandbox_gate: Option<Arc<dyn SandboxGate>>,
+    egress_gate: Option<Arc<dyn EgressGate>>,
     channel_context: Option<ChannelContext>,
     skill_provider: Option<Arc<dyn SkillProvider>>,
     memory_recall_fn: Option<MemoryRecallFn>,
     event_bus: Option<Arc<clawdesk_bus::dispatch::EventBus>>,
+    metacognition: bool,
     _sandbox: std::marker::PhantomData<S>,
 }
 
@@ -610,6 +640,12 @@ impl<S> AgentRunnerBuilder<S> {
     /// Inject a HookManager for plugin lifecycle dispatch.
     pub fn with_hook_manager(mut self, mgr: Arc<HookManager>) -> Self {
         self.hook_manager = Some(mgr);
+        self
+    }
+
+    /// Enable metacognitive monitoring (stuck detection + approach evaluation).
+    pub fn with_metacognition(mut self) -> Self {
+        self.metacognition = true;
         self
     }
 
@@ -649,6 +685,16 @@ impl<S> AgentRunnerBuilder<S> {
         self.event_bus = Some(bus);
         self
     }
+
+    /// Inject a network egress policy gate for per-endpoint access control.
+    ///
+    /// Adds SSRF prevention (blocks RFC1918, cloud metadata, link-local),
+    /// tool-endpoint bindings, HTTP method/TLS enforcement, and operator
+    /// approval escalation for unknown endpoints.
+    pub fn with_egress_gate(mut self, gate: Arc<dyn EgressGate>) -> Self {
+        self.egress_gate = Some(gate);
+        self
+    }
 }
 
 /// Sandbox policy transitions — only available in `SandboxUnconfigured` state.
@@ -675,10 +721,12 @@ impl AgentRunnerBuilder<SandboxUnconfigured> {
             agent_id: self.agent_id,
             profile_rotator: self.profile_rotator,
             sandbox_gate: Some(gate),
+            egress_gate: self.egress_gate,
             channel_context: self.channel_context,
             skill_provider: self.skill_provider,
             memory_recall_fn: self.memory_recall_fn,
             event_bus: self.event_bus,
+            metacognition: self.metacognition,
             _sandbox: std::marker::PhantomData,
         }
     }
@@ -704,10 +752,12 @@ impl AgentRunnerBuilder<SandboxUnconfigured> {
             agent_id: self.agent_id,
             profile_rotator: self.profile_rotator,
             sandbox_gate: None,
+            egress_gate: self.egress_gate,
             channel_context: self.channel_context,
             skill_provider: self.skill_provider,
             memory_recall_fn: self.memory_recall_fn,
             event_bus: self.event_bus,
+            metacognition: self.metacognition,
             _sandbox: std::marker::PhantomData,
         }
     }
@@ -746,6 +796,7 @@ impl AgentRunnerBuilder<SandboxConfigured> {
             profile_rotator: self.profile_rotator,
             active_profile_id: tokio::sync::Mutex::new(None),
             sandbox_gate: self.sandbox_gate,
+            egress_gate: self.egress_gate,
             channel_context: self.channel_context,
             skill_provider: self.skill_provider,
             turn_counter: std::sync::atomic::AtomicU32::new(0),
@@ -753,6 +804,11 @@ impl AgentRunnerBuilder<SandboxConfigured> {
             approval_session_cache: Arc::new(dashmap::DashMap::new()),
             images: Vec::new(),
             event_bus: self.event_bus,
+            metacognition: if self.metacognition {
+                Some(std::sync::Mutex::new(clawdesk_metacognition::MetacognitiveMonitor::default()))
+            } else {
+                None
+            },
         }
     }
 }
@@ -792,6 +848,11 @@ pub struct AgentRunner {
     /// When set, tools are checked against sandbox policy before execution.
     /// Tools blocked by policy get an error result instead of executing.
     sandbox_gate: Option<Arc<dyn SandboxGate>>,
+    /// Optional network egress policy gate for endpoint-level access control.
+    /// When set, tools with network access are checked against endpoint
+    /// bindings before outbound connections. SSRF-blocked endpoints are
+    /// denied immediately; unknown endpoints escalated per policy mode.
+    egress_gate: Option<Arc<dyn EgressGate>>,
     /// Channel context for channel-aware prompt injection.
     /// When set, channel capabilities and formatting hints are injected
     /// into the system prompt so the LLM tailors responses to the channel.
@@ -822,6 +883,11 @@ pub struct AgentRunner {
     /// When present, tool-produced media artifacts are published to the bus
     /// for concurrent channel upload during continued LLM execution.
     event_bus: Option<Arc<clawdesk_bus::dispatch::EventBus>>,
+    /// Optional metacognitive monitor for self-reflection.
+    /// When present, the runner evaluates each tool round for stuckness
+    /// and approach confidence, injecting corrective system messages
+    /// when the agent appears to be going in circles.
+    metacognition: Option<std::sync::Mutex<clawdesk_metacognition::MetacognitiveMonitor>>,
 }
 
 impl AgentRunner {
@@ -849,6 +915,7 @@ impl AgentRunner {
             profile_rotator: None,
             active_profile_id: tokio::sync::Mutex::new(None),
             sandbox_gate: None,
+            egress_gate: None,
             channel_context: None,
             skill_provider: None,
             turn_counter: std::sync::atomic::AtomicU32::new(0),
@@ -856,6 +923,7 @@ impl AgentRunner {
             approval_session_cache: Arc::new(dashmap::DashMap::new()),
             images: Vec::new(),
             event_bus: None,
+            metacognition: None,
         }
     }
 
@@ -919,6 +987,17 @@ impl AgentRunner {
     /// `tool.execute(args)` with policy-gated execution.
     pub fn with_sandbox_gate(mut self, gate: Arc<dyn SandboxGate>) -> Self {
         self.sandbox_gate = Some(gate);
+        self
+    }
+
+    /// Inject a network egress policy gate for endpoint-level access control.
+    ///
+    /// When set, tools are checked against endpoint bindings before making
+    /// outbound network connections. Provides SSRF prevention (blocks
+    /// RFC1918, cloud metadata, link-local), per-tool endpoint authorization,
+    /// HTTP method and TLS enforcement, and operator approval for unknown endpoints.
+    pub fn with_egress_gate(mut self, gate: Arc<dyn EgressGate>) -> Self {
+        self.egress_gate = Some(gate);
         self
     }
 
@@ -1005,10 +1084,12 @@ impl AgentRunner {
             agent_id: None,
             profile_rotator: None,
             sandbox_gate: None,
+            egress_gate: None,
             channel_context: None,
             skill_provider: None,
             memory_recall_fn: None,
             event_bus: None,
+            metacognition: false,
             _sandbox: std::marker::PhantomData,
         }
     }
@@ -1222,6 +1303,21 @@ impl AgentRunner {
                 "input_tokens": response.input_tokens,
                 "output_tokens": response.output_tokens,
                 "active_skills": &response.active_skills,
+            }),
+        ).await;
+
+        // Op5: AfterExecution hook — fires after the entire agent execution pipeline.
+        // Designed for cron/background tasks to auto-deliver results to channels.
+        // Hooks can inspect the response and route delivery to configured targets.
+        let _after_exec = self.dispatch_hook(
+            Phase::AfterExecution,
+            serde_json::json!({
+                "response_content": &response.content,
+                "total_rounds": response.total_rounds,
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "finish_reason": format!("{:?}", response.finish_reason),
+                "messaging_sends": response.messaging_sends.len(),
             }),
         ).await;
 
@@ -1516,7 +1612,47 @@ impl AgentRunner {
             match self.process_tool_round(
                 &mut request, guard, &mut loop_state, stream_result, round, &active_skills,
             ).await? {
-                RoundOutcome::Continue => continue,
+                RoundOutcome::Continue => {
+                    // Stage 5.5: Metacognitive check — detect stuckness / low confidence
+                    if let Some(ref meta_mutex) = self.metacognition {
+                        let verdict_msg = {
+                            let mut monitor = meta_mutex.lock().unwrap();
+                            // Build a snapshot from the current round state
+                            let last_tools: Vec<String> = request.messages.iter().rev()
+                                .filter(|m| m.role == MessageRole::Tool)
+                                .take(5)
+                                .map(|m| {
+                                    // Extract tool name from the content prefix
+                                    m.content.split_whitespace().next()
+                                        .unwrap_or("unknown")
+                                        .to_string()
+                                })
+                                .collect();
+                            let last_output = request.messages.iter().rev()
+                                .find(|m| m.role == MessageRole::Assistant)
+                                .map(|m| m.content.as_ref())
+                                .unwrap_or("");
+                            let tool_count = last_tools.len();
+                            let snapshot = clawdesk_metacognition::TurnSnapshot {
+                                tool_names: last_tools,
+                                output_text: last_output.to_string(),
+                                successful_tools: tool_count,
+                                total_tools: tool_count,
+                                had_new_tool_results: tool_count > 0,
+                            };
+                            let verdict = monitor.observe(&snapshot);
+                            verdict.to_system_message()
+                        };
+                        if let Some(msg) = verdict_msg {
+                            warn!("metacognition: injecting corrective message");
+                            request.messages.push(ChatMessage::new(
+                                MessageRole::System,
+                                msg,
+                            ));
+                        }
+                    }
+                    continue;
+                }
                 RoundOutcome::Done { content, round: total_rounds, finish_reason } => {
                     // Stage 6: Build final response
                     return Ok(self.build_final_response(
@@ -1626,11 +1762,17 @@ impl AgentRunner {
                 streamed_content.push_str(&chunk.delta);
                 self.emit(AgentEvent::StreamChunk { text: chunk.delta, done: false });
             }
+            // Collect tool calls from any chunk (some providers like Ollama
+            // send tool_calls in a non-final chunk before the done=true chunk).
+            if !chunk.tool_calls.is_empty() {
+                stream_tool_calls.extend(chunk.tool_calls);
+            }
             if chunk.done {
                 stream_finish = chunk.finish_reason.unwrap_or(FinishReason::Stop);
                 stream_usage = chunk.usage.unwrap_or_default();
-                if !chunk.tool_calls.is_empty() {
-                    stream_tool_calls = chunk.tool_calls;
+                // If tool calls were collected, override finish reason
+                if !stream_tool_calls.is_empty() && stream_finish == FinishReason::Stop {
+                    stream_finish = FinishReason::ToolUse;
                 }
             }
         }
@@ -1691,11 +1833,14 @@ impl AgentRunner {
                         streamed_content.push_str(&chunk.delta);
                         self.emit(AgentEvent::StreamChunk { text: chunk.delta, done: false });
                     }
+                    if !chunk.tool_calls.is_empty() {
+                        stream_tool_calls.extend(chunk.tool_calls);
+                    }
                     if chunk.done {
                         stream_finish = chunk.finish_reason.unwrap_or(FinishReason::Stop);
                         stream_usage = chunk.usage.unwrap_or_default();
-                        if !chunk.tool_calls.is_empty() {
-                            stream_tool_calls = chunk.tool_calls;
+                        if !stream_tool_calls.is_empty() && stream_finish == FinishReason::Stop {
+                            stream_finish = FinishReason::ToolUse;
                         }
                     }
                 }
@@ -2512,6 +2657,7 @@ impl AgentRunner {
             let event_tx = self.event_tx.clone();
             let approval_gate = self.approval_gate.clone();
             let sandbox_gate = self.sandbox_gate.clone();
+            let _egress_gate = self.egress_gate.clone();
             let approval_cache = self.approval_session_cache.clone();
             let hook_manager = self.hook_manager.clone();
             let hook_session_id = self.session_id.clone();

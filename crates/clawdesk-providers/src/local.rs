@@ -349,6 +349,7 @@ impl Provider for LocalProvider {
         }
 
         let mut buffer = String::new();
+        let mut byte_buf: Vec<u8> = Vec::new();
         let mut total_input = 0u64;
         let mut total_output = 0u64;
         let mut response = response;
@@ -358,7 +359,15 @@ impl Provider for LocalProvider {
             .await
             .map_err(|e| ProviderError::network_error("local", e.to_string()))?
         {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            byte_buf.extend_from_slice(&chunk);
+            let valid_len = match std::str::from_utf8(&byte_buf) {
+                Ok(s) => s.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            if valid_len == 0 { continue; }
+            let text = std::str::from_utf8(&byte_buf[..valid_len]).expect("valid UTF-8");
+            buffer.push_str(text);
+            byte_buf.drain(..valid_len);
 
             while let Some(newline) = buffer.find('\n') {
                 let line = buffer[..newline].trim().to_string();

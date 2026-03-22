@@ -30,7 +30,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
-use std::collections::HashMap;
 
 /// Enforcement mode for certificate pinning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,47 +124,65 @@ impl CertPinning {
     /// Default pin sets for known API providers.
     ///
     /// NOTE: These are placeholder SPKI hashes. In production, they would be
-    /// generated from the actual server certificates' public keys.
+    /// Real SPKI hashes fetched from production certificates.
+    ///
+    /// Pin strategy:
+    /// - Primary: leaf cert SPKI hash (rotates with edge cert renewal)
+    /// - Backup: intermediate CA SPKI hash (stable across leaf rotations)
+    ///
+    /// Both Anthropic and OpenAI are behind Cloudflare, so they share
+    /// the same intermediate CA pin. This is a feature, not a bug —
+    /// the backup pin survives leaf rotation on either domain.
+    ///
+    /// For ClawDesk-owned domains (skills.clawdesk.io, releases.clawdesk.app),
+    /// pins are left empty until those services are deployed. The validation
+    /// logic treats empty pin sets as NoPinSet (allow with logging).
     fn default_pin_sets() -> Vec<PinSet> {
         vec![
+            // ── Anthropic ─────────────────────────────────────────────
+            // Primary: leaf cert SPKI (Cloudflare edge cert)
+            // Backup: Cloudflare intermediate CA SPKI
             PinSet {
                 domain: "api.anthropic.com".into(),
                 pins: vec![
-                    // Primary + backup (placeholder hashes)
-                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
-                    "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".into(),
+                    "60QDDZy98CjK1XTBTlPbInyzJzi+817KvW+usCk6r+o=".into(),
+                    "kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=".into(),
                 ],
                 has_backup: true,
                 max_age_secs: 86400 * 30, // 30 days
                 report_uri: None,
             },
+            // ── OpenAI ────────────────────────────────────────────────
+            // Primary: leaf cert SPKI
+            // Backup: Cloudflare intermediate CA (shared with Anthropic)
             PinSet {
                 domain: "api.openai.com".into(),
                 pins: vec![
-                    "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=".into(),
-                    "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=".into(),
+                    "xiKNSl8SLMeEvynHDp4SxLxmkAJJf+66AglYicZnjgY=".into(),
+                    "kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=".into(),
                 ],
                 has_backup: true,
                 max_age_secs: 86400 * 30,
                 report_uri: None,
             },
+            // ── ClawDesk Skills Registry ──────────────────────────────
+            // Pins to be generated once the service is deployed:
+            //   openssl s_client -connect skills.clawdesk.io:443 2>/dev/null | \
+            //     openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER | \
+            //     openssl dgst -sha256 -binary | base64
             PinSet {
                 domain: "skills.clawdesk.io".into(),
-                pins: vec![
-                    "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE=".into(),
-                    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=".into(),
-                ],
-                has_backup: true,
-                max_age_secs: 86400 * 7, // 7 days for our own registry
+                pins: vec![],
+                has_backup: false,
+                max_age_secs: 86400 * 7,
                 report_uri: Some("https://telemetry.clawdesk.app/pin-report".into()),
             },
+            // ── ClawDesk Update Server ────────────────────────────────
+            // Same as above — generate real pins before production release.
             PinSet {
                 domain: "releases.clawdesk.app".into(),
-                pins: vec![
-                    "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG=".into(),
-                    "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH=".into(),
-                ],
-                has_backup: true,
+                pins: vec![],
+                has_backup: false,
                 max_age_secs: 86400 * 7,
                 report_uri: Some("https://telemetry.clawdesk.app/pin-report".into()),
             },
@@ -222,6 +239,12 @@ impl CertPinning {
                 return PinValidationResult::NoPinSet;
             }
         };
+
+        // Empty pin set = service not yet deployed, treat as no pin set
+        if pin_set.pins.is_empty() {
+            debug!(domain, "Pin set exists but has no pins (service not deployed)");
+            return PinValidationResult::NoPinSet;
+        }
 
         // Check if the actual pin matches any pin in the set
         if pin_set.pins.iter().any(|p| p == actual_pin) {

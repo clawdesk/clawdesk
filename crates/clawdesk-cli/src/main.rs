@@ -169,7 +169,6 @@ enum Commands {
         approval: String,
     },
     /// Pipe mode — read stdin, process with agent, write stdout
-    #[command(alias = "pipe")]
     Pipe {
         /// Prompt/instructions
         #[arg(short, long)]
@@ -597,11 +596,101 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     128,
                 );
 
-                // Cron manager with no-op executor/delivery (wired later)
-                let cron_manager = clawdesk_cron::CronManager::new(
-                    std::sync::Arc::new(clawdesk_cron::executor::NoopAgentExecutor),
-                    std::sync::Arc::new(clawdesk_cron::executor::NoopDeliveryHandler),
+                // Cron manager with gateway agent executor and channel delivery —
+                // the GatewayState reference is wired after construction via OnceLock.
+                let gw_agent_executor = clawdesk_gateway::state::GatewayAgentExecutor::new();
+                let gw_state_handle = gw_agent_executor.state_handle();
+                let gw_delivery_handler = clawdesk_gateway::state::ChannelDeliveryHandler::new(
+                    std::sync::Arc::clone(&gw_state_handle),
                 );
+                let cron_manager = std::sync::Arc::new(clawdesk_cron::CronManager::new(
+                    std::sync::Arc::new(gw_agent_executor),
+                    std::sync::Arc::new(gw_delivery_handler),
+                ));
+
+                // Register cron management tools (schedule, list, remove, trigger)
+                {
+                    let cm = std::sync::Arc::clone(&cron_manager);
+                    let cm2 = std::sync::Arc::clone(&cron_manager);
+                    let cm3 = std::sync::Arc::clone(&cron_manager);
+                    let cm4 = std::sync::Arc::clone(&cron_manager);
+
+                    let schedule_fn: clawdesk_agents::port::AsyncPort<
+                        clawdesk_agents::port::CronScheduleRequest,
+                        Result<String, String>,
+                    > = std::sync::Arc::new(move |req| {
+                        let cm = std::sync::Arc::clone(&cm);
+                        Box::pin(async move {
+                            use clawdesk_types::cron::{CronTask, DeliveryTarget};
+                            let task_id = req.task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                            let delivery_targets: Vec<DeliveryTarget> = req.delivery_targets.iter().map(|(ch, to)| {
+                                DeliveryTarget::Channel { channel_id: ch.clone(), conversation_id: to.clone() }
+                            }).collect();
+                            let task = CronTask {
+                                id: task_id.clone(),
+                                name: req.name,
+                                schedule: req.schedule,
+                                prompt: req.prompt,
+                                agent_id: req.agent_id,
+                                delivery_targets,
+                                skip_if_running: true,
+                                timeout_secs: req.timeout_secs,
+                                enabled: true,
+                                created_at: chrono::Utc::now(),
+                                updated_at: chrono::Utc::now(),
+                                depends_on: vec![],
+                                chain_mode: Default::default(),
+                                max_retained_logs: 0,
+                            };
+                            cm.upsert_task(task).await.map_err(|e| format!("{e}"))?;
+                            Ok(format!("Scheduled task '{}' (id: {})", task_id, task_id))
+                        })
+                    });
+
+                    let list_fn: std::sync::Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync> =
+                        std::sync::Arc::new(move || {
+                            let cm = std::sync::Arc::clone(&cm2);
+                            Box::pin(async move {
+                                let tasks = cm.list_tasks().await;
+                                let summary: Vec<String> = tasks.iter().map(|t| {
+                                    format!("- {} (id: {}, schedule: {}, enabled: {}, targets: {})",
+                                        t.name, t.id, t.schedule, t.enabled, t.delivery_targets.len())
+                                }).collect();
+                                if summary.is_empty() {
+                                    Ok("No scheduled tasks.".to_string())
+                                } else {
+                                    Ok(summary.join("\n"))
+                                }
+                            })
+                        });
+
+                    let remove_fn: std::sync::Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync> =
+                        std::sync::Arc::new(move |id| {
+                            let cm = std::sync::Arc::clone(&cm3);
+                            Box::pin(async move {
+                                cm.remove_task(&id).await.map_err(|e| format!("{e}"))?;
+                                Ok(format!("Removed task '{}'", id))
+                            })
+                        });
+
+                    let trigger_fn: std::sync::Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync> =
+                        std::sync::Arc::new(move |id| {
+                            let cm = std::sync::Arc::clone(&cm4);
+                            Box::pin(async move {
+                                let log = cm.trigger(&id).await.map_err(|e| format!("{e}"))?;
+                                Ok(format!("Triggered task '{}': {:?}", id, log.status))
+                            })
+                        });
+
+                    clawdesk_agents::builtin_tools::register_cron_tools(
+                        &mut tools,
+                        schedule_fn,
+                        list_fn,
+                        remove_fn,
+                        trigger_fn,
+                    );
+                    info!("Cron management tools registered (cron_schedule, cron_list, cron_remove, cron_trigger)");
+                }
 
                 // Skills — load bundled skills (embedded in binary) then merge
                 // with user skills from disk (~/.clawdesk/skills/).
@@ -626,7 +715,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let channel_factory = clawdesk_channels::factory::ChannelFactory::with_builtins();
 
                 let state = std::sync::Arc::new(
-                    clawdesk_gateway::state::GatewayState::new(
+                    clawdesk_gateway::state::GatewayState::with_cron_arc(
                         channels, providers, tools, store,
                         plugin_host, cron_manager,
                         skills, skill_loader, channel_factory,
@@ -634,6 +723,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         clawdesk_channel::inbound_adapter::InboundAdapterRegistry::new(256),
                     ),
                 );
+
+                // Wire the deferred GatewayState reference for cron executor + delivery
+                let _ = gw_state_handle.set(std::sync::Arc::clone(&state));
 
                 let config = clawdesk_gateway::GatewayConfig {
                     host,
@@ -1420,10 +1512,100 @@ async fn cmd_daemon(
                 std::sync::Arc::new(clawdesk_plugin::NoopPluginFactory),
                 128,
             );
-            let cron_manager = clawdesk_cron::CronManager::new(
-                std::sync::Arc::new(clawdesk_cron::executor::NoopAgentExecutor),
-                std::sync::Arc::new(clawdesk_cron::executor::NoopDeliveryHandler),
+            // Cron manager with gateway agent executor and channel delivery
+            let gw_agent_executor = clawdesk_gateway::state::GatewayAgentExecutor::new();
+            let gw_state_handle = gw_agent_executor.state_handle();
+            let gw_delivery_handler = clawdesk_gateway::state::ChannelDeliveryHandler::new(
+                std::sync::Arc::clone(&gw_state_handle),
             );
+            let cron_manager = std::sync::Arc::new(clawdesk_cron::CronManager::new(
+                std::sync::Arc::new(gw_agent_executor),
+                std::sync::Arc::new(gw_delivery_handler),
+            ));
+
+            // Register cron management tools for daemon agents
+            {
+                let cm = std::sync::Arc::clone(&cron_manager);
+                let cm2 = std::sync::Arc::clone(&cron_manager);
+                let cm3 = std::sync::Arc::clone(&cron_manager);
+                let cm4 = std::sync::Arc::clone(&cron_manager);
+
+                let schedule_fn: clawdesk_agents::port::AsyncPort<
+                    clawdesk_agents::port::CronScheduleRequest,
+                    Result<String, String>,
+                > = std::sync::Arc::new(move |req| {
+                    let cm = std::sync::Arc::clone(&cm);
+                    Box::pin(async move {
+                        use clawdesk_types::cron::{CronTask, DeliveryTarget};
+                        let task_id = req.task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                        let delivery_targets: Vec<DeliveryTarget> = req.delivery_targets.iter().map(|(ch, to)| {
+                            DeliveryTarget::Channel { channel_id: ch.clone(), conversation_id: to.clone() }
+                        }).collect();
+                        let task = CronTask {
+                            id: task_id.clone(),
+                            name: req.name,
+                            schedule: req.schedule,
+                            prompt: req.prompt,
+                            agent_id: req.agent_id,
+                            delivery_targets,
+                            skip_if_running: true,
+                            timeout_secs: req.timeout_secs,
+                            enabled: true,
+                            created_at: chrono::Utc::now(),
+                            updated_at: chrono::Utc::now(),
+                            depends_on: vec![],
+                            chain_mode: Default::default(),
+                            max_retained_logs: 0,
+                        };
+                        cm.upsert_task(task).await.map_err(|e| format!("{e}"))?;
+                        Ok(format!("Scheduled task '{}' (id: {})", task_id, task_id))
+                    })
+                });
+
+                let list_fn: std::sync::Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync> =
+                    std::sync::Arc::new(move || {
+                        let cm = std::sync::Arc::clone(&cm2);
+                        Box::pin(async move {
+                            let tasks = cm.list_tasks().await;
+                            let summary: Vec<String> = tasks.iter().map(|t| {
+                                format!("- {} (id: {}, schedule: {}, enabled: {}, targets: {})",
+                                    t.name, t.id, t.schedule, t.enabled, t.delivery_targets.len())
+                            }).collect();
+                            if summary.is_empty() {
+                                Ok("No scheduled tasks.".to_string())
+                            } else {
+                                Ok(summary.join("\n"))
+                            }
+                        })
+                    });
+
+                let remove_fn: std::sync::Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync> =
+                    std::sync::Arc::new(move |id| {
+                        let cm = std::sync::Arc::clone(&cm3);
+                        Box::pin(async move {
+                            cm.remove_task(&id).await.map_err(|e| format!("{e}"))?;
+                            Ok(format!("Removed task '{}'", id))
+                        })
+                    });
+
+                let trigger_fn: std::sync::Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync> =
+                    std::sync::Arc::new(move |id| {
+                        let cm = std::sync::Arc::clone(&cm4);
+                        Box::pin(async move {
+                            let log = cm.trigger(&id).await.map_err(|e| format!("{e}"))?;
+                            Ok(format!("Triggered task '{}': {:?}", id, log.status))
+                        })
+                    });
+
+                clawdesk_agents::builtin_tools::register_cron_tools(
+                    &mut tools,
+                    schedule_fn,
+                    list_fn,
+                    remove_fn,
+                    trigger_fn,
+                );
+                info!("Daemon: cron management tools registered");
+            }
             let skills_dir = clawdesk_types::dirs::skills();
             let _ = std::fs::create_dir_all(&skills_dir);
             let skill_loader = clawdesk_skills::loader::SkillLoader::new(skills_dir);
@@ -1437,7 +1619,7 @@ async fn cmd_daemon(
             let channel_factory = clawdesk_channels::factory::ChannelFactory::with_builtins();
 
             let state = std::sync::Arc::new(
-                clawdesk_gateway::state::GatewayState::new(
+                clawdesk_gateway::state::GatewayState::with_cron_arc(
                     channels, providers, tools, store,
                     plugin_host, cron_manager,
                     skills, skill_loader, channel_factory,
@@ -1445,6 +1627,9 @@ async fn cmd_daemon(
                     clawdesk_channel::inbound_adapter::InboundAdapterRegistry::new(256),
                 ),
             );
+
+            // Wire the deferred GatewayState reference for cron executor + delivery
+            let _ = gw_state_handle.set(std::sync::Arc::clone(&state));
 
             let gw_config = clawdesk_gateway::GatewayConfig {
                 host,

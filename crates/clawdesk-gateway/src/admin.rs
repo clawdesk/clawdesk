@@ -108,6 +108,23 @@ pub struct CreateCronTaskRequest {
     pub prompt: String,
     pub agent_id: Option<String>,
     pub enabled: Option<bool>,
+    /// Delivery targets: where to send results on completion.
+    /// Each entry specifies a channel and optional conversation ID.
+    #[serde(default)]
+    pub delivery_targets: Vec<DeliveryTargetRequest>,
+}
+
+#[derive(Deserialize)]
+pub struct DeliveryTargetRequest {
+    /// Channel name: "telegram", "slack", "discord", "email", etc.
+    pub channel: String,
+    /// Target conversation/chat ID, or "default" for the channel's default target.
+    #[serde(default = "default_target")]
+    pub to: String,
+}
+
+fn default_target() -> String {
+    "default".to_string()
 }
 
 /// GET /api/v1/admin/cron/tasks — list all cron tasks.
@@ -147,7 +164,12 @@ pub async fn create_cron_task(
         schedule: req.schedule,
         prompt: req.prompt,
         agent_id: req.agent_id,
-        delivery_targets: vec![],
+        delivery_targets: req.delivery_targets.iter().map(|dt| {
+            clawdesk_types::cron::DeliveryTarget::Channel {
+                channel_id: dt.channel.clone(),
+                conversation_id: dt.to.clone(),
+            }
+        }).collect(),
         skip_if_running: true,
         timeout_secs: 300,
         enabled: req.enabled.unwrap_or(true),

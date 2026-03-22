@@ -51,6 +51,13 @@ pub enum GatePolicy {
     MaxResponseTokens { limit: usize },
     /// No security findings above a severity level.
     NoSecurityFindings { max_severity: String },
+    /// Detect if the agent is stuck (same tools, no progress).
+    StuckDetection {
+        max_repeated_tools: usize,
+        similarity_threshold: f64,
+    },
+    /// Confidence must exceed threshold for the chosen approach.
+    MinimumConfidence { threshold: f64 },
     /// Custom predicate evaluated against turn metadata.
     Custom { expression: String },
 }
@@ -100,6 +107,18 @@ impl QualityGate {
                 // Placeholder — real implementation would eval the expression
                 // against outcome metadata.
                 (true, format!("custom: {} (not evaluated)", expression))
+            }
+            GatePolicy::StuckDetection { max_repeated_tools, similarity_threshold } => {
+                // Evaluated by the MetacognitiveMonitor — gate is a pass-through
+                // marker that triggers metacognitive re-entry on failure.
+                // The actual stuck detection runs in the runner loop.
+                (true, format!("stuck detection (threshold: {}, max_repeated: {})", similarity_threshold, max_repeated_tools))
+            }
+            GatePolicy::MinimumConfidence { threshold } => {
+                // Like StuckDetection, this is evaluated by the MetacognitiveMonitor.
+                // The gate exists so the EvalPipeline can map its failure to
+                // ReentryLayer::Metacognition.
+                (true, format!("confidence gate (threshold: {:.0}%)", threshold * 100.0))
             }
         };
         GateResult {
@@ -229,6 +248,8 @@ pub enum ReentryLayer {
     Intent,
     /// Re-enter Judgment Engineering — escalate to human.
     Judgment,
+    /// Re-enter Metacognition — re-evaluate the entire approach.
+    Metacognition,
 }
 
 // ─── Eval Pipeline ───────────────────────────────────────────────────────────
@@ -324,6 +345,8 @@ impl EvalPipeline {
                 // Decide which layer to re-enter based on the failure type.
                 let layer = if hard_failures.iter().any(|r| r.gate_name == "security_clean") {
                     ReentryLayer::Judgment
+                } else if hard_failures.iter().any(|r| r.gate_name.starts_with("stuck_") || r.gate_name.starts_with("confidence_")) {
+                    ReentryLayer::Metacognition
                 } else if hard_failures.iter().any(|r| r.gate_name == "tool_success_rate") {
                     ReentryLayer::Intent
                 } else {

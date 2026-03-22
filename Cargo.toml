@@ -49,6 +49,13 @@ members = [
     "crates/clawdesk-polls",
     "crates/clawdesk-wizard",
     "crates/clawdesk-channel-plugins",
+    "crates/clawdesk-metacognition",
+    "crates/clawdesk-procedural",
+    "crates/clawdesk-curiosity",
+    "crates/clawdesk-worldmodel",
+    "crates/clawdesk-user-model",
+    "crates/clawdesk-selfdiag",
+    "crates/clawdesk-user-predict",
     "xtask",
 ]
 resolver = "2"
@@ -138,6 +145,13 @@ clawdesk-voice = { path = "crates/clawdesk-voice" }
 clawdesk-polls = { path = "crates/clawdesk-polls" }
 clawdesk-wizard = { path = "crates/clawdesk-wizard" }
 clawdesk-channel-plugins = { path = "crates/clawdesk-channel-plugins" }
+clawdesk-metacognition = { path = "crates/clawdesk-metacognition" }
+clawdesk-procedural = { path = "crates/clawdesk-procedural" }
+clawdesk-curiosity = { path = "crates/clawdesk-curiosity" }
+clawdesk-worldmodel = { path = "crates/clawdesk-worldmodel" }
+clawdesk-user-model = { path = "crates/clawdesk-user-model" }
+clawdesk-selfdiag = { path = "crates/clawdesk-selfdiag" }
+clawdesk-user-predict = { path = "crates/clawdesk-user-predict" }
 
 # --- SochDB (embedded ACID vector database) ---
 sochdb = { version = "0.5.0", features = ["embedded"] }
@@ -159,7 +173,7 @@ serde_yaml = "0.9"
 # --- HTTP / WebSocket ---
 axum = { version = "0.7", features = ["ws"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart", "stream"], default-features = false }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 
 # --- Error handling ---
 thiserror = "2"
@@ -230,7 +244,7 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "abort"
+panic = "unwind"  # Desktop app must not abort on unwrap — graceful recovery
 
 [profile.dev]
 opt-level = 0

@@ -42,6 +42,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
+use tokio_rustls::rustls;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
 
@@ -349,17 +350,24 @@ impl DiscordChannel {
     pub async fn gateway_loop(&self, sink: Arc<dyn MessageSink>) -> Result<(), String> {
         let bot_user_id = Self::bot_user_id_from_token(&self.bot_token).unwrap_or_default();
 
-        // Get Gateway URL
-        let gw_resp: serde_json::Value = self
-            .client
-            .get(&self.api_url("/gateway/bot"))
-            .header("Authorization", format!("Bot {}", self.bot_token))
-            .send()
-            .await
-            .map_err(|e| format!("Discord gateway fetch failed: {e}"))?
-            .json()
-            .await
-            .map_err(|e| format!("Discord gateway parse failed: {e}"))?;
+        // Get Gateway URL (with timeout)
+        let gw_resp: serde_json::Value = tokio::time::timeout(
+            Duration::from_secs(15),
+            async {
+                self.client
+                    .get(&self.api_url("/gateway/bot"))
+                    .header("Authorization", format!("Bot {}", self.bot_token))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Discord gateway fetch failed: {e}"))?
+                    .json::<serde_json::Value>()
+                    .await
+                    .map_err(|e| format!("Discord gateway parse failed: {e}"))
+            }
+        )
+        .await
+        .map_err(|_| "Discord: /gateway/bot request timed out (15s)".to_string())?
+        ?;
 
         let gw_url = gw_resp
             .get("url")
@@ -367,18 +375,28 @@ impl DiscordChannel {
             .unwrap_or("wss://gateway.discord.gg");
 
         let ws_url = format!("{gw_url}/?v=10&encoding=json");
-        info!("Discord: connecting to gateway...");
+        info!(url = %ws_url, "Discord: connecting to gateway...");
 
-        let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
-            .await
-            .map_err(|e| format!("Discord WebSocket connect failed: {e}"))?;
+        // Ensure rustls has a CryptoProvider installed for TLS WebSocket.
+        // This is idempotent — second calls return Err which we ignore.
+        let _ = rustls::crypto::ring::default_provider().install_default();
 
+        // Connect WebSocket with 30s timeout
+        let (ws_stream, _) = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio_tungstenite::connect_async(&ws_url),
+        )
+        .await
+        .map_err(|_| format!("Discord: WebSocket connect timed out (30s) — url={ws_url}"))?
+        .map_err(|e| format!("Discord WebSocket connect failed: {e}"))?;
+
+        info!("Discord: WebSocket connected, awaiting Hello...");
         let (mut write, mut read) = ws_stream.split();
 
-        // Read Hello (opcode 10)
-        let hello = read
-            .next()
+        // Read Hello (opcode 10) with 15s timeout
+        let hello = tokio::time::timeout(Duration::from_secs(15), read.next())
             .await
+            .map_err(|_| "Discord: Hello read timed out (15s)".to_string())?
             .ok_or_else(|| "Discord: no Hello from gateway".to_string())?
             .map_err(|e| format!("Discord: Hello read error: {e}"))?;
 
@@ -392,7 +410,12 @@ impl DiscordChannel {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(41250);
 
-        // Send Identify (opcode 2)
+        info!(
+            heartbeat_ms = heartbeat_interval,
+            "Discord: Hello received, sending Identify..."
+        );
+
+        // Send Identify (opcode 2) with timeout
         let identify = json!({
             "op": 2,
             "d": {
@@ -405,12 +428,15 @@ impl DiscordChannel {
                 }
             }
         });
-        write
-            .send(WsMessage::Text(identify.to_string().into()))
-            .await
-            .map_err(|e| format!("Discord Identify send failed: {e}"))?;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            write.send(WsMessage::Text(identify.to_string().into())),
+        )
+        .await
+        .map_err(|_| "Discord: Identify send timed out (10s)".to_string())?
+        .map_err(|e| format!("Discord Identify send failed: {e}"))?;
 
-        info!("Discord: connected and identified");
+        info!("Discord: Identify sent — waiting for READY event");
 
         // Track the last sequence number for heartbeats and resume
         let mut sequence: i64 = -1;
@@ -759,7 +785,28 @@ impl Channel for DiscordChannel {
                     break;
                 }
 
-                match gw_channel.gateway_loop(Arc::clone(&sink)).await {
+                // Catch panics from gateway_loop so the supervisor can
+                // log them and retry instead of silently dying.
+                let result = std::panic::AssertUnwindSafe(
+                    gw_channel.gateway_loop(Arc::clone(&sink))
+                );
+                let result = futures::FutureExt::catch_unwind(result).await;
+
+                let gateway_result = match result {
+                    Ok(r) => r,
+                    Err(panic_info) => {
+                        let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        Err(format!("Discord: gateway_loop PANICKED: {msg}"))
+                    }
+                };
+
+                match gateway_result {
                     Ok(()) => {
                         // Normal exit (op 7 Reconnect, op 9 Invalid Session, or
                         // clean WebSocket close). If running is still true, reconnect

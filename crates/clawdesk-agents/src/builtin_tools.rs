@@ -3917,7 +3917,8 @@ impl crate::tools::Tool for CronScheduleTool {
         crate::tools::ToolSchema {
             name: "cron_schedule".to_string(),
             description: "Schedule a recurring task. Creates or updates a cron job that \
-                         runs an agent prompt on a schedule."
+                         runs an agent prompt on a schedule. Results can be delivered to \
+                         messaging channels (Telegram, Slack, etc.) or webhooks."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -3927,7 +3928,19 @@ impl crate::tools::Tool for CronScheduleTool {
                     "prompt": { "type": "string", "description": "The prompt to execute on each scheduled run" },
                     "agent_id": { "type": "string", "description": "Target agent ID (optional, defaults to current agent)" },
                     "timeout_secs": { "type": "integer", "description": "Max execution time in seconds", "default": 300 },
-                    "task_id": { "type": "string", "description": "Existing task ID to update (omit to create new)" }
+                    "task_id": { "type": "string", "description": "Existing task ID to update (omit to create new)" },
+                    "delivery_targets": {
+                        "type": "array",
+                        "description": "Where to send results. Each entry is an object with 'channel' (e.g. 'telegram', 'slack', 'email') and optional 'to' (chat ID or 'default').",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "channel": { "type": "string", "description": "Channel name (telegram, slack, discord, email, etc.)" },
+                                "to": { "type": "string", "description": "Target chat/conversation ID, or 'default' for the last active chat", "default": "default" }
+                            },
+                            "required": ["channel"]
+                        }
+                    }
                 },
                 "required": ["name", "schedule", "prompt"]
             }),
@@ -3949,8 +3962,23 @@ impl crate::tools::Tool for CronScheduleTool {
         let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(300);
         let task_id = args.get("task_id").and_then(|v| v.as_str()).map(String::from);
 
+        // Parse delivery_targets array
+        let delivery_targets = args.get("delivery_targets")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter().filter_map(|entry| {
+                    let channel = entry.get("channel")?.as_str()?.to_string();
+                    let to = entry.get("to")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("default")
+                        .to_string();
+                    Some((channel, to))
+                }).collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
         (self.schedule_fn)(crate::port::CronScheduleRequest {
-            name, schedule, prompt, agent_id, timeout_secs, task_id,
+            name, schedule, prompt, agent_id, timeout_secs, task_id, delivery_targets,
         }).await
     }
 }

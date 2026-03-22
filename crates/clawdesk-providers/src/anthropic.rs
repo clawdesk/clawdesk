@@ -380,11 +380,29 @@ impl Provider for AnthropicProvider {
         let mut current_block_index: Option<usize> = None;
 
         // reqwest chunk-based streaming — no extra feature flags needed
+        // NOTE: We accumulate raw bytes and only decode complete UTF-8
+        // sequences to prevent corruption at chunk boundaries.
+        // (A multi-byte char like é split across chunks would be replaced
+        // with U+FFFD by from_utf8_lossy — this approach avoids that.)
+        let mut byte_buf: Vec<u8> = Vec::new();
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(|e| {
             ProviderError::network_error("anthropic", e.to_string())
         })? {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            byte_buf.extend_from_slice(&chunk);
+            // Decode only up to the last valid UTF-8 boundary
+            let valid_len = match std::str::from_utf8(&byte_buf) {
+                Ok(s) => s.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            if valid_len == 0 {
+                continue;
+            }
+            // Safety: valid_len is guaranteed to be a valid UTF-8 boundary
+            let text = std::str::from_utf8(&byte_buf[..valid_len])
+                .expect("valid_up_to guarantees valid UTF-8");
+            buffer.push_str(text);
+            byte_buf.drain(..valid_len);
 
             // Process complete SSE events (delimited by \n\n)
             while let Some(boundary) = buffer.find("\n\n") {

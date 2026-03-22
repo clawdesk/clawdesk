@@ -578,17 +578,34 @@ impl NetworkAcl {
         self.default_action
     }
 
-    /// Simple host matching (exact or suffix for domain patterns).
+    /// Host matching with proper CIDR arithmetic.
+    ///
+    /// For CIDR patterns: uses bitwise masking `(ip & mask) == (network & mask)`.
+    /// For domain patterns: exact string match.
     fn host_matches(pattern: &str, host: &str) -> bool {
         if pattern == host {
             return true;
         }
-        // CIDR notation — for now just match the prefix portion
+        // CIDR notation — proper bit arithmetic
         if pattern.contains('/') {
-            let prefix = pattern.split('/').next().unwrap_or("");
-            // Simple check: if host starts with the network prefix
-            if host.starts_with(prefix.trim_end_matches(".0")) {
-                return true;
+            if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+                if let Some((addr_str, prefix_str)) = pattern.split_once('/') {
+                    if let (Ok(net), Ok(prefix_len)) = (
+                        addr_str.parse::<std::net::Ipv4Addr>(),
+                        prefix_str.parse::<u32>(),
+                    ) {
+                        if prefix_len <= 32 {
+                            let mask = if prefix_len == 0 {
+                                0u32
+                            } else {
+                                !0u32 << (32 - prefix_len)
+                            };
+                            let net_bits = u32::from(net) & mask;
+                            let ip_bits = u32::from(ip) & mask;
+                            return net_bits == ip_bits;
+                        }
+                    }
+                }
             }
         }
         false
@@ -881,6 +898,19 @@ mod tests {
     fn test_network_acl_blocks_localhost() {
         let acl = NetworkAcl::default();
         assert_eq!(acl.check("127.0.0.1", 8080), NetworkAction::Deny);
+    }
+
+    #[test]
+    fn test_network_acl_cidr_no_false_positives() {
+        let acl = NetworkAcl::default();
+        // 100.0.0.1 is NOT in 10.0.0.0/8 — old string-prefix bug matched "10" in "100"
+        assert_eq!(acl.check("100.0.0.1", 443), NetworkAction::Deny); // default deny
+        // But 10.0.0.1 IS in 10.0.0.0/8
+        assert_eq!(acl.check("10.0.0.1", 443), NetworkAction::Deny);
+        // 172.32.0.1 is NOT in 172.16.0.0/12
+        assert_eq!(acl.check("172.32.0.1", 443), NetworkAction::Deny); // default deny (unknown host)
+        // 172.16.0.1 IS in 172.16.0.0/12
+        assert_eq!(acl.check("172.16.0.1", 443), NetworkAction::Deny);
     }
 
     #[test]

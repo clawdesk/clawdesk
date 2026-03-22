@@ -803,6 +803,11 @@ pub struct AppState {
     // Tools whose required level exceeds platform capability are blocked.
     pub sandbox_engine: Arc<clawdesk_security::sandbox_policy::SandboxPolicyEngine>,
 
+    // ── Network egress policy for endpoint-level access control ──
+    // Deny-by-default egress with tool-endpoint bindings, SSRF prevention
+    // (blocks RFC1918, cloud metadata, link-local), TLS/method enforcement.
+    pub egress_policy: Arc<std::sync::RwLock<clawdesk_security::NetworkEgressPolicy>>,
+
     // ── Sub-agent lifecycle manager ──
     // Tracks all running sub-agents (static and ephemeral), enforcing global
     // depth limits (default 5), concurrency caps (default 50), and deferred GC.
@@ -3644,6 +3649,11 @@ impl AppState {
 
             // ── T4 FIX: Sandbox policy engine (auto-detects platform capabilities) ──
             sandbox_engine: Arc::new(clawdesk_security::sandbox_policy::SandboxPolicyEngine::new()),
+
+            // ── Network egress policy (deny-by-default with SSRF prevention) ──
+            egress_policy: Arc::new(std::sync::RwLock::new(
+                clawdesk_security::NetworkEgressPolicy::with_local_models(),
+            )),
 
             // ── Sub-agent lifecycle manager ──
             sub_mgr: Arc::new(clawdesk_gateway::subagent_manager::SubAgentManager::new(

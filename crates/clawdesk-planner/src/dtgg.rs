@@ -2,11 +2,79 @@
 
 use crate::heft::HeftScheduler;
 use crate::rewrite::{RewriteRule, RewriteOutcome};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
+
+
+// ───────────────────────────────────────────────────────────────
+// Urgency model
+// ───────────────────────────────────────────────────────────────
+
+/// How urgency changes over time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UrgencyDecay {
+    /// Urgency increases linearly toward the deadline.
+    Linear { rate: f64 },
+    /// Urgency increases exponentially with a half-life.
+    Exponential { half_life_secs: u64 },
+    /// Urgency is constant until the deadline, then jumps to MAX.
+    Cliff { deadline: DateTime<Utc> },
+}
+
+/// Urgency model for priority-weighted scheduling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UrgencyModel {
+    /// Base priority (0.0–1.0).
+    pub base_priority: f64,
+    /// Optional hard deadline.
+    pub deadline: Option<DateTime<Utc>>,
+    /// How urgency evolves over time.
+    pub decay_function: UrgencyDecay,
+    /// How many people/systems are affected (0.0–1.0 normalized).
+    pub stakeholder_impact: f64,
+    /// Can this action be undone? 0.0 = irreversible, 1.0 = fully reversible.
+    pub reversibility: f64,
+}
+
+impl UrgencyModel {
+    /// Compute effective priority at the current moment.
+    pub fn effective_priority(&self) -> f64 {
+        let time_factor = match &self.decay_function {
+            UrgencyDecay::Linear { rate } => {
+                if let Some(deadline) = self.deadline {
+                    let remaining = (deadline - Utc::now()).num_seconds().max(0) as f64;
+                    1.0 - (remaining * rate).min(1.0)
+                } else {
+                    0.0
+                }
+            }
+            UrgencyDecay::Exponential { half_life_secs } => {
+                if let Some(deadline) = self.deadline {
+                    let remaining = (deadline - Utc::now()).num_seconds().max(0) as f64;
+                    let hl = *half_life_secs as f64;
+                    1.0 - (-remaining * (2.0_f64.ln()) / hl).exp()
+                } else {
+                    0.0
+                }
+            }
+            UrgencyDecay::Cliff { deadline } => {
+                if Utc::now() >= *deadline { 1.0 } else { 0.0 }
+            }
+        };
+
+        let impact_factor = 1.0 + self.stakeholder_impact * 0.5;
+        let irreversibility_bonus = (1.0 - self.reversibility) * 0.2;
+
+        (self.base_priority + time_factor * 0.5 + irreversibility_bonus)
+            .min(1.0)
+            * impact_factor
+    }
+}
 
 
 // ───────────────────────────────────────────────────────────────
@@ -56,6 +124,17 @@ pub struct TaskNode {
     pub generation: u64,
     /// Metadata for the meta-planner.
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Estimated confidence that this approach will succeed (0.0–1.0).
+    /// Used by the uncertainty gating system to decide whether to
+    /// proceed, verify, or escalate.
+    pub confidence: f64,
+    /// Whether this node is a verification node (spawned by uncertainty gating).
+    /// Verification nodes re-check a result through an independent approach.
+    pub is_verification: bool,
+    /// Optional urgency model for deadline-aware priority scheduling.
+    /// When present, the HEFT scheduler weights this node by
+    /// `urgency.effective_priority()` in addition to the base weight.
+    pub urgency: Option<UrgencyModel>,
 }
 
 impl TaskNode {
@@ -72,6 +151,9 @@ impl TaskNode {
             error: None,
             generation: 0,
             metadata: HashMap::new(),
+            confidence: 1.0,
+            is_verification: false,
+            urgency: None,
         }
     }
 
@@ -88,6 +170,31 @@ impl TaskNode {
     pub fn with_estimated_tokens(mut self, t: u64) -> Self {
         self.estimated_tokens = t;
         self
+    }
+
+    pub fn with_confidence(mut self, c: f64) -> Self {
+        self.confidence = c;
+        self
+    }
+
+    pub fn as_verification(mut self) -> Self {
+        self.is_verification = true;
+        self
+    }
+
+    pub fn with_urgency(mut self, urgency: UrgencyModel) -> Self {
+        self.urgency = Some(urgency);
+        self
+    }
+
+    /// Effective weight for HEFT scheduling, incorporating urgency.
+    pub fn effective_weight(&self) -> f64 {
+        let base = self.weight;
+        if let Some(ref urgency) = self.urgency {
+            base * (1.0 + urgency.effective_priority())
+        } else {
+            base
+        }
     }
 
     pub fn is_terminal(&self) -> bool {

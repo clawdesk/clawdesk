@@ -62,6 +62,9 @@ pub struct CronScheduleRequest {
     pub timeout_secs: u64,
     /// Existing task ID to update (omit to create new).
     pub task_id: Option<String>,
+    /// Delivery targets: where to send results when the cron task completes.
+    /// Each entry is a `(channel_id, conversation_id)` pair, e.g. `("telegram", "default")`.
+    pub delivery_targets: Vec<(String, String)>,
 }
 
 /// Request for `MessageSendTool` — sends a message through channels.
@@ -181,6 +184,7 @@ mod tests {
             agent_id: None,
             timeout_secs: 300,
             task_id: None,
+            delivery_targets: vec![],
         };
         let _cloned = req.clone();
     }

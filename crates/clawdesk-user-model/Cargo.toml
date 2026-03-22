@@ -1,0 +1,16 @@
+[package]
+name = "clawdesk-user-model"
+description = "Per-user theory of mind — expertise modeling, frustration detection, and communication adaptation"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]

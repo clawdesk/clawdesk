@@ -1,0 +1,292 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1350" font-family="Inter, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f0f23;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#1a1a3e;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="captureGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="algebraGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="projectGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#06b6d4"/>
+      <stop offset="100%" style="stop-color:#0891b2"/>
+    </linearGradient>
+    <linearGradient id="injectGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#059669"/>
+    </linearGradient>
+    <linearGradient id="userGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#d97706"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#10b981"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1100" height="1350" fill="url(#bgGrad)" rx="12"/>
+
+  <!-- Title -->
+  <text x="550" y="48" text-anchor="middle" fill="#e2e8f0" font-size="26" font-weight="700" letter-spacing="0.5">Persona Field Architecture</text>
+  <text x="550" y="72" text-anchor="middle" fill="#64748b" font-size="13">Context-adaptive personality projection — from prose to prompt in 4 layers</text>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- USER INPUT -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <g filter="url(#shadow)">
+    <rect x="180" y="98" width="740" height="72" rx="10" fill="url(#userGrad)" opacity="0.95"/>
+    <text x="220" y="125" fill="#1a1a2e" font-size="12" font-weight="600" opacity="0.7">USER INPUT</text>
+    <text x="220" y="150" fill="#1a1a2e" font-size="16" font-weight="500">"Be direct, data-driven, skip explanations. Never apologize."</text>
+    <circle cx="880" cy="134" r="20" fill="#1a1a2e" opacity="0.15"/>
+    <text x="880" y="139" text-anchor="middle" fill="#1a1a2e" font-size="18">💬</text>
+  </g>
+
+  <!-- Arrow down -->
+  <line x1="550" y1="172" x2="550" y2="205" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6,3"/>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- LAYER 1: CAPTURE -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <g filter="url(#shadow)">
+    <rect x="80" y="210" width="940" height="240" rx="12" fill="#1e1e3a" stroke="#6366f1" stroke-width="1.5"/>
+    <!-- Header -->
+    <rect x="80" y="210" width="940" height="36" rx="12" fill="url(#captureGrad)"/>
+    <rect x="80" y="234" width="940" height="12" fill="url(#captureGrad)"/>
+    <text x="104" y="234" fill="white" font-size="14" font-weight="700">LAYER 1: CAPTURE</text>
+    <text x="950" y="234" text-anchor="end" fill="white" font-size="11" opacity="0.8">PersonaVector::from_description()</text>
+
+    <!-- Keyword extraction visualization -->
+    <text x="104" y="275" fill="#94a3b8" font-size="11" font-weight="600">KEYWORD EXTRACTION (deterministic, no LLM)</text>
+
+    <!-- Keywords found -->
+    <rect x="104" y="288" width="110" height="28" rx="6" fill="#4f46e5" opacity="0.3"/>
+    <text x="159" y="307" text-anchor="middle" fill="#a5b4fc" font-size="12" font-weight="500">"direct"</text>
+    <rect x="224" y="288" width="140" height="28" rx="6" fill="#4f46e5" opacity="0.3"/>
+    <text x="294" y="307" text-anchor="middle" fill="#a5b4fc" font-size="12" font-weight="500">"data-driven"</text>
+    <rect x="374" y="288" width="190" height="28" rx="6" fill="#4f46e5" opacity="0.3"/>
+    <text x="469" y="307" text-anchor="middle" fill="#a5b4fc" font-size="12" font-weight="500">"skip explanations"</text>
+    <rect x="574" y="288" width="180" height="28" rx="6" fill="#ef4444" opacity="0.2"/>
+    <text x="664" y="307" text-anchor="middle" fill="#fca5a5" font-size="12" font-weight="500">"Never apologize"</text>
+
+    <!-- Arrow -->
+    <text x="550" y="340" text-anchor="middle" fill="#64748b" font-size="18">↓</text>
+
+    <!-- Resulting vector -->
+    <text x="104" y="370" fill="#94a3b8" font-size="11" font-weight="600">TRAIT VECTOR  P ∈ [0,1]¹²</text>
+
+    <!-- Trait bars -->
+    <g transform="translate(104, 382)">
+      <!-- Directness -->
+      <text x="0" y="12" fill="#94a3b8" font-size="10">directness</text>
+      <rect x="100" y="2" width="200" height="14" rx="3" fill="#2a2a4a"/>
+      <rect x="100" y="2" width="180" height="14" rx="3" fill="#6366f1" opacity="0.8"/>
+      <text x="290" y="13" fill="#a5b4fc" font-size="10" font-weight="600">0.90</text>
+
+      <!-- Analytical -->
+      <text x="360" y="12" fill="#94a3b8" font-size="10">analytical</text>
+      <rect x="450" y="2" width="200" height="14" rx="3" fill="#2a2a4a"/>
+      <rect x="450" y="2" width="180" height="14" rx="3" fill="#6366f1" opacity="0.8"/>
+      <text x="640" y="13" fill="#a5b4fc" font-size="10" font-weight="600">0.90</text>
+
+      <!-- Pedagogy -->
+      <text x="0" y="34" fill="#94a3b8" font-size="10">pedagogy</text>
+      <rect x="100" y="24" width="200" height="14" rx="3" fill="#2a2a4a"/>
+      <rect x="100" y="24" width="20" height="14" rx="3" fill="#ef4444" opacity="0.6"/>
+      <text x="290" y="35" fill="#fca5a5" font-size="10" font-weight="600">0.10</text>
+
+      <!-- Verbosity -->
+      <text x="360" y="34" fill="#94a3b8" font-size="10">verbosity</text>
+      <rect x="450" y="24" width="200" height="14" rx="3" fill="#2a2a4a"/>
+      <rect x="450" y="24" width="30" height="14" rx="3" fill="#ef4444" opacity="0.6"/>
+      <text x="640" y="35" fill="#fca5a5" font-size="10" font-weight="600">0.15</text>
+    </g>
+
+    <!-- Custom rule -->
+    <rect x="104" y="430" width="250" height="12" rx="3" fill="#7f1d1d" opacity="0.4"/>
+    <text x="110" y="440" fill="#fca5a5" font-size="10">+ rule: "Never apologize"</text>
+  </g>
+
+  <!-- Arrow down -->
+  <line x1="550" y1="452" x2="550" y2="485" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6,3"/>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- LAYER 2: ALGEBRA -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <g filter="url(#shadow)">
+    <rect x="80" y="490" width="940" height="200" rx="12" fill="#1e1e3a" stroke="#8b5cf6" stroke-width="1.5"/>
+    <rect x="80" y="490" width="940" height="36" rx="12" fill="url(#algebraGrad)"/>
+    <rect x="80" y="514" width="940" height="12" fill="url(#algebraGrad)"/>
+    <text x="104" y="514" fill="white" font-size="14" font-weight="700">LAYER 2: ALGEBRA</text>
+    <text x="950" y="514" text-anchor="end" fill="white" font-size="11" opacity="0.8">base.compose(&amp;channel_override)</text>
+
+    <!-- Three inputs -->
+    <g transform="translate(104, 540)">
+      <!-- Base -->
+      <rect x="0" y="0" width="240" height="70" rx="8" fill="#2a2a4a" stroke="#8b5cf6" stroke-width="1" stroke-dasharray="4,2"/>
+      <text x="12" y="20" fill="#c4b5fd" font-size="11" font-weight="600">Base Persona</text>
+      <text x="12" y="38" fill="#94a3b8" font-size="10">directness: 0.90  analytical: 0.90</text>
+      <text x="12" y="52" fill="#94a3b8" font-size="10">pedagogy: 0.10   verbosity: 0.15</text>
+
+      <!-- Operator -->
+      <text x="268" y="40" fill="#8b5cf6" font-size="24" font-weight="700">⊕</text>
+
+      <!-- Channel Override -->
+      <rect x="296" y="0" width="240" height="70" rx="8" fill="#2a2a4a" stroke="#f59e0b" stroke-width="1" stroke-dasharray="4,2"/>
+      <text x="308" y="20" fill="#fbbf24" font-size="11" font-weight="600">Telegram Override</text>
+      <text x="308" y="38" fill="#94a3b8" font-size="10">verbosity: 0.10  (4096 char limit)</text>
+      <text x="308" y="52" fill="#94a3b8" font-size="10">formality: 0.30  (mobile casual)</text>
+
+      <!-- Operator -->
+      <text x="564" y="40" fill="#8b5cf6" font-size="24" font-weight="700">⊕</text>
+
+      <!-- User Pref -->
+      <rect x="592" y="0" width="240" height="70" rx="8" fill="#2a2a4a" stroke="#10b981" stroke-width="1" stroke-dasharray="4,2"/>
+      <text x="604" y="20" fill="#6ee7b7" font-size="11" font-weight="600">User Preference</text>
+      <text x="604" y="38" fill="#94a3b8" font-size="10">humor: 0.60  (user likes wit)</text>
+      <text x="604" y="52" fill="#94a3b8" font-size="10">confidence: 0.85</text>
+    </g>
+
+    <!-- Result -->
+    <text x="550" y="626" text-anchor="middle" fill="#64748b" font-size="12">Lattice join: override sets take precedence, remainder from base</text>
+
+    <g transform="translate(250, 640)">
+      <rect x="0" y="0" width="600" height="34" rx="8" fill="#8b5cf6" opacity="0.15" stroke="#8b5cf6" stroke-width="1"/>
+      <text x="12" y="22" fill="#c4b5fd" font-size="11" font-weight="500">Merged = { dir: 0.90, ana: 0.90, ped: 0.10, verb: 0.10, form: 0.30, humor: 0.60, conf: 0.85 }</text>
+    </g>
+  </g>
+
+  <!-- Arrow down -->
+  <line x1="550" y1="692" x2="550" y2="725" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6,3"/>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- CONTEXT SIGNAL (side input) -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <g filter="url(#shadow)">
+    <rect x="800" y="740" width="200" height="60" rx="8" fill="#1e1e3a" stroke="#06b6d4" stroke-width="1"/>
+    <text x="820" y="762" fill="#67e8f9" font-size="11" font-weight="600">CONTEXT SIGNAL</text>
+    <text x="820" y="782" fill="#94a3b8" font-size="12">"code review"</text>
+  </g>
+  <line x1="800" y1="770" x2="732" y2="770" stroke="#06b6d4" stroke-width="1.5" marker-end="url(#arrow)" stroke-dasharray="4,2"/>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- LAYER 3: PROJECTION -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <g filter="url(#shadow)">
+    <rect x="80" y="730" width="650" height="200" rx="12" fill="#1e1e3a" stroke="#06b6d4" stroke-width="1.5"/>
+    <rect x="80" y="730" width="650" height="36" rx="12" fill="url(#projectGrad)"/>
+    <rect x="80" y="754" width="650" height="12" fill="url(#projectGrad)"/>
+    <text x="104" y="754" fill="white" font-size="14" font-weight="700">LAYER 3: PROJECTION</text>
+    <text x="700" y="754" text-anchor="end" fill="white" font-size="11" opacity="0.8">merged.project(&amp;["code review"])</text>
+
+    <!-- Relevance mapping -->
+    <text x="104" y="790" fill="#94a3b8" font-size="11" font-weight="600">CONTEXT → RELEVANCE WEIGHTS</text>
+
+    <g transform="translate(104, 800)">
+      <!-- Relevant (bright) -->
+      <rect x="0" y="0" width="140" height="26" rx="5" fill="#06b6d4" opacity="0.2" stroke="#06b6d4" stroke-width="1"/>
+      <text x="10" y="18" fill="#67e8f9" font-size="11">tech_depth ⇐ 0.95</text>
+
+      <rect x="150" y="0" width="140" height="26" rx="5" fill="#06b6d4" opacity="0.2" stroke="#06b6d4" stroke-width="1"/>
+      <text x="160" y="18" fill="#67e8f9" font-size="11">directness ⇐ 0.80</text>
+
+      <rect x="300" y="0" width="140" height="26" rx="5" fill="#06b6d4" opacity="0.2" stroke="#06b6d4" stroke-width="1"/>
+      <text x="310" y="18" fill="#67e8f9" font-size="11">confidence ⇐ 0.70</text>
+
+      <!-- Suppressed (dim) -->
+      <rect x="0" y="34" width="140" height="26" rx="5" fill="#334155" opacity="0.3"/>
+      <text x="10" y="52" fill="#475569" font-size="11">humor ⇐ 0.30</text>
+
+      <rect x="150" y="34" width="140" height="26" rx="5" fill="#334155" opacity="0.3"/>
+      <text x="160" y="52" fill="#475569" font-size="11">pedagogy ⇐ 0.20</text>
+
+      <rect x="300" y="34" width="140" height="26" rx="5" fill="#334155" opacity="0.3"/>
+      <text x="310" y="52" fill="#475569" font-size="11">formality ⇐ 0.20</text>
+    </g>
+
+    <!-- Filter equation -->
+    <text x="104" y="878" fill="#67e8f9" font-size="11" font-weight="500">Filter: |trait - 0.5| &gt; 0.15 AND relevance &gt; 0.3 → 3 active traits (~60 tokens)</text>
+
+    <!-- Token comparison -->
+    <g transform="translate(104, 892)">
+      <rect x="0" y="0" width="240" height="22" rx="4" fill="#ef4444" opacity="0.15"/>
+      <text x="8" y="16" fill="#fca5a5" font-size="10">SOUL.md: ~2000 tokens every turn  ✗</text>
+      <rect x="260" y="0" width="240" height="22" rx="4" fill="#10b981" opacity="0.15"/>
+      <text x="268" y="16" fill="#6ee7b7" font-size="10">PersonaField: ~60 tokens this turn  ✓</text>
+    </g>
+  </g>
+
+  <!-- Arrow down -->
+  <line x1="405" y1="932" x2="405" y2="965" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6,3"/>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- LAYER 4: INJECTION -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <g filter="url(#shadow)">
+    <rect x="80" y="970" width="940" height="200" rx="12" fill="#1e1e3a" stroke="#10b981" stroke-width="1.5"/>
+    <rect x="80" y="970" width="940" height="36" rx="12" fill="url(#injectGrad)"/>
+    <rect x="80" y="994" width="940" height="12" fill="url(#injectGrad)"/>
+    <text x="104" y="994" fill="white" font-size="14" font-weight="700">LAYER 4: INJECTION</text>
+    <text x="950" y="994" text-anchor="end" fill="white" font-size="11" opacity="0.8">projected.to_prompt_fragment() → PromptBuilder</text>
+
+    <!-- Prompt output -->
+    <rect x="104" y="1020" width="500" height="130" rx="8" fill="#0a2e1f" stroke="#10b981" stroke-width="1"/>
+    <text x="120" y="1044" fill="#6ee7b7" font-size="12" font-weight="600" font-family="JetBrains Mono, monospace">[Behavioral Profile]</text>
+    <text x="120" y="1064" fill="#a7f3d0" font-size="11" font-family="JetBrains Mono, monospace">- Strongly: direct and unfiltered</text>
+    <text x="120" y="1082" fill="#a7f3d0" font-size="11" font-family="JetBrains Mono, monospace">- Strongly: data-driven and analytical</text>
+    <text x="120" y="1100" fill="#a7f3d0" font-size="11" font-family="JetBrains Mono, monospace">- Strongly: assertive and opinionated</text>
+    <text x="120" y="1122" fill="#fca5a5" font-size="11" font-family="JetBrains Mono, monospace">- Rule: Never apologize</text>
+    <text x="120" y="1142" fill="#64748b" font-size="10" font-family="JetBrains Mono, monospace">// ~60 tokens (vs 2000 for SOUL.md)</text>
+
+    <!-- PromptBuilder integration -->
+    <g transform="translate(640, 1020)">
+      <rect x="0" y="0" width="360" height="130" rx="8" fill="#1a2e3a" stroke="#3b82f6" stroke-width="1"/>
+      <text x="16" y="24" fill="#93c5fd" font-size="11" font-weight="600">PromptBuilder (Knapsack)</text>
+      <rect x="16" y="34" width="328" height="18" rx="3" fill="#6366f1" opacity="0.3"/>
+      <text x="22" y="48" fill="#c4b5fd" font-size="10">Identity (2K cap)  ← persona injected here</text>
+      <rect x="16" y="56" width="328" height="18" rx="3" fill="#8b5cf6" opacity="0.2"/>
+      <text x="22" y="70" fill="#a78bfa" font-size="10">Safety guardrails (1K cap)</text>
+      <rect x="16" y="78" width="328" height="18" rx="3" fill="#06b6d4" opacity="0.2"/>
+      <text x="22" y="92" fill="#67e8f9" font-size="10">Skills (4K cap, knapsack-selected)</text>
+      <rect x="16" y="100" width="328" height="18" rx="3" fill="#10b981" opacity="0.2"/>
+      <text x="22" y="114" fill="#6ee7b7" font-size="10">Memory fragments (remaining budget)</text>
+    </g>
+  </g>
+
+  <!-- Arrow down -->
+  <line x1="550" y1="1172" x2="550" y2="1205" stroke="#10b981" stroke-width="2" marker-end="url(#arrowGreen)" stroke-dasharray="6,3"/>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- OUTPUT -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <g filter="url(#shadow)">
+    <rect x="280" y="1210" width="540" height="60" rx="10" fill="#10b981" opacity="0.15" stroke="#10b981" stroke-width="1.5"/>
+    <text x="550" y="1236" text-anchor="middle" fill="#6ee7b7" font-size="14" font-weight="700">LLM RESPONSE</text>
+    <text x="550" y="1256" text-anchor="middle" fill="#94a3b8" font-size="11">Agent behaves: direct, data-backed, no fluff, no hedging, no apologies</text>
+  </g>
+
+  <!-- Side annotations -->
+  <g transform="translate(20, 300)">
+    <rect x="0" y="0" width="8" height="620" rx="4" fill="#6366f1" opacity="0.3"/>
+    <text x="4" y="-8" fill="#6366f1" font-size="9" font-weight="600" text-anchor="middle" transform="rotate(-90, 4, 310)" dominant-baseline="middle">OFFLINE · DETERMINISTIC · INSTANT</text>
+  </g>
+
+  <!-- Footer -->
+  <text x="550" y="1310" text-anchor="middle" fill="#475569" font-size="10">ClawDesk Persona Field v1.0 — context-adaptive personality projection</text>
+  <text x="550" y="1328" text-anchor="middle" fill="#334155" font-size="9">12 trait dimensions · sparse storage · O(1) compose · O(n) project where n=12</text>
+</svg>

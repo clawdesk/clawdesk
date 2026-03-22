@@ -20,9 +20,11 @@ pub mod health;
 pub mod inbound_adapter;
 pub mod interactive;
 pub mod monitor;
+pub mod progress_forwarder;
 pub mod rate_limit;
 pub mod registry;
 pub mod reply_formatter;
+pub mod session_bridge;
 
 use async_trait::async_trait;
 use clawdesk_types::{

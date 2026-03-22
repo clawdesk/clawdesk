@@ -97,11 +97,30 @@ async fn try_pty_execute(
         cmd.current_dir(dir);
     }
 
-    // Sanitized environment
+    // Sanitized environment — platform-aware PATH construction
     cmd.env_clear();
     cmd.env("TERM", "xterm-256color");
     cmd.env("LANG", "en_US.UTF-8");
-    cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+    // Build platform-aware PATH instead of hardcoded Unix paths
+    {
+        let mut path_parts: Vec<String> = Vec::new();
+        #[cfg(target_os = "macos")]
+        {
+            path_parts.push("/opt/homebrew/bin".into());
+            path_parts.push("/opt/homebrew/sbin".into());
+        }
+        path_parts.push("/usr/local/bin".into());
+        path_parts.push("/usr/bin".into());
+        path_parts.push("/bin".into());
+        // Include cargo/rustup if installed
+        if let Ok(home) = std::env::var("HOME") {
+            let cargo_bin = format!("{}/.cargo/bin", home);
+            if std::path::Path::new(&cargo_bin).exists() {
+                path_parts.insert(0, cargo_bin);
+            }
+        }
+        cmd.env("PATH", path_parts.join(":"));
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }

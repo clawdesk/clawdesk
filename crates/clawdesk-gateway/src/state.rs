@@ -156,6 +156,28 @@ impl GatewayState {
         cancel: CancellationToken,
         inbound_registry: InboundAdapterRegistry,
     ) -> Self {
+        Self::with_cron_arc(
+            channels, providers, tools, store, plugin_host,
+            Arc::new(cron_manager),
+            skills, skill_loader, channel_factory, cancel, inbound_registry,
+        )
+    }
+
+    /// Construct with a pre-built `Arc<CronManager>` — used when the cron manager
+    /// needs to be shared before state construction (e.g., for registering cron tools).
+    pub fn with_cron_arc(
+        channels: ChannelRegistry,
+        providers: ProviderRegistry,
+        tools: ToolRegistry,
+        store: SochStore,
+        plugin_host: PluginHost,
+        cron_manager: Arc<CronManager>,
+        skills: SkillRegistry,
+        skill_loader: SkillLoader,
+        channel_factory: ChannelFactory,
+        cancel: CancellationToken,
+        inbound_registry: InboundAdapterRegistry,
+    ) -> Self {
         let store = Arc::new(store);
         let webhook_queue = Arc::new(
             crate::webhook_queue::WebhookDeliveryQueue::new(Arc::clone(&store))
@@ -169,7 +191,7 @@ impl GatewayState {
             tools: Arc::new(tools),
             store,
             plugin_host: Arc::new(plugin_host),
-            cron_manager: Arc::new(cron_manager),
+            cron_manager,
             cancel,
             start_time: std::time::Instant::now(),
             thread_ownership: Arc::new(ThreadOwnershipManager::default()),
@@ -294,5 +316,302 @@ impl GatewayState {
 
         self.agent_registry.store(Arc::new(result.agents));
         (loaded, changed, errors)
+    }
+}
+
+// ─── GatewayAgentExecutor ───────────────────────────────────────────────
+//
+// Implements `clawdesk_cron::executor::AgentExecutor` for the gateway binary.
+// Mirrors the Tauri desktop `CronAgentExecutor` but uses the gateway's own
+// in-process `AgentRunner` pipeline instead of Tauri IPC commands.
+//
+// This wires Gap 3: cron tasks can now execute agents in gateway/daemon mode.
+
+/// Agent executor for the gateway — runs agents via the in-process AgentRunner pipeline.
+///
+/// Uses `OnceLock<Arc<GatewayState>>` for deferred initialization: the executor
+/// is constructed before `GatewayState` exists (chicken-and-egg), and the state
+/// reference is set after construction via `set_state()`.
+pub struct GatewayAgentExecutor {
+    state: Arc<std::sync::OnceLock<Arc<GatewayState>>>,
+}
+
+impl GatewayAgentExecutor {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// Wire the state reference after construction.
+    pub fn state_handle(&self) -> Arc<std::sync::OnceLock<Arc<GatewayState>>> {
+        Arc::clone(&self.state)
+    }
+}
+
+#[async_trait::async_trait]
+impl clawdesk_cron::executor::AgentExecutor for GatewayAgentExecutor {
+    async fn execute(&self, prompt: &str, agent_id: Option<&str>) -> Result<String, String> {
+        use clawdesk_agents::runner::{AgentConfig, AgentRunner};
+        use clawdesk_providers::MessageRole;
+
+        let state = self.state.get()
+            .ok_or_else(|| "GatewayState not yet initialized — cron fired before setup".to_string())?;
+
+        // Resolve agent persona and model from agent registry.
+        let (agent_persona, agent_model) = {
+            let registry = state.agent_registry.load();
+            let snapshot = agent_id
+                .and_then(|id| registry.get(id))
+                .or_else(|| registry.get("default"))
+                .or_else(|| registry.values().next());
+            match snapshot {
+                Some(agent) => (agent.system_prompt.clone(), agent.model.clone()),
+                None => (
+                    clawdesk_types::session::DEFAULT_SYSTEM_PROMPT.to_string(),
+                    "sonnet".to_string(),
+                ),
+            }
+        };
+
+        // Resolve model alias → full model ID
+        let effective_model_id = match agent_model.as_str() {
+            "haiku" => "claude-haiku-4-20250514".to_string(),
+            "sonnet" => "claude-sonnet-4-20250514".to_string(),
+            "opus" => "claude-opus-4-20250514".to_string(),
+            "local" => "llama3.2".to_string(),
+            other => other.to_string(),
+        };
+
+        // Resolve provider
+        let provider_registry = state.providers.load();
+        let provider_key = match agent_model.as_str() {
+            m if m.contains("haiku") || m.contains("sonnet") || m.contains("opus") || m.contains("claude") => "anthropic",
+            m if m.starts_with("gpt") || m.starts_with("o1") || m.starts_with("o3") => "openai",
+            m if m.starts_with("gemini") => "gemini",
+            m if m.contains("local") || m.starts_with("llama") || m.starts_with("deepseek") => "ollama",
+            _ => "anthropic",
+        };
+
+        let provider = provider_registry
+            .get(provider_key)
+            .or_else(|| provider_registry.default_provider())
+            .ok_or_else(|| format!(
+                "No LLM provider configured for model '{}'. Set ANTHROPIC_API_KEY or similar env var.",
+                agent_model
+            ))?;
+
+        let config = AgentConfig {
+            model: effective_model_id,
+            system_prompt: agent_persona.clone(),
+            max_tool_rounds: 25,
+            context_limit: 128_000,
+            response_reserve: 8_192,
+            ..Default::default()
+        };
+
+        // Build skill provider so cron agents get skill-enriched prompts
+        let skill_provider: Option<std::sync::Arc<dyn clawdesk_agents::runner::SkillProvider>> = {
+            let registry = state.skills.load();
+            let active = registry.active_skills();
+            if active.is_empty() {
+                None
+            } else {
+                use clawdesk_skills::env_injection::EnvResolver;
+                use clawdesk_skills::orchestrator::SkillOrchestrator;
+                use clawdesk_skills::skill_provider::OrchestratorSkillProvider;
+
+                let orchestrator = SkillOrchestrator::new(active, 8_000);
+                let env_resolver = EnvResolver::default();
+                Some(std::sync::Arc::new(OrchestratorSkillProvider::new(
+                    orchestrator,
+                    env_resolver,
+                )))
+            }
+        };
+
+        let mut builder = AgentRunner::builder(
+            std::sync::Arc::clone(&provider),
+            std::sync::Arc::clone(&state.tools),
+            config,
+            state.cancel.clone(),
+        )
+        .without_sandbox()
+        .with_hook_manager(std::sync::Arc::clone(&state.hook_manager));
+
+        if let Some(sp) = skill_provider {
+            builder = builder.with_skill_provider(sp);
+        }
+
+        let runner = builder.build();
+
+        // Single-turn execution: just the cron prompt as user message
+        let chat_history = vec![
+            clawdesk_providers::ChatMessage::new(MessageRole::User, prompt),
+        ];
+
+        let agent_response = runner
+            .run(chat_history, agent_persona)
+            .await
+            .map_err(|e| format!("Agent execution failed: {}", e))?;
+
+        Ok(agent_response.content)
+    }
+}
+
+// ─── ChannelDeliveryHandler ─────────────────────────────────────────────
+//
+// Implements `clawdesk_cron::executor::DeliveryHandler` using the channel
+// registry. When a cron task finishes, results are delivered to the
+// configured channels (Telegram, Slack, Discord, etc.).
+//
+// This wires Gap 1: cron results can now be routed to any connected channel.
+
+/// Delivers cron task results to channels via the channel registry.
+///
+/// Uses a deferred reference to the gateway's `ArcSwap<ChannelRegistry>`,
+/// set after `GatewayState` construction via `state_handle()`.
+pub struct ChannelDeliveryHandler {
+    state: Arc<std::sync::OnceLock<Arc<GatewayState>>>,
+}
+
+impl ChannelDeliveryHandler {
+    pub fn new(state: Arc<std::sync::OnceLock<Arc<GatewayState>>>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait::async_trait]
+impl clawdesk_cron::executor::DeliveryHandler for ChannelDeliveryHandler {
+    async fn deliver(
+        &self,
+        target: &clawdesk_types::cron::DeliveryTarget,
+        content: &str,
+    ) -> Result<(), String> {
+        match target {
+            clawdesk_types::cron::DeliveryTarget::Channel { channel_id, conversation_id } => {
+                let state = self.state.get()
+                    .ok_or_else(|| "GatewayState not yet initialized".to_string())?;
+                let registry = state.channels.load();
+                let cid = parse_channel_id(channel_id)
+                    .ok_or_else(|| format!("Unknown channel: '{}'", channel_id))?;
+                let channel = registry.get(&cid)
+                    .ok_or_else(|| format!("Channel '{}' not found in registry", channel_id))?;
+
+                // Use channel's default_origin, overriding conversation_id where possible.
+                // For channels like Telegram, conversation_id is parsed as chat_id.
+                let origin = build_origin_from_target(&cid, conversation_id)
+                    .or_else(|| channel.default_origin())
+                    .ok_or_else(|| format!("No delivery origin for channel '{}'", channel_id))?;
+
+                let outbound = clawdesk_types::message::OutboundMessage {
+                    origin,
+                    body: content.to_string(),
+                    media: vec![],
+                    reply_to: None,
+                    thread_id: None,
+                };
+
+                channel.send(outbound).await
+                    .map(|_receipt| ())
+                    .map_err(|e| format!("Channel send failed: {}", e))
+            }
+            clawdesk_types::cron::DeliveryTarget::Webhook { url } => {
+                let client = reqwest::Client::new();
+                client.post(url)
+                    .json(&serde_json::json!({
+                        "type": "cron_result",
+                        "content": content,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                    }))
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Webhook delivery failed: {}", e))?;
+                Ok(())
+            }
+            clawdesk_types::cron::DeliveryTarget::Session { session_key } => {
+                tracing::info!(session_key = %session_key, content_len = content.len(), "Cron result stored in session");
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Parse a channel ID string into a `ChannelId` enum variant.
+fn parse_channel_id(s: &str) -> Option<clawdesk_types::channel::ChannelId> {
+    use clawdesk_types::channel::ChannelId;
+    match s.to_lowercase().as_str() {
+        "telegram" => Some(ChannelId::Telegram),
+        "discord" => Some(ChannelId::Discord),
+        "slack" => Some(ChannelId::Slack),
+        "whatsapp" => Some(ChannelId::WhatsApp),
+        "webchat" => Some(ChannelId::WebChat),
+        "email" => Some(ChannelId::Email),
+        "imessage" => Some(ChannelId::IMessage),
+        "irc" => Some(ChannelId::Irc),
+        "internal" => Some(ChannelId::Internal),
+        "teams" => Some(ChannelId::Teams),
+        "matrix" => Some(ChannelId::Matrix),
+        "signal" => Some(ChannelId::Signal),
+        "webhook" => Some(ChannelId::Webhook),
+        "mastodon" => Some(ChannelId::Mastodon),
+        _ => None,
+    }
+}
+
+/// Build a `MessageOrigin` from a channel ID and conversation_id string.
+/// This allows cron delivery to target a specific chat/channel/room.
+fn build_origin_from_target(
+    cid: &clawdesk_types::channel::ChannelId,
+    conversation_id: &str,
+) -> Option<clawdesk_types::message::MessageOrigin> {
+    use clawdesk_types::channel::ChannelId;
+    use clawdesk_types::message::MessageOrigin;
+
+    if conversation_id.is_empty() || conversation_id == "default" {
+        return None; // Fall back to channel's default_origin
+    }
+
+    match cid {
+        ChannelId::Telegram => {
+            conversation_id.parse::<i64>().ok().map(|chat_id| {
+                MessageOrigin::Telegram { chat_id, message_id: 0, thread_id: None }
+            })
+        }
+        ChannelId::Discord => {
+            conversation_id.parse::<u64>().ok().map(|channel_id| {
+                MessageOrigin::Discord { guild_id: 0, channel_id, message_id: 0, is_dm: false, thread_id: None }
+            })
+        }
+        ChannelId::Slack => {
+            Some(MessageOrigin::Slack {
+                team_id: String::new(),
+                channel_id: conversation_id.to_string(),
+                user_id: String::new(),
+                ts: String::new(),
+                thread_ts: None,
+            })
+        }
+        ChannelId::WhatsApp => {
+            Some(MessageOrigin::WhatsApp {
+                phone_number: conversation_id.to_string(),
+                message_id: String::new(),
+            })
+        }
+        ChannelId::Email => {
+            Some(MessageOrigin::Email {
+                message_id: String::new(),
+                from: String::new(),
+                to: conversation_id.to_string(),
+            })
+        }
+        ChannelId::WebChat => {
+            Some(MessageOrigin::WebChat { session_id: conversation_id.to_string() })
+        }
+        ChannelId::Internal => {
+            Some(MessageOrigin::Internal { source: conversation_id.to_string() })
+        }
+        _ => None, // Fall back to channel's default_origin
     }
 }

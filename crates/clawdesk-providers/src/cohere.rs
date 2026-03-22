@@ -306,6 +306,7 @@ impl Provider for CohereProvider {
         }
 
         let mut buffer = String::new();
+        let mut byte_buf: Vec<u8> = Vec::new();
         let mut response = response;
         
         // Tool calling stream assembly state
@@ -316,7 +317,15 @@ impl Provider for CohereProvider {
         while let Some(chunk) = response.chunk().await.map_err(|e| {
             ProviderError::network_error("cohere", e.to_string())
         })? {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            byte_buf.extend_from_slice(&chunk);
+            let valid_len = match std::str::from_utf8(&byte_buf) {
+                Ok(s) => s.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            if valid_len == 0 { continue; }
+            let text = std::str::from_utf8(&byte_buf[..valid_len]).expect("valid UTF-8");
+            buffer.push_str(text);
+            byte_buf.drain(..valid_len);
 
             while let Some(boundary) = buffer.find("\n\n") {
                 let event_block = buffer[..boundary].to_string();

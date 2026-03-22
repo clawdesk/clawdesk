@@ -132,8 +132,46 @@ fn get_children(pid: u32) -> Vec<u32> {
 }
 
 #[cfg(not(unix))]
-fn get_children(_pid: u32) -> Vec<u32> {
-    Vec::new()
+fn get_children(pid: u32) -> Vec<u32> {
+    // Windows: use `wmic` or `tasklist` to find child processes.
+    // wmic is deprecated but universally available; PowerShell's
+    // Get-CimInstance is the modern alternative but slower to start.
+    let output = std::process::Command::new("wmic")
+        .args(["process", "where", &format!("ParentProcessId={}", pid), "get", "ProcessId", "/FORMAT:CSV"])
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout
+                .lines()
+                .skip(1) // skip CSV header
+                .filter_map(|line| {
+                    // CSV format: Node,ProcessId
+                    let parts: Vec<&str> = line.trim().split(',').collect();
+                    parts.last().and_then(|s| s.trim().parse::<u32>().ok())
+                })
+                .filter(|&child_pid| child_pid != pid) // don't include self
+                .collect()
+        }
+        Err(_) => {
+            // Fallback: try tasklist
+            let output2 = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command",
+                    &format!("Get-CimInstance Win32_Process | Where-Object {{ $_.ParentProcessId -eq {} }} | Select-Object -ExpandProperty ProcessId", pid)
+                ])
+                .output();
+            match output2 {
+                Ok(out) => {
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .filter_map(|l| l.trim().parse::<u32>().ok())
+                        .collect()
+                }
+                Err(_) => Vec::new(),
+            }
+        }
+    }
 }
 
 /// Send a signal to a process.
@@ -166,8 +204,35 @@ fn send_signal(pid: u32, signal: KillSignal) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
-fn send_signal(pid: u32, _signal: KillSignal) -> Result<(), String> {
-    Err(format!("kill_tree not supported on this platform for PID {pid}"))
+fn send_signal(pid: u32, signal: KillSignal) -> Result<(), String> {
+    // Windows: use taskkill for process termination.
+    // SIGINT equivalent: taskkill /PID (sends WM_CLOSE)
+    // SIGKILL equivalent: taskkill /F /PID (forceful)
+    let args = match signal {
+        KillSignal::Term | KillSignal::Interrupt => {
+            vec!["/PID".to_string(), pid.to_string()]
+        }
+        KillSignal::Kill => {
+            vec!["/F".to_string(), "/PID".to_string(), pid.to_string()]
+        }
+    };
+
+    let output = std::process::Command::new("taskkill")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("failed to execute taskkill: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // "not found" means already dead — not an error
+        if stderr.contains("not found") || stderr.contains("not running") {
+            Ok(())
+        } else {
+            Err(stderr.trim().to_string())
+        }
+    }
 }
 
 /// Kill a process group (PGID). On Unix, sends signal to -pgid.
@@ -194,8 +259,24 @@ pub fn kill_process_group(pgid: u32, signal: KillSignal) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
-pub fn kill_process_group(pgid: u32, _signal: KillSignal) -> Result<(), String> {
-    Err(format!("kill_process_group not supported on this platform for PGID {pgid}"))
+pub fn kill_process_group(pgid: u32, signal: KillSignal) -> Result<(), String> {
+    // Windows: taskkill /T (tree kill) handles the entire process tree
+    let force = matches!(signal, KillSignal::Kill);
+    let mut args = vec!["/T".to_string()];
+    if force { args.push("/F".to_string()); }
+    args.push("/PID".to_string());
+    args.push(pgid.to_string());
+
+    let output = std::process::Command::new("taskkill")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("failed to kill process group: {e}"))?;
+
+    if output.status.success() || String::from_utf8_lossy(&output.stderr).contains("not found") {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
 }
 
 #[cfg(test)]

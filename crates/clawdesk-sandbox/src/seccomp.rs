@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // Syscall categories
@@ -358,31 +358,30 @@ pub struct SeccompResult {
 pub fn apply_seccomp_profile(profile: &SeccompProfile) -> SeccompResult {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        // In a full implementation:
-        // 1. Compile the allowlist into BPF instructions
-        //    (sock_filter array: load arch, check arch, load syscall nr, compare each)
-        // 2. prctl(PR_SET_NO_NEW_PRIVS, 1)
-        // 3. prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)
+        // NOTE: Real BPF compilation requires the `seccompiler` crate
+        // (from Firecracker) or `libseccomp-rs`. Until one is integrated,
+        // we honestly report that enforcement is NOT active.
         //
-        // The BPF program structure is:
-        //   BPF_LD | BPF_W | BPF_ABS  (load arch from seccomp_data.arch)
-        //   BPF_JMP | BPF_JEQ          (check AUDIT_ARCH_X86_64)
-        //   BPF_LD | BPF_W | BPF_ABS  (load nr from seccomp_data.nr)
-        //   For each allowed: BPF_JMP | BPF_JEQ → ALLOW
-        //   default: ERRNO(EPERM) or KILL
+        // TODO: Add `seccompiler` dependency and compile allowlist into
+        // BPF instructions, then install via:
+        //   prctl(PR_SET_NO_NEW_PRIVS, 1)
+        //   prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)
 
-        info!(
+        warn!(
             profile = %profile.name,
             allowed = profile.allowed_count(),
             action = ?profile.default_action,
-            "seccomp-BPF profile prepared for enforcement"
+            "seccomp-BPF profile NOT enforced (stub implementation — no BPF compiler integrated)"
         );
 
         SeccompResult {
-            enforced: true,
+            enforced: false,
             profile_name: profile.name.clone(),
             allowed_count: profile.allowed_count(),
-            skip_reason: None,
+            skip_reason: Some(
+                "seccomp BPF compilation not yet implemented — \
+                 integrate seccompiler crate for real enforcement".to_string()
+            ),
         }
     }
 

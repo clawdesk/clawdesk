@@ -311,10 +311,19 @@ impl Provider for OpenAiProvider {
         //   delta.tool_calls[i].function.arguments (subsequent chunks, partial JSON)
         let mut tool_call_accum: Vec<(String, String, String)> = Vec::new(); // (id, name, args_json)
 
+        let mut byte_buf: Vec<u8> = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|e| {
             ProviderError::network_error("openai", e.to_string())
         })? {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            byte_buf.extend_from_slice(&chunk);
+            let valid_len = match std::str::from_utf8(&byte_buf) {
+                Ok(s) => s.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            if valid_len == 0 { continue; }
+            let text = std::str::from_utf8(&byte_buf[..valid_len]).expect("valid UTF-8");
+            buffer.push_str(text);
+            byte_buf.drain(..valid_len);
 
             // Process complete SSE lines (each prefixed with `data: ` and ending with `\n`)
             while let Some(boundary) = buffer.find("\n\n") {

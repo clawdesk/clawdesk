@@ -26,10 +26,12 @@ pub mod injection;
 pub mod keychain;
 pub mod oauth;
 pub mod rotation;
+pub mod network_egress;
 pub mod sandbox_policy;
 pub mod safe_regex;
 pub mod scanner;
 pub mod secret_ref;
+pub mod security_persona;
 pub mod skill_verify;
 pub mod tokens;
 pub mod obfuscation;
@@ -58,4 +60,8 @@ pub use oauth::{OAuthFlowManager, AuthProfile, AuthProfileManager, TokenSet, OAu
 pub use rotation::{ManagedSecret, RotationPolicy, RotationRecord, SecretRotationManager, SecretState};
 pub use safe_regex::{SafeRegexResult, RejectReason, safe_compile, safe_compile_case_insensitive};
 pub use tokens::{AuthError, ScopedToken, ServerSecret, TokenScope};
+pub use network_egress::{
+    EgressDecision, EgressMode, EndpointPermission, HttpMethod,
+    NetworkEgressPolicy, ToolEndpointBinding,
+};
 pub use url_sanitize::{strip_url_userinfo, sanitize_embedded_urls};

@@ -1202,6 +1202,65 @@ impl<S: MemoryBackend> MemoryManager<S> {
     ) -> Result<Vec<HashMap<String, serde_json::Value>>, String> {
         self.store.query_view(view_name, filters, limit)
     }
+
+    // ─── Procedural Memory Bridge ────────────────────────────────────────
+    //
+    // These methods bridge between the declarative memory store and the
+    // procedural memory system (clawdesk-procedural). They store/recall
+    // action patterns (what worked, what didn't) separately from factual
+    // memories, using a dedicated "procedures" collection.
+
+    /// Recall procedural patterns (action sequences that worked before)
+    /// for a given context query.
+    ///
+    /// Returns raw pattern data as JSON values from the procedures
+    /// collection, ranked by (similarity × success_rate × recency).
+    pub async fn recall_procedures(
+        &self,
+        context: &str,
+        max_results: usize,
+    ) -> Result<Vec<VectorSearchResult>, String> {
+        self.ensure_collection().await?;
+
+        let query_result = self.embedding
+            .embed(context)
+            .await
+            .map_err(|e| format!("procedure embedding failed: {}", e))?;
+
+        let results = self.store
+            .search("procedures", &query_result.vector, max_results, Some(0.3))
+            .await
+            .map_err(|e| format!("procedure recall failed: {e}"))?;;
+
+        Ok(results)
+    }
+
+    /// Record a completed action episode for procedural learning.
+    ///
+    /// Stores the context embedding + action metadata in the "procedures"
+    /// collection for later recall. The procedural memory crate handles
+    /// pattern consolidation and inhibition; this method is the persistence
+    /// bridge.
+    pub async fn record_procedure(
+        &self,
+        context: &str,
+        metadata: serde_json::Value,
+    ) -> Result<String, String> {
+        self.ensure_collection().await?;
+
+        let embed_result = self.embedding
+            .embed(context)
+            .await
+            .map_err(|e| format!("procedure embedding failed: {}", e))?;
+
+        let id = format!("proc_{}", uuid::Uuid::new_v4());
+        self.store
+            .insert("procedures", &id, &embed_result.vector, Some(metadata))
+            .await
+            .map_err(|e| format!("procedure record failed: {e}"))?;
+
+        Ok(id)
+    }
 }
 
 /// Auto-select dedup threshold based on embedding model characteristics.

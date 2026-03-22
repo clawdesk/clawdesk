@@ -748,6 +748,7 @@ impl Provider for OpenAiCompatibleProvider {
         let mut stream = resp.bytes_stream();
         use futures::StreamExt;
         let mut buffer = String::new();
+        let mut byte_buf: Vec<u8> = Vec::new();
         let mut tool_accum: Vec<(String, String, String)> = Vec::new(); // (id, name, args)
         let mut last_usage: Option<TokenUsage> = None;
         let mut first_chunk = true;
@@ -775,7 +776,15 @@ impl Provider for OpenAiCompatibleProvider {
                 }
             }
 
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            byte_buf.extend_from_slice(&bytes);
+            let valid_len = match std::str::from_utf8(&byte_buf) {
+                Ok(s) => s.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            if valid_len == 0 { continue; }
+            let text = std::str::from_utf8(&byte_buf[..valid_len]).expect("valid UTF-8");
+            buffer.push_str(text);
+            byte_buf.drain(..valid_len);
 
             // Process complete SSE lines
             while let Some(line_end) = buffer.find('\n') {
