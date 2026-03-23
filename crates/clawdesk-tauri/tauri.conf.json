@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/v2/tooling/cli/schema.json",
   "productName": "ClawDesk",
-  "version": "0.1.0",
+  "version": "0.2.2",
   "identifier": "ai.clawdesk.app",
   "build": {
     "frontendDist": "../ui/dist",
