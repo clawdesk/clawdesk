@@ -28,6 +28,12 @@ pub struct PipelineResult {
 pub type AgentExecutor =
     Box<dyn Fn(&NormalizedMessage, &str) -> Result<String, String> + Send + Sync>;
 
+/// Security scan function — returns `Ok(())` if the message is safe, or
+/// `Err(reason)` if it should be blocked. Injected by the call site (gateway
+/// or Tauri) to bridge the security crate without adding a cross-layer dependency.
+pub type SecurityScanFn =
+    Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
 /// Streaming agent executor.
 /// Returns a stream of text chunks instead of a single complete response.
 /// The receiver yields partial response chunks as they arrive from the LLM.
@@ -58,6 +64,8 @@ pub struct ReplyPipeline {
     executor: Option<AgentExecutor>,
     /// Optional streaming executor for channels that prefer streaming.
     streaming_executor: Option<StreamingAgentExecutor>,
+    /// Optional security scanner — blocks messages flagged for prompt injection / PII.
+    security_scan: Option<SecurityScanFn>,
 }
 
 impl ReplyPipeline {
@@ -67,12 +75,20 @@ impl ReplyPipeline {
             router,
             executor: None,
             streaming_executor: None,
+            security_scan: None,
         }
     }
 
     /// Set the agent executor function.
     pub fn with_executor(mut self, executor: AgentExecutor) -> Self {
         self.executor = Some(executor);
+        self
+    }
+
+    /// Set an optional security scanner that runs before classification.
+    /// If the scan returns `Err(reason)`, the message is dropped.
+    pub fn with_security_scan(mut self, scan: SecurityScanFn) -> Self {
+        self.security_scan = Some(scan);
         self
     }
 
@@ -93,12 +109,35 @@ impl ReplyPipeline {
 
     /// Run the full pipeline on an inbound message.
     pub fn process(&self, msg: &NormalizedMessage) -> PipelineResult {
-        let mut timings: Vec<(&'static str, std::time::Duration)> = Vec::with_capacity(7);
+        let mut timings: Vec<(&'static str, std::time::Duration)> = Vec::with_capacity(8);
 
         // Stage 1: Inbound (normalization already done upstream).
         let t = Instant::now();
         debug!(msg_id = %msg.id, "pipeline: inbound");
         timings.push(("inbound", t.elapsed()));
+
+        // Stage 1.5: Security scan — block prompt injection / PII before agent execution.
+        if let Some(ref scan) = self.security_scan {
+            let t = Instant::now();
+            if let Err(reason) = scan(&msg.body) {
+                warn!(msg_id = %msg.id, %reason, "pipeline: message blocked by security scan");
+                timings.push(("security_scan", t.elapsed()));
+                return PipelineResult {
+                    stage_timings: timings,
+                    delivery: DeliveryStatus {
+                        message_id: msg.id.to_string(),
+                        channel: msg.sender.channel.to_string(),
+                        status: DeliveryState::Failed,
+                        timestamp: chrono::Utc::now(),
+                        retry_count: 0,
+                        error: Some(format!("blocked by security scan: {reason}")),
+                    },
+                    response_parts: vec![],
+                    formatted_segments: vec![],
+                };
+            }
+            timings.push(("security_scan", t.elapsed()));
+        }
 
         // Stage 2: Classify.
         let t = Instant::now();

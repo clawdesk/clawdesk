@@ -16,9 +16,11 @@
 
 pub mod bm25;
 pub mod bm25_store;
+pub mod batch_runner;
 pub mod chunker;
 pub mod embedding;
 pub mod embedding_cache;
+pub mod embeddings_voyage;
 pub mod file_memory;
 pub mod fts_fallback;
 pub mod generation;
@@ -28,6 +30,7 @@ pub mod hybrid;
 pub mod ingest;
 pub mod manager;
 pub mod mmr;
+pub mod multimodal;
 pub mod pipeline;
 pub mod reranker;
 pub mod retrieval_stage;
@@ -51,6 +54,11 @@ pub use hybrid::{HybridSearcher, SearchStrategy};
 pub use ingest::IngestionResult;
 pub use manager::{MemoryManager, MemoryConfig, MemorySource, MemoryStats};
 pub use mmr::{mmr_rerank, MmrCandidate, MmrConfig, MmrResult};
+pub use batch_runner::{BatchRunner, BatchConfig, BatchProgress, BatchPhase, BatchResult, CostEstimate, estimate_cost};
+pub use temporal_decay::{
+    DecayProfile, MemoryType, TypedDecayConfig,
+    decay_factor_profile, typed_decay_factor, apply_typed_temporal_decay,
+};
 // Re-export MemoryBackend trait from storage so consumers can refer to it via clawdesk-memory
 pub use clawdesk_storage::memory_backend::{
     MemoryBackend, MemoryWriteOp, AtomicWriteResult, PolicyCheckResult,

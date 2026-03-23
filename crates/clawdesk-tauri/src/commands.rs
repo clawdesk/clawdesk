@@ -2666,7 +2666,9 @@ interact with web UIs, or capture visual output for the user.\n"
     // tool-endpoint bindings, and TLS/method enforcement.
     .with_egress_gate(Arc::new(crate::commands::EgressGateAdapter {
         policy: Arc::clone(&state.egress_policy),
-    }));
+    }))
+    // Wire event bus so ToolMediaEmitted events reach reactive pipelines.
+    .with_event_bus(Arc::clone(&state.event_bus));
 
     if let Some(ch_ctx) = channel_context {
         runner = runner.with_channel_context(ch_ctx);
@@ -5789,6 +5791,11 @@ fn emit_agent_event(app: &AppHandle, agent_id: &str, event: &AgentEvent) -> Resu
             options: options.clone(),
             urgent: *urgent,
         },
+        AgentEvent::ValidationComplete { verified, claims_passed, claims_failed } => TauriAgentEvent::ValidationComplete {
+            verified: *verified,
+            claims_passed: *claims_passed,
+            claims_failed: *claims_failed,
+        },
     };
 
     app.emit(
@@ -6219,5 +6226,21 @@ pub async fn sync_channel_provider(
     // Persist to disk so the override survives app restarts
     AppState::save_channel_provider(&override_cfg);
     *state.channel_provider.write().map_err(|e| format!("Lock poisoned: {e}"))? = Some(override_cfg);
+
+    // ── Hot-swap gateway ProviderRegistry so CLI clients see the change ──
+    if let Ok(gw_guard) = state.gateway_state.read() {
+        if let Some(ref gw) = *gw_guard {
+            let mut new_providers = clawdesk_providers::registry::ProviderRegistry::new();
+            clawdesk_providers::registry::auto_register_from_env(&mut new_providers);
+            let cp_path = clawdesk_types::dirs::dot_clawdesk().join("channel_provider.json");
+            clawdesk_providers::registry::register_from_config_file(&mut new_providers, &cp_path);
+            gw.providers.store(std::sync::Arc::new(new_providers));
+            tracing::info!(
+                count = gw.providers.load().list().len(),
+                "Gateway ProviderRegistry hot-swapped"
+            );
+        }
+    }
+
     Ok("ok".into())
 }

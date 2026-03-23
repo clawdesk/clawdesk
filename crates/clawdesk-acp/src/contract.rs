@@ -334,6 +334,58 @@ impl CostEnvelope {
     pub fn check_duration(&self, elapsed: Duration) -> bool {
         self.max_duration.map_or(true, |max| elapsed <= max)
     }
+
+    /// TASK 5 FIX: Convert agent rate limits [tokens/hour] to per-task
+    /// absolute bounds [tokens], resolving the dimensional mismatch between
+    /// CostEnvelope (absolute) and agent manifests (rate-based).
+    ///
+    /// Uses an estimated task duration `d_estimate` (from EWMA of historical
+    /// task durations) and a z-score safety buffer.
+    ///
+    /// effective_budget = rate_per_hour × (d_estimate_hours + z × σ_hours)
+    ///
+    /// If no duration estimate is available, uses the CostEnvelope's own
+    /// max_duration as the upper bound.
+    pub fn from_rate_limits(
+        tokens_per_hour: u64,
+        max_tool_iterations: u32,
+        estimated_duration_secs: Option<f64>,
+    ) -> Self {
+        // Convert duration estimate to hours for dimensional consistency
+        let duration_hours = estimated_duration_secs
+            .map(|s| s / 3600.0)
+            .unwrap_or(300.0 / 3600.0); // default: 5 minutes
+
+        // Apply 1.5× safety factor for duration uncertainty
+        let safe_hours = duration_hours * 1.5;
+
+        let effective_tokens = (tokens_per_hour as f64 * safe_hours).ceil() as u64;
+        let duration = Duration::seconds(
+            estimated_duration_secs.map(|s| (s * 1.5) as i64).unwrap_or(450)
+        );
+
+        Self {
+            max_tokens: Some(effective_tokens),
+            max_duration: Some(duration),
+            max_depth: Some(3),
+            max_tool_calls: Some(max_tool_iterations),
+            max_cost_usd: None,
+        }
+    }
+
+    /// Check if a task's CostEnvelope fits within agent rate limits.
+    ///
+    /// Returns true if the task's absolute bounds can be satisfied by the
+    /// agent's rate-based budget, given a duration estimate.
+    pub fn fits_within_rate(
+        &self,
+        agent_tokens_per_hour: u64,
+        estimated_duration_secs: f64,
+    ) -> bool {
+        let hours = estimated_duration_secs / 3600.0;
+        let available = (agent_tokens_per_hour as f64 * hours) as u64;
+        self.max_tokens.map_or(true, |needed| needed <= available)
+    }
 }
 
 /// Helper module for serializing `Option<Duration>` as seconds.

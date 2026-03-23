@@ -10,6 +10,7 @@
 
 pub mod acl;
 pub mod audit;
+pub mod audit_domain;
 pub mod allowlist;
 pub mod auth_profiles;
 pub mod capabilities;
@@ -17,8 +18,11 @@ pub mod cert_pinning;
 pub mod command_policy;
 pub mod credential_vault;
 pub mod crypto;
+pub mod dangerous_config;
 pub mod dm_pairing;
+pub mod dm_policy;
 pub mod exec_approval;
+pub mod external_content;
 pub mod group_policy;
 pub mod health_dashboard;
 pub mod identity;
@@ -65,3 +69,7 @@ pub use network_egress::{
     NetworkEgressPolicy, ToolEndpointBinding,
 };
 pub use url_sanitize::{strip_url_userinfo, sanitize_embedded_urls};
+pub use external_content::{ContentSanitizer, ContentSource, SanitizationConfig, SanitizationResult};
+pub use dangerous_config::{DangerousConfigDetector, DangerousPattern, ConfigRisk, ConfigAuditReport};
+pub use dm_policy::{DmPolicy, DmPolicyDecision, DmPolicyManager, DmRule, TimeWindow};
+pub use audit_domain::{ChannelAuditor, FilesystemAuditor, ToolPolicyAuditor};

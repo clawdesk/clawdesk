@@ -140,6 +140,20 @@ pub struct GatewayState {
     /// Hook manager for plugin lifecycle dispatch.
     /// Wired into AgentRunner for before/after agent, tool, compaction hooks.
     pub hook_manager: Arc<clawdesk_plugin::HookManager>,
+
+    // --- Memory subsystem ---
+    /// Cross-session memory manager for persistent recall.
+    /// Enables the agent to remember and recall information from prior
+    /// conversations, not just the current session.
+    pub memory: Option<Arc<clawdesk_memory::MemoryManager<clawdesk_sochdb::SochMemoryBackend>>>,
+
+    // --- Security gates (parity with Tauri desktop path) ---
+    /// Prompt injection / PII scanner for inbound messages.
+    pub scanner: Arc<clawdesk_security::CascadeScanner>,
+    /// Network egress policy — SSRF prevention, endpoint bindings, TLS enforcement.
+    pub egress_policy: Arc<std::sync::RwLock<clawdesk_security::NetworkEgressPolicy>>,
+    /// Sandbox policy engine — tool isolation level gating.
+    pub sandbox_engine: Arc<clawdesk_security::sandbox_policy::SandboxPolicyEngine>,
 }
 
 impl GatewayState {
@@ -182,6 +196,20 @@ impl GatewayState {
         let webhook_queue = Arc::new(
             crate::webhook_queue::WebhookDeliveryQueue::new(Arc::clone(&store))
         );
+        // Initialize memory subsystem before consuming `store` in the struct literal.
+        let memory = {
+            let soch_backend = Arc::new(
+                clawdesk_sochdb::SochMemoryBackend::new(Arc::clone(&store))
+            );
+            let embedding: Arc<dyn clawdesk_memory::EmbeddingProvider> =
+                Arc::new(clawdesk_memory::MockEmbeddingProvider::new(1536));
+            let config = clawdesk_memory::MemoryConfig::default();
+            Some(Arc::new(clawdesk_memory::MemoryManager::new(
+                soch_backend,
+                embedding,
+                config,
+            )))
+        };
         Self {
             channels: ArcSwap::from_pointee(channels),
             providers: ArcSwap::from_pointee(providers),
@@ -212,10 +240,26 @@ impl GatewayState {
                 let home = std::env::var("HOME")
                     .or_else(|_| std::env::var("USERPROFILE"))
                     .unwrap_or_else(|_| ".".to_string());
-                let agents_dir = std::path::PathBuf::from(home)
+                let agents_dir = std::path::PathBuf::from(&home)
                     .join(".clawdesk")
                     .join("agents");
-                Arc::new(crate::agent_loader::AgentLoader::new(agents_dir))
+                // Also check for bundled agents alongside the binary or in
+                // the CLAWDESK_AGENTS_DIR env var (for development/testing).
+                let bundled_dir = std::env::var("CLAWDESK_AGENTS_DIR")
+                    .map(std::path::PathBuf::from)
+                    .ok()
+                    .or_else(|| {
+                        // In development: check for an agents/ directory in
+                        // the workspace root (../../../agents relative to binary)
+                        std::env::current_exe().ok()
+                            .and_then(|exe| exe.parent()?.parent()?.parent()?.parent().map(|p| p.join("agents")))
+                            .filter(|p| p.exists())
+                    });
+                let mut loader = crate::agent_loader::AgentLoader::new(agents_dir);
+                if let Some(bundled) = bundled_dir {
+                    loader = loader.with_bundled_dir(bundled);
+                }
+                Arc::new(loader)
             },
             token_budgets: clawdesk_agents::TokenBudgetManager::unlimited(),
             webhook_queue,
@@ -249,6 +293,16 @@ impl GatewayState {
             #[cfg(feature = "browser")]
             browser_manager: clawdesk_browser::BrowserManager::new(clawdesk_browser::manager::BrowserConfig::default()),
             hook_manager: Arc::new(clawdesk_plugin::HookManager::new()),
+            memory,
+            scanner: Arc::new(clawdesk_security::CascadeScanner::new(
+                clawdesk_security::scanner::CascadeScannerConfig::default(),
+            )),
+            egress_policy: Arc::new(std::sync::RwLock::new(
+                clawdesk_security::NetworkEgressPolicy::with_local_models(),
+            )),
+            sandbox_engine: Arc::new(
+                clawdesk_security::sandbox_policy::SandboxPolicyEngine::default(),
+            ),
         }
     }
 
@@ -369,7 +423,7 @@ impl clawdesk_cron::executor::AgentExecutor for GatewayAgentExecutor {
                 Some(agent) => (agent.system_prompt.clone(), agent.model.clone()),
                 None => (
                     clawdesk_types::session::DEFAULT_SYSTEM_PROMPT.to_string(),
-                    "sonnet".to_string(),
+                    "default".to_string(),
                 ),
             }
         };
@@ -380,6 +434,7 @@ impl clawdesk_cron::executor::AgentExecutor for GatewayAgentExecutor {
             "sonnet" => "claude-sonnet-4-20250514".to_string(),
             "opus" => "claude-opus-4-20250514".to_string(),
             "local" => "llama3.2".to_string(),
+            "default" | "auto" | "" => "default".to_string(),
             other => other.to_string(),
         };
 
@@ -390,7 +445,7 @@ impl clawdesk_cron::executor::AgentExecutor for GatewayAgentExecutor {
             m if m.starts_with("gpt") || m.starts_with("o1") || m.starts_with("o3") => "openai",
             m if m.starts_with("gemini") => "gemini",
             m if m.contains("local") || m.starts_with("llama") || m.starts_with("deepseek") => "ollama",
-            _ => "anthropic",
+            _ => "",
         };
 
         let provider = provider_registry
@@ -441,6 +496,31 @@ impl clawdesk_cron::executor::AgentExecutor for GatewayAgentExecutor {
 
         if let Some(sp) = skill_provider {
             builder = builder.with_skill_provider(sp);
+        }
+
+        // Wire cross-session memory recall for cron agent execution.
+        if let Some(ref mem) = state.memory {
+            let mem = std::sync::Arc::clone(mem);
+            let recall_fn: clawdesk_agents::MemoryRecallFn = std::sync::Arc::new(move |query: String| {
+                let mem = std::sync::Arc::clone(&mem);
+                Box::pin(async move {
+                    match mem.recall(&query, Some(10)).await {
+                        Ok(results) => results
+                            .into_iter()
+                            .filter_map(|r| {
+                                let content = r.content?;
+                                Some(clawdesk_agents::MemoryRecallResult {
+                                    content,
+                                    relevance: r.score as f64,
+                                    source: Some("memory".to_string()),
+                                })
+                            })
+                            .collect(),
+                        Err(_) => Vec::new(),
+                    }
+                })
+            });
+            builder = builder.with_memory_recall(recall_fn);
         }
 
         let runner = builder.build();

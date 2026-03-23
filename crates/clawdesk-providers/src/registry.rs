@@ -247,14 +247,29 @@ pub fn register_from_config_file(
     let base_url = cp.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
     let model = cp.get("model").and_then(|v| v.as_str());
 
-    if api_key.is_empty() || base_url.is_empty() {
-        tracing::debug!("channel_provider.json: api_key or base_url empty, skipping");
+    if base_url.is_empty() {
+        tracing::debug!("channel_provider.json: base_url empty, skipping");
         return 0;
     }
 
     let mut count = 0;
 
-    if provider_name.contains("Azure") {
+    if provider_name.contains("Local") || provider_name == "local_compatible" {
+        info!(base_url = base_url, model = ?model, "registering Local (OpenAI Compatible) from channel_provider.json");
+        let config = crate::compatible::CompatibleConfig::new(
+            "local_compatible",
+            base_url,
+            api_key,
+        )
+        .with_default_model(model.unwrap_or("").to_string());
+        registry.register(Arc::new(
+            crate::compatible::OpenAiCompatibleProvider::new(config),
+        ));
+        count += 1;
+    } else if api_key.is_empty() {
+        tracing::debug!("channel_provider.json: api_key empty for remote provider, skipping");
+        return 0;
+    } else if provider_name.contains("Azure") {
         info!("registering Azure OpenAI from channel_provider.json");
         registry.register(Arc::new(
             crate::azure::AzureOpenAiProvider::new(

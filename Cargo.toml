@@ -56,6 +56,7 @@ members = [
     "crates/clawdesk-user-model",
     "crates/clawdesk-selfdiag",
     "crates/clawdesk-user-predict",
+    "crates/clawdesk-conscious",
     "xtask",
 ]
 resolver = "2"
@@ -83,9 +84,9 @@ resolver = "2"
 #       ├──────────────────┘                  |
 #       ↑                                     |
 #   clawdesk-gateway ─────────────────────────┘
-#       ↑                  ↑
-#   clawdesk-acp           |
-#       ↑                  |
+#       ↑        ↑ (optional: feature = "acp")
+#       |        clawdesk-acp
+#       ↑
 #   clawdesk-cli / clawdesk-tauri (leaf binaries)
 #
 # =============================================================================
@@ -106,6 +107,7 @@ clawdesk-domain = { path = "crates/clawdesk-domain" }
 clawdesk-sochdb = { path = "crates/clawdesk-sochdb" }
 clawdesk-channel = { path = "crates/clawdesk-channel" }
 clawdesk-channels = { path = "crates/clawdesk-channels" }
+clawdesk-core = { path = "crates/clawdesk-core" }
 clawdesk-agents = { path = "crates/clawdesk-agents" }
 clawdesk-providers = { path = "crates/clawdesk-providers" }
 clawdesk-gateway = { path = "crates/clawdesk-gateway" }
@@ -152,6 +154,7 @@ clawdesk-worldmodel = { path = "crates/clawdesk-worldmodel" }
 clawdesk-user-model = { path = "crates/clawdesk-user-model" }
 clawdesk-selfdiag = { path = "crates/clawdesk-selfdiag" }
 clawdesk-user-predict = { path = "crates/clawdesk-user-predict" }
+clawdesk-conscious = { path = "crates/clawdesk-conscious" }
 
 # --- SochDB (embedded ACID vector database) ---
 sochdb = { version = "0.5.0", features = ["embedded"] }

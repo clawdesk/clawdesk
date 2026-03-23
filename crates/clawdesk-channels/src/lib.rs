@@ -41,6 +41,7 @@ pub mod factory;
 pub mod imessage;
 pub mod internal;
 pub mod irc;
+pub mod line;
 pub mod markdown;
 pub mod mastodon;
 pub mod matrix;

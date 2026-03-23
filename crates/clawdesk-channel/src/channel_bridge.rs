@@ -66,6 +66,7 @@ impl ChannelBridge {
             ChannelId::Signal => "signal",
             ChannelId::Webhook => "webhook",
             ChannelId::Mastodon => "mastodon",
+            ChannelId::Line => "line",
         }
     }
 

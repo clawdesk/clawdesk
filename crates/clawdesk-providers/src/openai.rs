@@ -26,7 +26,20 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new(api_key: String, base_url: Option<String>, default_model: Option<String>) -> Self {
-        let url = base_url.unwrap_or_else(|| DEFAULT_OPENAI_URL.to_string());
+        let url = match base_url {
+            Some(u) => {
+                // Follow the standard convention: if the user provides a base like
+                // "http://localhost:8000/v1", append "/chat/completions".
+                // If they already include the full path, use it as-is.
+                if u.ends_with("/chat/completions") {
+                    u
+                } else {
+                    let trimmed = u.trim_end_matches('/');
+                    format!("{trimmed}/chat/completions")
+                }
+            }
+            None => DEFAULT_OPENAI_URL.to_string(),
+        };
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(120))

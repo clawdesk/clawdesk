@@ -439,6 +439,14 @@ pub enum AgentEvent {
         options: Vec<String>,
         urgent: bool,
     },
+
+    /// Emitted when post-turn validation completes.
+    /// Reports how many claims were verified vs failed.
+    ValidationComplete {
+        verified: bool,
+        claims_passed: usize,
+        claims_failed: usize,
+    },
 }
 
 /// Final response from the agent runner.
@@ -607,6 +615,8 @@ pub struct AgentRunnerBuilder<S = SandboxUnconfigured> {
     memory_recall_fn: Option<MemoryRecallFn>,
     event_bus: Option<Arc<clawdesk_bus::dispatch::EventBus>>,
     metacognition: bool,
+    conscious_gateway: Option<Arc<clawdesk_conscious::ConsciousGateway>>,
+    post_turn_validator: Option<Arc<crate::post_turn_validator::PostTurnValidator>>,
     _sandbox: std::marker::PhantomData<S>,
 }
 
@@ -646,6 +656,18 @@ impl<S> AgentRunnerBuilder<S> {
     /// Enable metacognitive monitoring (stuck detection + approach evaluation).
     pub fn with_metacognition(mut self) -> Self {
         self.metacognition = true;
+        self
+    }
+
+    /// Attach a conscious gateway for graduated awareness tool control.
+    pub fn with_conscious_gateway(mut self, gateway: Arc<clawdesk_conscious::ConsciousGateway>) -> Self {
+        self.conscious_gateway = Some(gateway);
+        self
+    }
+
+    /// Attach a post-turn validator for independent claim verification.
+    pub fn with_post_turn_validator(mut self, validator: Arc<crate::post_turn_validator::PostTurnValidator>) -> Self {
+        self.post_turn_validator = Some(validator);
         self
     }
 
@@ -727,6 +749,8 @@ impl AgentRunnerBuilder<SandboxUnconfigured> {
             memory_recall_fn: self.memory_recall_fn,
             event_bus: self.event_bus,
             metacognition: self.metacognition,
+            conscious_gateway: self.conscious_gateway,
+            post_turn_validator: self.post_turn_validator,
             _sandbox: std::marker::PhantomData,
         }
     }
@@ -758,6 +782,8 @@ impl AgentRunnerBuilder<SandboxUnconfigured> {
             memory_recall_fn: self.memory_recall_fn,
             event_bus: self.event_bus,
             metacognition: self.metacognition,
+            conscious_gateway: self.conscious_gateway,
+            post_turn_validator: self.post_turn_validator,
             _sandbox: std::marker::PhantomData,
         }
     }
@@ -809,6 +835,8 @@ impl AgentRunnerBuilder<SandboxConfigured> {
             } else {
                 None
             },
+            conscious_gateway: self.conscious_gateway,
+            post_turn_validator: self.post_turn_validator,
         }
     }
 }
@@ -888,6 +916,15 @@ pub struct AgentRunner {
     /// and approach confidence, injecting corrective system messages
     /// when the agent appears to be going in circles.
     metacognition: Option<std::sync::Mutex<clawdesk_metacognition::MetacognitiveMonitor>>,
+    /// Optional conscious gateway for graduated awareness tool control.
+    /// When present, every tool invocation goes through the L0→L1→L2→L3→L4
+    /// consciousness pipeline instead of the flat policy+approval chain.
+    conscious_gateway: Option<Arc<clawdesk_conscious::ConsciousGateway>>,
+    /// Optional post-turn validator that verifies agent claims before publishing.
+    /// When present, after the agent loop completes, a validator sub-agent
+    /// independently checks testable claims (tests passing, files created, etc.)
+    /// and annotates the response if verification fails.
+    post_turn_validator: Option<Arc<crate::post_turn_validator::PostTurnValidator>>,
 }
 
 impl AgentRunner {
@@ -924,6 +961,8 @@ impl AgentRunner {
             images: Vec::new(),
             event_bus: None,
             metacognition: None,
+            conscious_gateway: None,
+            post_turn_validator: None,
         }
     }
 
@@ -1001,6 +1040,25 @@ impl AgentRunner {
         self
     }
 
+    /// Attach a conscious gateway for graduated awareness tool control.
+    ///
+    /// When set, every tool invocation goes through the L0→L1→L2→L3→L4
+    /// consciousness pipeline before the old policy+approval chain.
+    pub fn with_conscious_gateway(mut self, gateway: Arc<clawdesk_conscious::ConsciousGateway>) -> Self {
+        self.conscious_gateway = Some(gateway);
+        self
+    }
+
+    /// Attach a post-turn validator for independent claim verification.
+    ///
+    /// When set, after each turn the validator sub-agent independently
+    /// checks testable claims (e.g. "all tests pass") by running commands.
+    /// If verification fails, the response is annotated with a report.
+    pub fn with_post_turn_validator(mut self, validator: Arc<crate::post_turn_validator::PostTurnValidator>) -> Self {
+        self.post_turn_validator = Some(validator);
+        self
+    }
+
     /// Inject channel context for channel-aware prompt injection.
     ///
     /// When set, the runner injects channel capabilities and formatting hints
@@ -1034,6 +1092,12 @@ impl AgentRunner {
     /// the engine-level recall.
     pub fn with_memory_recall(mut self, recall_fn: MemoryRecallFn) -> Self {
         self.memory_recall_fn = Some(recall_fn);
+        self
+    }
+
+    /// Inject an event bus for publishing ToolMediaEmitted and other structured events.
+    pub fn with_event_bus(mut self, bus: Arc<clawdesk_bus::dispatch::EventBus>) -> Self {
+        self.event_bus = Some(bus);
         self
     }
 
@@ -1090,6 +1154,8 @@ impl AgentRunner {
             memory_recall_fn: None,
             event_bus: None,
             metacognition: false,
+            conscious_gateway: None,
+            post_turn_validator: None,
             _sandbox: std::marker::PhantomData,
         }
     }
@@ -1277,6 +1343,28 @@ impl AgentRunner {
         // Stage 4: Execute the agent loop
         let response = self.execute_loop(messages, system_prompt, tool_defs, &mut guard, active_skills)
             .await?;
+
+        // Stage 4.5: Post-turn validation — independently verify claims
+        // When enabled, spawns a validator sub-agent that checks testable
+        // assertions (e.g. "all tests pass") by running actual commands.
+        // If claims fail, the response is annotated with a validation report.
+        let response = if let Some(ref validator) = self.post_turn_validator {
+            let (validated_response, report) = validator.validate(response).await;
+            if let Some(ref report) = report {
+                self.emit(AgentEvent::ValidationComplete {
+                    verified: report.verified,
+                    claims_passed: report.claims.iter()
+                        .filter(|c| c.status == crate::post_turn_validator::ClaimStatus::Pass)
+                        .count(),
+                    claims_failed: report.claims.iter()
+                        .filter(|c| c.status == crate::post_turn_validator::ClaimStatus::Fail)
+                        .count(),
+                });
+            }
+            validated_response
+        } else {
+            response
+        };
 
         // MessageSend hook — fires when a response is ready for delivery.
         // Plugins can log, transform, or gate the outbound response.
@@ -1566,6 +1654,10 @@ impl AgentRunner {
             loop_guard: LoopGuard::new(LoopGuardConfig::default()),
             initial_msg_count: request.messages.len(),
             overflow_retries: 0,
+            // G17 FIX: Explicitly initialize all tracker fields.
+            last_round_total_tools: 0,
+            last_round_failed_tools: 0,
+            last_round_tool_names: Vec::new(),
         };
 
         for round in 0..self.config.max_tool_rounds {
@@ -1617,30 +1709,55 @@ impl AgentRunner {
                     if let Some(ref meta_mutex) = self.metacognition {
                         let verdict_msg = {
                             let mut monitor = meta_mutex.lock().unwrap();
-                            // Build a snapshot from the current round state
-                            let last_tools: Vec<String> = request.messages.iter().rev()
-                                .filter(|m| m.role == MessageRole::Tool)
-                                .take(5)
-                                .map(|m| {
-                                    // Extract tool name from the content prefix
-                                    m.content.split_whitespace().next()
-                                        .unwrap_or("unknown")
-                                        .to_string()
-                                })
-                                .collect();
+                            // G3b FIX: Use tool names stored in LoopState from
+                            // process_tool_round (populated from ToolResult.name),
+                            // instead of re-extracting from Tool-role message content.
+                            // The old approach parsed `m.content.split_whitespace().next()`
+                            // which yields JSON fragments like `{"tool_call_id":` because
+                            // tool result messages are JSON-structured, not plain text.
+                            let last_tools = loop_state.last_round_tool_names.clone();
                             let last_output = request.messages.iter().rev()
                                 .find(|m| m.role == MessageRole::Assistant)
                                 .map(|m| m.content.as_ref())
                                 .unwrap_or("");
-                            let tool_count = last_tools.len();
+                            // G3 FIX: Use actual tool success/failure counts
+                            // instead of assuming all tools succeeded.
+                            let total = loop_state.last_round_total_tools;
+                            let failed = loop_state.last_round_failed_tools;
+                            let successful = total.saturating_sub(failed);
                             let snapshot = clawdesk_metacognition::TurnSnapshot {
-                                tool_names: last_tools,
+                                tool_names: last_tools.clone(),
                                 output_text: last_output.to_string(),
-                                successful_tools: tool_count,
-                                total_tools: tool_count,
-                                had_new_tool_results: tool_count > 0,
+                                successful_tools: successful,
+                                total_tools: total,
+                                // G19 FIX: Only count as "new results" if at least one
+                                // tool succeeded. Failed tools don't represent progress;
+                                // the stuck detector's "time without progress" timer
+                                // should NOT reset when every tool errors.
+                                had_new_tool_results: successful > 0,
                             };
                             let verdict = monitor.observe(&snapshot);
+                            // Publish metacognition verdict to global workspace
+                            // so sentinel and other subsystems can react.
+                            if let Some(ref gw) = self.conscious_gateway {
+                                if let Some(ws) = gw.global_workspace() {
+                                    match &verdict {
+                                        clawdesk_metacognition::Verdict::Stuck { reason, streak } => {
+                                            ws.publish(clawdesk_conscious::CognitiveEvent::AgentStuck {
+                                                reason: reason.clone(),
+                                                streak: *streak,
+                                            });
+                                        }
+                                        clawdesk_metacognition::Verdict::WrongApproach { current_confidence, suggestion } => {
+                                            ws.publish(clawdesk_conscious::CognitiveEvent::ApproachFailing {
+                                                confidence: *current_confidence,
+                                                suggestion: suggestion.clone(),
+                                            });
+                                        }
+                                        clawdesk_metacognition::Verdict::OnTrack => {}
+                                    }
+                                }
+                            }
                             verdict.to_system_message()
                         };
                         if let Some(msg) = verdict_msg {
@@ -2136,6 +2253,16 @@ impl AgentRunner {
         }
 
         // Context budget + push tool results to messages
+        // G3 FIX: Track tool success/failure counts for metacognitive snapshot
+        loop_state.last_round_total_tools = tool_results.len();
+        loop_state.last_round_failed_tools = tool_results.iter().filter(|r| r.is_error).count();
+        // G3b FIX: Store actual tool names from ToolResult.name for the
+        // metacognitive stuck detector. Previously, tool names were re-extracted
+        // from Tool-role message content via split_whitespace().next(), which
+        // yields JSON fragments (messages are JSON-structured) — breaking the
+        // Jaccard similarity computation in the stuck detector.
+        loop_state.last_round_tool_names = tool_results.iter().map(|r| r.name.clone()).collect();
+
         let mut ctx_budget = crate::context_budget::ContextBudget::new(
             crate::context_budget::ContextBudgetConfig::default(),
             self.config.context_limit,
@@ -2645,6 +2772,7 @@ impl AgentRunner {
         // tool_result order to match tool_use order). We tag each task with its
         // original index and sort results after collection.
         let mut join_set: JoinSet<(usize, ToolResult)> = JoinSet::new();
+        let tool_calls_len = tool_calls.len();
 
         for (call_index, call) in tool_calls.iter().enumerate() {
             let tools = Arc::clone(&self.tools);
@@ -2662,6 +2790,8 @@ impl AgentRunner {
             let hook_manager = self.hook_manager.clone();
             let hook_session_id = self.session_id.clone();
             let hook_agent_id = self.agent_id.clone();
+            let conscious_gw = self.conscious_gateway.clone();
+            let conscious_session_id = self.session_id.clone().unwrap_or_default();
 
             join_set.spawn(async move {
                 if cancel.is_cancelled() {
@@ -2672,6 +2802,66 @@ impl AgentRunner {
                         is_error: true,
                     });
                 }
+
+                // ═══════════════════════════════════════════════════════════
+                // CONSCIOUS GATEWAY — graduated awareness pipeline
+                // When enabled, replaces the old flat policy+approval chain
+                // with the L0→L1→L2→L3→L4 consciousness pipeline.
+                // ═══════════════════════════════════════════════════════════
+                let mut effective_args_from_gateway: Option<serde_json::Value> = None;
+                if let Some(ref gw) = conscious_gw {
+                    let ctx = clawdesk_conscious::SessionContext {
+                        session_id: conscious_session_id.clone(),
+                        turn_number: call_index as u32,
+                        total_tool_calls: tool_calls_len as u32,
+                    };
+                    let outcome = gw.evaluate(&name, &args, &ctx).await;
+                    match outcome {
+                        clawdesk_conscious::GatewayOutcome::Execute { .. } => {
+                            // Approved — proceed to tool execution below
+                        }
+                        clawdesk_conscious::GatewayOutcome::Modified { modified_args, .. } => {
+                            // Approved with modified args
+                            effective_args_from_gateway = Some(modified_args);
+                        }
+                        clawdesk_conscious::GatewayOutcome::SelfBlocked { reason, .. } => {
+                            if let Some(tx) = &event_tx {
+                                if tx.receiver_count() > 0 {
+                                    let _ = tx.send(AgentEvent::ToolBlocked {
+                                        name: name.clone(),
+                                        reason: reason.clone(),
+                                    });
+                                }
+                            }
+                            return (call_index, ToolResult {
+                                tool_call_id: call_id,
+                                name,
+                                content: format!("[Conscious Gateway] Blocked: {}", reason),
+                                is_error: true,
+                            });
+                        }
+                        clawdesk_conscious::GatewayOutcome::HumanVetoed { .. }
+                        | clawdesk_conscious::GatewayOutcome::HumanTimeout { .. } => {
+                            return (call_index, ToolResult {
+                                tool_call_id: call_id,
+                                name,
+                                content: "tool execution denied by conscious gateway (human veto)".to_string(),
+                                is_error: true,
+                            });
+                        }
+                        clawdesk_conscious::GatewayOutcome::SentinelBlocked { escalation } => {
+                            return (call_index, ToolResult {
+                                tool_call_id: call_id,
+                                name,
+                                content: format!("[Sentinel] Blocked: {}", escalation.explanation),
+                                is_error: true,
+                            });
+                        }
+                    }
+                }
+
+                // Fall through to existing gate chain (policy + approval + sandbox)
+                // when conscious gateway is not set, OR after gateway approves.
 
                 if !policy.is_allowed(&name) {
                     return (call_index, ToolResult {
@@ -2722,9 +2912,12 @@ impl AgentRunner {
 
                 // Approval flow — gate tool execution on human approval
                 // if the tool is in the require_approval policy set.
+                // When the conscious gateway is active, it already handles
+                // approval (L3 veto gate), so skip the old approval chain.
                 // Session-scoped decisions are cached to avoid repeated prompts.
-                let mut effective_args = args.clone();
-                if policy.requires_approval(&name) {
+                let mut effective_args = effective_args_from_gateway.unwrap_or_else(|| args.clone());
+                let consciousness_handled = conscious_gw.is_some();
+                if !consciousness_handled && policy.requires_approval(&name) {
                     // Check session cache first (DashMap: O(1) per-shard lock).
                     let cached = approval_cache.get(&name).map(|v| v.clone());
 
@@ -2908,6 +3101,16 @@ impl AgentRunner {
                     }
                 }
 
+                // Record result in conscious gateway trace (L4 feedback loop)
+                if let Some(ref gw) = conscious_gw {
+                    gw.record_result(
+                        &tool_result.name,
+                        !tool_result.is_error,
+                        duration_ms,
+                        None,
+                    ).await;
+                }
+
                 (call_index, tool_result)
             });
         }
@@ -2944,48 +3147,62 @@ fn strip_html_tags(html: &str) -> String {
         return html.to_string();
     }
 
-    let mut result = html.to_string();
+    // G16 FIX: Single-pass O(n) HTML stripping.
+    // The previous implementation used loop { to_lowercase(); find(); format!() }
+    // per script/style tag — O(k×n) for k tags. A page with 1000 tiny <script>
+    // tags caused 1000 full-string copies.
+    //
+    // This version makes a single pass through the bytes, tracking state:
+    // - Normal: copy chars to output
+    // - InTag: skip until '>'
+    // - InScript/InStyle: skip until matching closing tag
+    let mut output = String::with_capacity(html.len());
+    let lower = html.to_lowercase(); // One single lowercase pass
+    let lower_bytes = lower.as_bytes();
+    let html_bytes = html.as_bytes();
+    let len = html_bytes.len();
+    let mut i = 0;
 
-    // Phase 1: Remove script and style blocks entirely (case-insensitive).
-    // These contain no visible content and often trigger content filters.
-    loop {
-        let lower = result.to_lowercase();
-        if let Some(start) = lower.find("<script") {
-            if let Some(end) = lower[start..].find("</script>") {
-                let remove_end = start + end + "</script>".len();
-                result = format!("{} {}", &result[..start], &result[remove_end..]);
-                continue;
+    while i < len {
+        if html_bytes[i] == b'<' {
+            // Check for <script or <style (using pre-lowered bytes)
+            if i + 7 < len && &lower_bytes[i..i + 7] == b"<script" {
+                // Skip to </script>
+                if let Some(pos) = find_closing_tag(&lower_bytes[i..], b"</script>") {
+                    i += pos + b"</script>".len();
+                    output.push(' ');
+                    continue;
+                }
+            }
+            if i + 6 < len && &lower_bytes[i..i + 6] == b"<style" {
+                // Skip to </style>
+                if let Some(pos) = find_closing_tag(&lower_bytes[i..], b"</style>") {
+                    i += pos + b"</style>".len();
+                    output.push(' ');
+                    continue;
+                }
+            }
+            // Regular HTML tag — skip until >
+            while i < len && html_bytes[i] != b'>' {
+                i += 1;
+            }
+            if i < len {
+                i += 1; // skip the '>'
+            }
+            output.push(' ');
+        } else {
+            // Copy non-tag character, respecting UTF-8 boundaries
+            if html.is_char_boundary(i) {
+                let ch = html[i..].chars().next().unwrap();
+                output.push(ch);
+                i += ch.len_utf8();
+            } else {
+                i += 1;
             }
         }
-        break;
-    }
-    loop {
-        let lower = result.to_lowercase();
-        if let Some(start) = lower.find("<style") {
-            if let Some(end) = lower[start..].find("</style>") {
-                let remove_end = start + end + "</style>".len();
-                result = format!("{} {}", &result[..start], &result[remove_end..]);
-                continue;
-            }
-        }
-        break;
     }
 
-    // Phase 2: Strip all remaining HTML tags.
-    let mut output = String::with_capacity(result.len());
-    let mut in_tag = false;
-    for ch in result.chars() {
-        if ch == '<' {
-            in_tag = true;
-        } else if ch == '>' {
-            in_tag = false;
-            output.push(' '); // Replace tag with space to preserve word boundaries.
-        } else if !in_tag {
-            output.push(ch);
-        }
-    }
-
-    // Phase 3: Collapse excessive whitespace (3+ consecutive whitespace → 2 newlines).
+    // Collapse excessive whitespace (3+ → 2 newlines)
     let mut collapsed = String::with_capacity(output.len());
     let mut ws_count = 0u32;
     for ch in output.chars() {
@@ -3001,6 +3218,13 @@ fn strip_html_tags(html: &str) -> String {
     }
 
     collapsed.trim().to_string()
+}
+
+/// Find a closing tag in a byte slice. Returns the offset of the start of the closing tag.
+fn find_closing_tag(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
 }
 
 // ══════════════════════════════════════════════════════════════════════════

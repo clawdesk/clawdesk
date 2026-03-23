@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     FinishReason, MessageRole, Provider, ProviderRequest, ProviderResponse,
-    ToolCall, ToolDefinition, TokenUsage,
+    StreamChunk, ToolCall, ToolDefinition, TokenUsage,
 };
 
 // GitHub OAuth client ID (VS Code's registered app)
@@ -612,12 +612,213 @@ impl Provider for CopilotProvider {
         })
     }
 
+    async fn stream(
+        &self,
+        request: &ProviderRequest,
+        chunk_tx: tokio::sync::mpsc::Sender<StreamChunk>,
+    ) -> Result<(), ProviderError> {
+        let api_token = self.get_api_token().await?;
+        let model = if request.model.is_empty() {
+            &self.default_model
+        } else {
+            &request.model
+        };
+
+        let tools = if !request.tools.is_empty() {
+            Some(Self::build_tools(&request.tools))
+        } else {
+            None
+        };
+
+        let body = CompletionRequest {
+            model: model.to_string(),
+            messages: Self::build_messages(request),
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            tools,
+            stream: Some(true),
+        };
+
+        let response = self
+            .client
+            .post(COPILOT_CHAT_URL)
+            .header("Authorization", format!("Bearer {api_token}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("Editor-Version", "vscode/1.85.1")
+            .header("Editor-Plugin-Version", "copilot/1.155.0")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::network_error("copilot", e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let err_body = response.text().await.unwrap_or_default();
+            return match status {
+                429 => Err(ProviderError::rate_limit("copilot", None)),
+                401 | 403 => Err(ProviderError::auth_failure("copilot", "stream auth failed")),
+                _ => Err(ProviderError::format_error(
+                    "copilot",
+                    format!("HTTP {status}: {}", err_body.chars().take(300).collect::<String>()),
+                )),
+            };
+        }
+
+        // Parse SSE event stream
+        let mut buffer = String::new();
+        let mut response = response;
+        let mut tool_calls_acc: Vec<(String, String, String)> = Vec::new(); // (id, name, args_json)
+
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| ProviderError::network_error("copilot", e.to_string()))?
+        {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(line_end) = buffer.find('\n') {
+                let line = buffer[..line_end].trim().to_string();
+                buffer = buffer[line_end + 1..].to_string();
+
+                if line.is_empty() || line.starts_with(':') {
+                    continue;
+                }
+
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data.trim() == "[DONE]" {
+                        let final_tool_calls: Vec<ToolCall> = tool_calls_acc
+                            .iter()
+                            .map(|(id, name, args)| ToolCall {
+                                id: id.clone(),
+                                name: name.clone(),
+                                arguments: serde_json::from_str(args)
+                                    .unwrap_or(serde_json::Value::String(args.clone())),
+                            })
+                            .collect();
+                        let _ = chunk_tx
+                            .send(StreamChunk {
+                                delta: String::new(),
+                                reasoning_delta: String::new(),
+                                done: true,
+                                finish_reason: Some(FinishReason::Stop),
+                                usage: None,
+                                tool_calls: final_tool_calls,
+                            })
+                            .await;
+                        return Ok(());
+                    }
+
+                    if let Ok(sse) = serde_json::from_str::<SseChunk>(data) {
+                        for choice in &sse.choices {
+                            let delta_text = choice
+                                .delta
+                                .content
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_string();
+
+                            // Accumulate tool call deltas
+                            if let Some(ref tcs) = choice.delta.tool_calls {
+                                for tc in tcs {
+                                    let idx = tc.index as usize;
+                                    while tool_calls_acc.len() <= idx {
+                                        tool_calls_acc.push((String::new(), String::new(), String::new()));
+                                    }
+                                    if let Some(ref id) = tc.id {
+                                        tool_calls_acc[idx].0 = id.clone();
+                                    }
+                                    if let Some(ref f) = tc.function {
+                                        if let Some(ref name) = f.name {
+                                            tool_calls_acc[idx].1 = name.clone();
+                                        }
+                                        if let Some(ref args) = f.arguments {
+                                            tool_calls_acc[idx].2.push_str(args);
+                                        }
+                                    }
+                                }
+                            }
+
+                            let finish = choice
+                                .finish_reason
+                                .as_deref()
+                                .map(|r| Self::parse_finish_reason(Some(r)));
+
+                            let usage = sse.usage.as_ref().map(|u| TokenUsage {
+                                input_tokens: u.prompt_tokens,
+                                output_tokens: u.completion_tokens,
+                                cache_read_tokens: None,
+                                cache_write_tokens: None,
+                            });
+
+                            let _ = chunk_tx
+                                .send(StreamChunk {
+                                    delta: delta_text,
+                                    reasoning_delta: String::new(),
+                                    done: finish.is_some(),
+                                    finish_reason: finish,
+                                    usage,
+                                    tool_calls: Vec::new(),
+                                })
+                                .await;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn health_check(&self) -> Result<(), ProviderError> {
         // Validate we can get an API token
         let _token = self.get_api_token().await?;
         debug!("copilot health check passed");
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// SSE streaming types
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SseChunk {
+    choices: Vec<SseChoice>,
+    #[serde(default)]
+    usage: Option<UsageResponse>,
+}
+
+#[derive(Deserialize)]
+struct SseChoice {
+    delta: SseDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SseDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<SseToolCallDelta>>,
+}
+
+#[derive(Deserialize)]
+struct SseToolCallDelta {
+    index: u32,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<SseFunctionDelta>,
+}
+
+#[derive(Deserialize)]
+struct SseFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

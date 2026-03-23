@@ -257,7 +257,8 @@ pub fn bridge_adapter_for(channel: Arc<dyn Channel>) -> ChannelBridgeAdapter {
         | ChannelId::Matrix
         | ChannelId::Signal
         | ChannelId::Webhook
-        | ChannelId::Mastodon => ChannelBridgeAdapter::new(channel),
+        | ChannelId::Mastodon
+        | ChannelId::Line => ChannelBridgeAdapter::new(channel),
     }
 }
 

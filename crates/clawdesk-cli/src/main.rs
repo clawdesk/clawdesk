@@ -167,6 +167,9 @@ enum Commands {
         /// Approval mode: interactive (default), auto
         #[arg(long, default_value = "interactive")]
         approval: String,
+        /// Model to use
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Pipe mode — read stdin, process with agent, write stdout
     Pipe {
@@ -431,6 +434,12 @@ enum AgentAction {
         /// Directory containing agent.toml files for multi-agent team mode
         #[arg(long)]
         team_dir: Option<String>,
+        /// Consciousness preset: autonomous, balanced, supervised, paranoid
+        #[arg(long, default_value = "balanced")]
+        consciousness_preset: String,
+        /// Enable post-turn validation: independently verify agent claims before publishing
+        #[arg(long)]
+        validate: bool,
     },
     /// Add a new agent from TOML definition or interactive wizard
     #[command(name = "add")]
@@ -558,16 +567,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let sochdb_dir = clawdesk_types::dirs::sochdb();
                 std::fs::create_dir_all(&sochdb_dir)?;
 
-                let store = match clawdesk_sochdb::SochStore::open(
-                    sochdb_dir.to_str().unwrap(),
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("⚠ SochDB locked (desktop app running?): {e}");
-                        eprintln!("  Falling back to ephemeral in-memory storage.");
-                        eprintln!("  Sessions and agent state won't persist until the desktop is closed.");
-                        clawdesk_sochdb::SochStore::open_in_memory()
-                            .map_err(|e2| format!("failed to open in-memory database: {e2}"))?
+                let store = if is_sochdb_lock_held(&sochdb_dir) {
+                    eprintln!("⚠ SochDB locked by another process (desktop app running?).");
+                    eprintln!("  Using ephemeral in-memory storage — sessions won't persist.");
+                    clawdesk_sochdb::SochStore::open_in_memory()
+                        .map_err(|e| format!("failed to open in-memory database: {e}"))?
+                } else {
+                    match clawdesk_sochdb::SochStore::open(
+                        sochdb_dir.to_str().unwrap(),
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("⚠ SochDB open failed: {e}");
+                            eprintln!("  Falling back to ephemeral in-memory storage.");
+                            clawdesk_sochdb::SochStore::open_in_memory()
+                                .map_err(|e2| format!("failed to open in-memory database: {e2}"))?
+                        }
                     }
                 };
 
@@ -890,6 +905,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 permission_mode,
                 max_tool_rounds,
                 team_dir,
+                consciousness_preset,
+                validate,
             } => {
                 let perm_mode = match permission_mode.as_str() {
                     "allowlist" => permission_modes::PermissionMode::Allowlist,
@@ -909,6 +926,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     context_limit: 200_000,
                     permission_config: perm_config,
                     team_dir: team_dir.map(std::path::PathBuf::from),
+                    consciousness_preset,
+                    validate,
                 };
                 local_agent::run_local_agent(config, cancel).await?;
             }
@@ -1015,8 +1034,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Wizard => {
             cmd_wizard().await?;
         }
-        Commands::Plan { task, approval } => {
-            cmd_plan(&cli.gateway_url, &task, &approval).await?;
+        Commands::Plan { task, approval, model } => {
+            cmd_plan(&cli.gateway_url, &task, &approval, model.as_deref()).await?;
         }
         Commands::Pipe { prompt, model } => {
             cmd_pipe(&cli.gateway_url, prompt.as_deref(), model.as_deref()).await?;
@@ -1042,31 +1061,67 @@ async fn cmd_send_message(
     let body = serde_json::json!({
         "message": text,
         "session_id": session,
-        "model": model,
+        "model": &model,
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default();
     let resp = client
         .post(&url)
         .json(&body)
         .send()
-        .await
-        .map_err(|e| format!("failed to connect to gateway at {url}: {e}"))?;
+        .await;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        eprintln!("Error {status}: {body}");
-        return Ok(());
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            let data: serde_json::Value = r.json().await?;
+            if let Some(reply) = data.get("reply").and_then(|v| v.as_str()) {
+                println!("{reply}");
+            } else if let Some(response) = data.get("response").and_then(|v| v.as_str()) {
+                println!("{response}");
+            }
+            if let Some(sid) = data.get("session_id").and_then(|v| v.as_str()) {
+                eprintln!("session: {sid}");
+            }
+            return Ok(());
+        }
+        Ok(r) => {
+            let status = r.status();
+            let body_text = r.text().await.unwrap_or_default();
+            eprintln!("Gateway returned {status}: {body_text}");
+            eprintln!("Falling back to in-process.");
+        }
+        Err(_) => {
+            eprintln!("Gateway unavailable — running in-process.");
+        }
     }
 
-    let data: serde_json::Value = resp.json().await?;
-    if let Some(reply) = data.get("reply").and_then(|v| v.as_str()) {
-        println!("{reply}");
-    }
-    if let Some(sid) = data.get("session_id").and_then(|v| v.as_str()) {
-        eprintln!("session: {sid}");
-    }
+    // In-process fallback: resolve provider and do a single-shot completion.
+    let model_name = model.as_deref().unwrap_or("default");
+    let provider = crate::local_agent::resolve_provider(model_name)
+        .map_err(|e| format!("No provider found: {e}"))?;
+
+    let request = clawdesk_providers::ProviderRequest {
+        model: model_name.to_string(),
+        messages: vec![clawdesk_providers::ChatMessage::new(
+            clawdesk_providers::MessageRole::User,
+            text.to_string(),
+        )],
+        tools: vec![],
+        max_tokens: Some(4096),
+        temperature: None,
+        stream: false,
+        system_prompt: None,
+        images: vec![],
+    };
+
+    let response = provider.complete(&request).await
+        .map_err(|e| format!("Provider error: {e}"))?;
+    println!("{}", response.content);
+
     Ok(())
 }
 
@@ -1490,9 +1545,24 @@ async fn cmd_daemon(
             let sochdb_dir = clawdesk_types::dirs::sochdb();
             std::fs::create_dir_all(&sochdb_dir)?;
 
-            let store = clawdesk_sochdb::SochStore::open(
-                sochdb_dir.to_str().unwrap(),
-            ).map_err(|e| format!("failed to open database: {e}"))?;
+            let store = if is_sochdb_lock_held(&sochdb_dir) {
+                eprintln!("⚠ SochDB locked by another process (desktop app running?).");
+                eprintln!("  Using ephemeral in-memory storage.");
+                clawdesk_sochdb::SochStore::open_in_memory()
+                    .map_err(|e| format!("failed to open in-memory database: {e}"))?
+            } else {
+                match clawdesk_sochdb::SochStore::open(
+                    sochdb_dir.to_str().unwrap(),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("⚠ SochDB open failed: {e}");
+                        eprintln!("  Falling back to ephemeral in-memory storage.");
+                        clawdesk_sochdb::SochStore::open_in_memory()
+                            .map_err(|e2| format!("failed to open in-memory database: {e2}"))?
+                    }
+                }
+            };
 
             let channels = clawdesk_channel::registry::ChannelRegistry::new();
             let mut providers = clawdesk_providers::registry::ProviderRegistry::new();
@@ -1804,30 +1874,72 @@ async fn cmd_login() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Keys are stored in: {}", creds_dir.display());
     println!();
 
-    // Read API key from environment or prompt
-    let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let openai_key = std::env::var("OPENAI_API_KEY").ok();
-
-    if let Some(key) = anthropic_key {
-        let key_path = creds_dir.join("anthropic.json");
-        let data = serde_json::json!({ "api_key": key });
-        std::fs::write(&key_path, serde_json::to_string_pretty(&data)?)?;
-        println!("  Anthropic: saved (from ANTHROPIC_API_KEY)");
-    } else {
-        println!("  Anthropic: not configured (set ANTHROPIC_API_KEY)");
+    // Helper: prompt for a key, using env var as default
+    fn prompt_key(name: &str, env_var: &str, hint: &str) -> Option<String> {
+        let existing = std::env::var(env_var).ok();
+        let prompt_msg = if let Some(ref k) = existing {
+            let masked = if k.len() > 8 { format!("{}...{}", &k[..4], &k[k.len()-4..]) } else { "****".to_string() };
+            format!("  {} [{}]: ", name, masked)
+        } else {
+            format!("  {} ({}): ", name, hint)
+        };
+        print!("{}", prompt_msg);
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            existing
+        } else {
+            Some(trimmed.to_string())
+        }
     }
 
-    if let Some(key) = openai_key {
-        let key_path = creds_dir.join("openai.json");
-        let data = serde_json::json!({ "api_key": key });
-        std::fs::write(&key_path, serde_json::to_string_pretty(&data)?)?;
-        println!("  OpenAI:    saved (from OPENAI_API_KEY)");
-    } else {
-        println!("  OpenAI:    not configured (set OPENAI_API_KEY)");
+    let providers = [
+        ("Anthropic", "ANTHROPIC_API_KEY", "sk-ant-...", "anthropic.json"),
+        ("OpenAI", "OPENAI_API_KEY", "sk-...", "openai.json"),
+        ("Google Gemini", "GEMINI_API_KEY", "AI...", "gemini.json"),
+        ("OpenRouter", "OPENROUTER_API_KEY", "sk-or-...", "openrouter.json"),
+    ];
+
+    let mut saved = 0;
+    for (name, env_var, hint, filename) in &providers {
+        if let Some(key) = prompt_key(name, env_var, hint) {
+            let key_path = creds_dir.join(filename);
+            let data = serde_json::json!({ "api_key": key });
+            std::fs::write(&key_path, serde_json::to_string_pretty(&data)?)?;
+            println!("    ✓ {} saved", name);
+            saved += 1;
+        } else {
+            println!("    – {} skipped", name);
+        }
+    }
+
+    // Also handle custom OpenAI-compatible base URL
+    print!("  OpenAI-compatible base URL (e.g. http://localhost:8000/v1): ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    let mut base_input = String::new();
+    std::io::stdin().read_line(&mut base_input).ok();
+    let base_trimmed = base_input.trim();
+    if !base_trimmed.is_empty() {
+        let env_path = clawdesk_types::dirs::dot_clawdesk().join(".env");
+        let mut env_content = std::fs::read_to_string(&env_path).unwrap_or_default();
+        // Remove existing OPENAI_BASE_URL line
+        env_content = env_content.lines()
+            .filter(|l| !l.starts_with("OPENAI_BASE_URL="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !env_content.is_empty() && !env_content.ends_with('\n') {
+            env_content.push('\n');
+        }
+        env_content.push_str(&format!("OPENAI_BASE_URL={}\n", base_trimmed));
+        std::fs::write(&env_path, &env_content)?;
+        println!("    ✓ Base URL saved to .env");
     }
 
     println!();
-    println!("Done. Run 'clawdesk doctor' to verify.");
+    println!("Done. {} provider(s) configured.", saved);
+    println!("Run 'clawdesk doctor' to verify.");
     Ok(())
 }
 
@@ -1897,13 +2009,51 @@ fn cmd_rag(action: RagAction) -> Result<(), Box<dyn std::error::Error + Send + S
 }
 
 /// Open a SochStore for direct CLI access (config set/get, doctor).
+/// Fast-fails to in-memory if the lock is held by another live process,
+/// avoiding the 18-second retry timeout.
 fn open_store() -> Result<clawdesk_sochdb::SochStore, Box<dyn std::error::Error + Send + Sync>> {
     let sochdb_dir = clawdesk_types::dirs::sochdb();
     std::fs::create_dir_all(&sochdb_dir)?;
-    let store = clawdesk_sochdb::SochStore::open(
+    if is_sochdb_lock_held(&sochdb_dir) {
+        eprintln!("⚠ SochDB locked by another process (desktop app running?).");
+        eprintln!("  Using ephemeral in-memory storage.");
+        return clawdesk_sochdb::SochStore::open_in_memory()
+            .map_err(|e| format!("failed to open in-memory database: {e}").into());
+    }
+    let store = match clawdesk_sochdb::SochStore::open(
         sochdb_dir.to_str().unwrap(),
-    ).map_err(|e| format!("failed to open database: {e}"))?;
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("⚠ SochDB open failed: {e}");
+            eprintln!("  Falling back to ephemeral in-memory storage.");
+            clawdesk_sochdb::SochStore::open_in_memory()
+                .map_err(|e2| format!("failed to open in-memory database: {e2}"))?
+        }
+    };
     Ok(store)
+}
+
+/// Check if the SochDB lock file is held by a live process (fast, non-blocking).
+pub(crate) fn is_sochdb_lock_held(sochdb_dir: &std::path::Path) -> bool {
+    for lock_name in &[".lock", "db.lock"] {
+        let lock_path = sochdb_dir.join(lock_name);
+        if let Ok(contents) = std::fs::read_to_string(&lock_path) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                let alive = std::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if alive {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ── New strategic command implementations ─────────────────────
@@ -2007,12 +2157,13 @@ async fn cmd_plan(
     gateway: &str,
     task: &str,
     approval: &str,
+    model_override: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Planning: {}", task);
     println!("Approval mode: {}", approval);
     println!();
 
-    // Send to gateway's plan endpoint
+    // Try gateway first
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{}/api/v1/plan", gateway))
@@ -2020,6 +2171,7 @@ async fn cmd_plan(
             "task": task,
             "approval_mode": approval,
         }))
+        .timeout(std::time::Duration::from_secs(5))
         .send()
         .await;
 
@@ -2027,13 +2179,53 @@ async fn cmd_plan(
         Ok(r) if r.status().is_success() => {
             let body: serde_json::Value = r.json().await.unwrap_or_default();
             println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+            return Ok(());
         }
-        Ok(r) => {
-            eprintln!("Plan failed: HTTP {}", r.status());
+        _ => {
+            eprintln!("Gateway unavailable — running plan in-process.");
         }
-        Err(e) => {
-            eprintln!("Plan failed: {}", e);
-            eprintln!("Is the gateway running? Try: clawdesk gateway run");
+    }
+
+    // In-process fallback: ask the LLM to generate a plan.
+    let model = model_override.unwrap_or("default");
+    let provider = crate::local_agent::resolve_provider(model)
+        .map_err(|e| format!("No provider found: {e}"))?;
+
+    let plan_prompt = format!(
+        "You are a planning assistant. Generate a step-by-step execution plan for the following task.\n\
+        Format each step as: [N] Description\n\
+        Mark steps that require tool access with [TOOL] prefix.\n\n\
+        Task: {}",
+        task
+    );
+
+    let request = clawdesk_providers::ProviderRequest {
+        model: model.to_string(),
+        messages: vec![clawdesk_providers::ChatMessage::new(
+            clawdesk_providers::MessageRole::User,
+            plan_prompt,
+        )],
+        tools: vec![],
+        max_tokens: Some(2048),
+        temperature: None,
+        stream: false,
+        system_prompt: None,
+        images: vec![],
+    };
+
+    let response = provider.complete(&request).await
+        .map_err(|e| format!("Provider error: {e}"))?;
+    println!("{}", response.content);
+
+    if approval == "interactive" {
+        print!("\nApprove this plan? [y/N]: ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if input.trim().eq_ignore_ascii_case("y") {
+            println!("Plan approved. Execute with: clawdesk agent run --model {} --allow-all-tools", model);
+        } else {
+            println!("Plan rejected.");
         }
     }
 
@@ -2061,7 +2253,12 @@ async fn cmd_pipe(
         None => stdin_text,
     };
 
-    let client = reqwest::Client::new();
+    // Try gateway first
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default();
     let mut body = serde_json::json!({
         "message": full_prompt,
     });
@@ -2078,21 +2275,41 @@ async fn cmd_pipe(
     match resp {
         Ok(r) if r.status().is_success() => {
             let result: serde_json::Value = r.json().await.unwrap_or_default();
-            if let Some(text) = result["response"].as_str() {
+            if let Some(text) = result["reply"].as_str().or_else(|| result["response"].as_str()) {
                 print!("{}", text);
             } else {
                 print!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
             }
+            return Ok(());
         }
-        Ok(r) => {
-            eprintln!("Error: HTTP {}", r.status());
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
+        _ => {
+            // Gateway unavailable or failed — run in-process
+            eprintln!("Gateway unavailable — running in-process.");
         }
     }
+
+    // In-process fallback: resolve provider and do a single-shot completion.
+    let model_name = model.unwrap_or("default");
+    let provider = crate::local_agent::resolve_provider(model_name)
+        .map_err(|e| format!("No provider found: {e}"))?;
+
+    let request = clawdesk_providers::ProviderRequest {
+        model: model_name.to_string(),
+        messages: vec![clawdesk_providers::ChatMessage::new(
+            clawdesk_providers::MessageRole::User,
+            full_prompt,
+        )],
+        tools: vec![],
+        max_tokens: Some(4096),
+        temperature: None,
+        stream: false,
+        system_prompt: None,
+        images: vec![],
+    };
+
+    let response = provider.complete(&request).await
+        .map_err(|e| format!("Provider error: {e}"))?;
+    print!("{}", response.content);
 
     Ok(())
 }

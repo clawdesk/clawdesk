@@ -372,6 +372,18 @@ impl DiagnosticCheck for SochDbCheck {
             };
         }
 
+        // Fast-path: if lock is held by another process, report it immediately
+        // instead of waiting 18 seconds through the retry loop.
+        if crate::is_sochdb_lock_held(&sochdb_dir) {
+            return DiagResult {
+                name: self.name().to_string(),
+                status: CheckStatus::Warn,
+                detail: format!("locked by desktop app ({})", sochdb_dir.display()),
+                duration_ms: start.elapsed().as_millis() as u64,
+                repair_hint: Some("close the desktop app to use CLI with persistent storage".to_string()),
+            };
+        }
+
         match clawdesk_sochdb::SochStore::open(sochdb_dir.to_str().unwrap_or(".")) {
             Ok(_store) => DiagResult {
                 name: self.name().to_string(),

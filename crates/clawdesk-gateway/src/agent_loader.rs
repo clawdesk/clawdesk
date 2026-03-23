@@ -141,6 +141,92 @@ pub struct AgentSnapshot {
 /// Map of agent ID → snapshot. This is the unit of atomic swap.
 pub type AgentConfigMap = HashMap<String, AgentSnapshot>;
 
+// ---------------------------------------------------------------------------
+// Workspace agent TOML schema (used by agents/ directory templates)
+// ---------------------------------------------------------------------------
+
+/// Top-level workspace agent definition (separate [model], [system_prompt] tables).
+#[derive(Debug, Clone, Deserialize)]
+struct WorkspaceAgentDefinition {
+    agent: WorkspaceAgentSection,
+    #[serde(default)]
+    model: Option<WorkspaceModelSection>,
+    #[serde(default)]
+    system_prompt: Option<WorkspaceSystemPromptSection>,
+    #[serde(default)]
+    capabilities: Option<WorkspaceCapabilitiesSection>,
+    #[serde(default)]
+    resources: Option<WorkspaceResourcesSection>,
+    #[serde(default)]
+    skills: Option<WorkspaceSkillsSection>,
+    #[serde(default)]
+    traits: Option<serde_json::Value>, // Preserved but not yet consumed
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkspaceAgentSection {
+    #[serde(alias = "id")]
+    name: Option<String>,
+    id: Option<String>,
+    #[serde(alias = "display_name")]
+    description: Option<String>,
+    display_name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    author: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkspaceModelSection {
+    #[serde(default = "default_model")]
+    model: String,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    temperature: Option<f32>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    fallback: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkspaceSystemPromptSection {
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    guidelines: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct WorkspaceCapabilitiesSection {
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    network: Vec<String>,
+    #[serde(default)]
+    shell: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct WorkspaceResourcesSection {
+    #[serde(default)]
+    pub max_tokens_per_hour: Option<u64>,
+    #[serde(default)]
+    pub max_tool_iterations: Option<u32>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct WorkspaceSkillsSection {
+    #[serde(default)]
+    activate: Vec<String>,
+}
+
 /// Result of a full agent scan.
 #[derive(Debug)]
 pub struct AgentLoadResult {
@@ -160,11 +246,23 @@ pub struct AgentLoadResult {
 /// into `AgentSnapshot` instances for the runtime registry.
 pub struct AgentLoader {
     agents_dir: PathBuf,
+    /// Optional secondary directory for bundled agent templates.
+    /// Agents from here are loaded only if not already present in the primary dir.
+    bundled_dir: Option<PathBuf>,
 }
 
 impl AgentLoader {
     pub fn new(agents_dir: PathBuf) -> Self {
-        Self { agents_dir }
+        Self { agents_dir, bundled_dir: None }
+    }
+
+    /// Set a secondary directory for bundled agent templates.
+    /// Agents from this directory are loaded as fallbacks (lower priority).
+    pub fn with_bundled_dir(mut self, dir: PathBuf) -> Self {
+        if dir.exists() {
+            self.bundled_dir = Some(dir);
+        }
+        self
     }
 
     /// Scan the agents directory and load all valid agent definitions.
@@ -172,18 +270,46 @@ impl AgentLoader {
     /// Returns `(loaded_snapshots, errors)`. Errors in individual agents
     /// do not prevent others from loading.
     pub fn load_fresh(&self) -> AgentLoadResult {
+        // Scan primary directory (~/.clawdesk/agents/)
+        let mut result = self.scan_directory(&self.agents_dir);
+
+        info!(
+            loaded = result.agents.len(),
+            errors = result.errors.len(),
+            dir = %self.agents_dir.display(),
+            "primary agent definitions scanned"
+        );
+
+        // Also scan bundled agents directory (lower priority — don't overwrite user agents).
+        if let Some(ref bundled) = self.bundled_dir {
+            if bundled.exists() {
+                let bundled_result = self.scan_directory(bundled);
+                let mut bundled_count = 0;
+                for (id, snapshot) in bundled_result.agents {
+                    if !result.agents.contains_key(&id) {
+                        debug!(id = %id, source = %bundled.display(), "loaded bundled agent");
+                        result.agents.insert(id, snapshot);
+                        bundled_count += 1;
+                    }
+                }
+                if bundled_count > 0 {
+                    info!(loaded = bundled_count, dir = %bundled.display(), "bundled agent definitions loaded");
+                }
+                result.errors.extend(bundled_result.errors);
+            }
+        }
+
+        result
+    }
+
+    /// Scan a single directory for agent definitions.
+    fn scan_directory(&self, dir: &Path) -> AgentLoadResult {
         let mut agents = HashMap::new();
         let mut errors = Vec::new();
 
-        if !self.agents_dir.exists() {
-            debug!(dir = %self.agents_dir.display(), "agents directory does not exist");
-            return AgentLoadResult { agents, errors };
-        }
-
-        let entries = match std::fs::read_dir(&self.agents_dir) {
+        let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
-                warn!(dir = %self.agents_dir.display(), %e, "failed to read agents directory");
                 errors.push(("_dir".into(), e.to_string()));
                 return AgentLoadResult { agents, errors };
             }
@@ -191,6 +317,23 @@ impl AgentLoader {
 
         for entry in entries.flatten() {
             let path = entry.path();
+
+            // Handle top-level .toml files (e.g., agents/coder.toml)
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "toml") {
+                match self.load_agent(&path) {
+                    Ok(snapshot) => {
+                        agents.insert(snapshot.id.clone(), snapshot);
+                    }
+                    Err(e) => {
+                        let name = path.file_stem()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        errors.push((name, e));
+                    }
+                }
+                continue;
+            }
+
             if !path.is_dir() {
                 continue;
             }
@@ -198,7 +341,6 @@ impl AgentLoader {
             let toml_path = path.join("agent.toml");
             let md_path = path.join("instructions.md");
 
-            // Prefer agent.toml; fall back to instructions.md
             let load_result = if toml_path.exists() {
                 self.load_agent(&toml_path)
             } else if md_path.exists() {
@@ -209,42 +351,53 @@ impl AgentLoader {
 
             match load_result {
                 Ok(snapshot) => {
-                    info!(
-                        id = %snapshot.id,
-                        model = %snapshot.model,
-                        skills = snapshot.active_skills.len(),
-                        "loaded agent definition"
-                    );
                     agents.insert(snapshot.id.clone(), snapshot);
                 }
                 Err(e) => {
-                    let dir_name = path
-                        .file_name()
+                    let dir_name = path.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    warn!(agent = %dir_name, %e, "failed to load agent definition");
                     errors.push((dir_name, e));
                 }
             }
         }
 
-        info!(
-            loaded = agents.len(),
-            errors = errors.len(),
-            "agent definitions scanned"
-        );
-
         AgentLoadResult { agents, errors }
     }
 
     /// Load a single agent.toml file.
+    ///
+    /// Supports two TOML schemas:
+    /// 1. Runtime format: `[agent]` with nested persona/tools/skills/subagents
+    /// 2. Workspace format: separate `[agent]`, `[model]`, `[system_prompt]`,
+    ///    `[capabilities]`, `[resources]` tables (as used in the agents/ directory)
     fn load_agent(&self, toml_path: &Path) -> Result<AgentSnapshot, String> {
         let content = std::fs::read_to_string(toml_path)
             .map_err(|e| format!("read failed: {e}"))?;
 
-        let def: AgentDefinition = toml::from_str(&content)
-            .map_err(|e| format!("TOML parse error: {e}"))?;
+        // Try runtime format first, then fall back to workspace format.
+        if let Ok(def) = toml::from_str::<AgentDefinition>(&content) {
+            return self.snapshot_from_runtime_format(&def, &content, toml_path);
+        }
 
+        // Fallback: try workspace format (separate [model], [system_prompt], etc.)
+        if let Ok(def) = toml::from_str::<WorkspaceAgentDefinition>(&content) {
+            return self.snapshot_from_workspace_format(&def, &content, toml_path);
+        }
+
+        Err(format!(
+            "TOML does not match runtime or workspace agent schema: {}",
+            toml_path.display()
+        ))
+    }
+
+    /// Convert runtime-format AgentDefinition → AgentSnapshot.
+    fn snapshot_from_runtime_format(
+        &self,
+        def: &AgentDefinition,
+        content: &str,
+        toml_path: &Path,
+    ) -> Result<AgentSnapshot, String> {
         let agent = &def.agent;
 
         // Build system prompt from persona.
@@ -269,6 +422,70 @@ impl AgentLoader {
             active_skills: agent.skills.activate.clone(),
             can_spawn: agent.subagents.can_spawn.clone(),
             max_depth: agent.subagents.max_depth,
+            source_path: toml_path.to_path_buf(),
+            config_hash,
+        })
+    }
+
+    /// Convert workspace-format agent TOML → AgentSnapshot.
+    ///
+    /// The workspace format uses separate `[model]`, `[system_prompt]`,
+    /// `[capabilities]`, `[resources]` tables — the format used by the
+    /// bundled agent templates in the `agents/` directory.
+    fn snapshot_from_workspace_format(
+        &self,
+        def: &WorkspaceAgentDefinition,
+        content: &str,
+        toml_path: &Path,
+    ) -> Result<AgentSnapshot, String> {
+        let id = def.agent.name.clone()
+            .or_else(|| def.agent.id.clone())
+            .unwrap_or_else(|| {
+                toml_path.parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+
+        let display_name = def.agent.description.clone()
+            .or_else(|| def.agent.display_name.clone())
+            .unwrap_or_else(|| id.clone());
+
+        let model = def.model.as_ref()
+            .map(|m| m.model.clone())
+            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+
+        let system_prompt = def.system_prompt.as_ref()
+            .map(|s| s.content.clone())
+            .unwrap_or_default();
+
+        let tools_allow = def.capabilities.as_ref()
+            .map(|c| c.tools.clone())
+            .unwrap_or_default();
+
+        let active_skills = def.skills.as_ref()
+            .map(|s| s.activate.clone())
+            .unwrap_or_default();
+
+        let config_hash = sha256_hex(content.as_bytes());
+
+        info!(
+            id = %id,
+            model = %model,
+            format = "workspace",
+            "loaded workspace-format agent definition"
+        );
+
+        Ok(AgentSnapshot {
+            id,
+            display_name,
+            model,
+            system_prompt,
+            tools_allow,
+            tools_deny: vec![],
+            active_skills,
+            can_spawn: vec![],
+            max_depth: 2,
             source_path: toml_path.to_path_buf(),
             config_hash,
         })

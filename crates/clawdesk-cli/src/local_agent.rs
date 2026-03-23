@@ -50,6 +50,10 @@ pub struct LocalAgentConfig {
     pub permission_config: PermissionConfig,
     /// Optional team directory containing agent.toml files for multi-agent mode.
     pub team_dir: Option<PathBuf>,
+    /// Consciousness preset: autonomous, balanced, supervised, paranoid.
+    pub consciousness_preset: String,
+    /// Enable post-turn validation to independently verify agent claims.
+    pub validate: bool,
 }
 
 impl Default for LocalAgentConfig {
@@ -63,6 +67,8 @@ impl Default for LocalAgentConfig {
             context_limit: 128_000,
             permission_config: PermissionConfig::default(),
             team_dir: None,
+            consciousness_preset: "balanced".to_string(),
+            validate: false,
         }
     }
 }
@@ -143,10 +149,76 @@ fn build_tool_policy(allow_all: bool) -> ToolPolicy {
     }
 }
 
+/// Auto-detect the best available model when none is explicitly specified.
+///
+/// Priority: channel_provider.json → Ollama first model → error
+pub(crate) fn resolve_default_model() -> String {
+    // 1. Check channel_provider.json for user-configured model
+    let cp_path = clawdesk_types::dirs::dot_clawdesk().join("channel_provider.json");
+    if let Ok(raw) = std::fs::read_to_string(&cp_path) {
+        if let Ok(cp) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(model) = cp.get("model").and_then(|v| v.as_str()) {
+                if !model.is_empty() {
+                    return model.to_string();
+                }
+            }
+        }
+    }
+
+    // 2. Check env vars for provider hints
+    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        return "claude-sonnet-4-20250514".to_string();
+    }
+    if std::env::var("OPENAI_API_KEY").is_ok() {
+        return "gpt-4o".to_string();
+    }
+
+    // 3. Fallback to Ollama default
+    "llama3.2".to_string()
+}
+
 /// Resolve the LLM provider from environment variables.
 ///
-/// Priority: ANTHROPIC_API_KEY → OPENAI_API_KEY → AZURE_OPENAI_API_KEY → OPENROUTER_API_KEY
-fn resolve_provider(model: &str) -> Result<Arc<dyn Provider>, String> {
+/// Priority: channel_provider.json → ANTHROPIC_API_KEY → OPENAI_API_KEY → AZURE_OPENAI_API_KEY → OPENROUTER_API_KEY → Ollama
+pub(crate) fn resolve_provider(model: &str) -> Result<Arc<dyn Provider>, String> {
+    // Handle "default"/"auto" sentinel: re-resolve to an actual model
+    let effective_model = if model == "default" || model == "auto" || model.is_empty() {
+        resolve_default_model()
+    } else {
+        model.to_string()
+    };
+    resolve_provider_for_model(&effective_model)
+}
+
+fn resolve_provider_for_model(model: &str) -> Result<Arc<dyn Provider>, String> {
+    // Check channel_provider.json first for OpenAI-compatible servers
+    let cp_path = clawdesk_types::dirs::dot_clawdesk().join("channel_provider.json");
+    if let Ok(raw) = std::fs::read_to_string(&cp_path) {
+        if let Ok(cp) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let cp_model = cp.get("model").and_then(|v| v.as_str()).unwrap_or("");
+            let base_url = cp.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
+            let api_key = cp.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+            let provider_name = cp.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+
+            // If model matches the configured model, or model is the default,
+            // use this provider
+            if !base_url.is_empty() && (model == cp_model || model == "default") {
+                if provider_name.contains("Local") || provider_name == "local_compatible" {
+                    info!(provider = "local_compatible", base_url = %base_url, model = %model, "using Local (OpenAI Compatible)");
+                    let config = clawdesk_providers::compatible::CompatibleConfig::new(
+                        "local_compatible",
+                        base_url,
+                        api_key,
+                    )
+                    .with_default_model(model.to_string());
+                    return Ok(Arc::new(
+                        clawdesk_providers::compatible::OpenAiCompatibleProvider::new(config),
+                    ));
+                }
+            }
+        }
+    }
+
     // Anthropic
     if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
         info!(provider = "anthropic", "using Anthropic API");
@@ -276,6 +348,8 @@ struct LocalRunnerFactory {
     tool_policy: Arc<ToolPolicy>,
     cancel: CancellationToken,
     team_agents: Option<Arc<HashMap<String, AgentDefinition>>>,
+    conscious_gateway: Arc<clawdesk_conscious::ConsciousGateway>,
+    post_turn_validator: Option<Arc<clawdesk_agents::post_turn_validator::PostTurnValidator>>,
 }
 
 impl RunnerFactory for LocalRunnerFactory {
@@ -292,16 +366,23 @@ impl RunnerFactory for LocalRunnerFactory {
             );
         }
 
-        Ok(
-            AgentRunner::new(
+        let runner = AgentRunner::new(
                 Arc::clone(&self.provider),
                 Arc::new(registry),
                 config.clone(),
                 self.cancel.child_token(),
             )
             .with_approval_gate(Arc::clone(&self.approval_gate))
-            .with_tool_policy(Arc::clone(&self.tool_policy)),
-        )
+            .with_tool_policy(Arc::clone(&self.tool_policy))
+            .with_conscious_gateway(Arc::clone(&self.conscious_gateway));
+
+        let runner = if let Some(ref validator) = self.post_turn_validator {
+            runner.with_post_turn_validator(Arc::clone(validator))
+        } else {
+            runner
+        };
+
+        Ok(runner)
     }
 }
 
@@ -388,7 +469,7 @@ pub async fn run_local_agent(
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Resolve provider
-    let model = config.model.clone().unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+    let model = config.model.clone().unwrap_or_else(|| resolve_default_model());
     let provider = resolve_provider(&model)?;
 
     // Register tools
@@ -507,13 +588,83 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
     // Build tool policy
     let policy = Arc::new(build_tool_policy(config.allow_all_tools));
 
+    // ── Conscious Gateway — graduated awareness pipeline ─────────────
+    let conscious_gateway = {
+        use clawdesk_conscious::awareness::LevelThresholds;
+        use clawdesk_conscious::veto::{CliVetoGate, VetoConfig};
+        use clawdesk_conscious::workspace::GlobalWorkspace;
+
+        let thresholds = match config.consciousness_preset.as_str() {
+            "paranoid" => LevelThresholds::paranoid(),
+            "supervised" => LevelThresholds::supervised(),
+            "autonomous" => LevelThresholds::autonomous(),
+            _ => LevelThresholds::balanced(),
+        };
+
+        let workspace = Arc::new(GlobalWorkspace::new(1024));
+
+        let gw = clawdesk_conscious::ConsciousGateway::new()
+            .with_veto_gate(Arc::new(CliVetoGate))
+            .with_veto_config(VetoConfig {
+                timeout_seconds: 30,
+                allow_modification: true,
+            })
+            .with_global_workspace(Arc::clone(&workspace));
+        gw.set_thresholds(thresholds).await;
+
+        let gw = Arc::new(gw);
+
+        // Spawn the background cognitive event loop
+        {
+            let rx = workspace.subscribe();
+            let gw_loop = Arc::clone(&gw);
+            tokio::spawn(clawdesk_agents::cognitive_loop::cognitive_event_loop(rx, gw_loop));
+        }
+
+        info!(preset = %config.consciousness_preset, "conscious gateway initialized");
+        gw
+    };
+
+    // ── Post-turn validator ───────────────────────────────────
+    let post_turn_validator = if config.validate {
+        info!("post-turn validation enabled");
+        let validation_config = clawdesk_agents::post_turn_validator::ValidationConfig {
+            enabled: true,
+            min_tool_calls: 2,
+            timeout_secs: 60,
+            max_validator_rounds: 8,
+        };
+        Some(Arc::new(clawdesk_agents::post_turn_validator::PostTurnValidator::new(
+            validation_config,
+            Arc::clone(&provider),
+            config.workspace.clone(),
+        )))
+    } else {
+        None
+    };
+
     let sochdb_dir = dirs::sochdb();
     std::fs::create_dir_all(&sochdb_dir)?;
-    let durable_store = Arc::new(SochStore::open(
-        sochdb_dir
-            .to_str()
-            .ok_or("SochDB path contains invalid UTF-8")?,
-    )?);
+    let durable_store = Arc::new(if crate::is_sochdb_lock_held(&sochdb_dir) {
+        eprintln!("⚠ SochDB locked by another process (desktop app running?).");
+        eprintln!("  Using ephemeral in-memory storage.");
+        SochStore::open_in_memory()
+            .map_err(|e| format!("failed to open in-memory database: {e}"))?
+    } else {
+        match SochStore::open(
+            sochdb_dir
+                .to_str()
+                .ok_or("SochDB path contains invalid UTF-8")?,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("⚠ SochDB open failed: {e}");
+                eprintln!("  Falling back to ephemeral in-memory storage.");
+                SochStore::open_in_memory()
+                    .map_err(|e2| format!("failed to open in-memory database: {e2}"))?
+            }
+        }
+    });
     let checkpoint_store = Arc::new(CheckpointStore::new(Arc::clone(&durable_store)));
     let journal = Arc::new(ActivityJournal::new(Arc::clone(&durable_store)));
     let lease_manager = Arc::new(LeaseManager::new(Arc::clone(&durable_store), 300));
@@ -529,6 +680,8 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
             tool_policy: Arc::clone(&policy),
             cancel: cancel.clone(),
             team_agents: team_agents.clone(),
+            conscious_gateway: Arc::clone(&conscious_gateway),
+            post_turn_validator: post_turn_validator.clone(),
         }),
         "cli-local".to_string(),
     ));
@@ -833,7 +986,7 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
         history.push(ChatMessage::new(MessageRole::User, input.as_str()));
 
         // Build runner for this turn
-        let runner = AgentRunner::new(
+        let mut runner = AgentRunner::new(
             Arc::clone(&provider),
             Arc::clone(&tool_registry),
             agent_config.clone(),
@@ -841,7 +994,12 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
         )
         .with_approval_gate(Arc::clone(&gate))
         .with_tool_policy(Arc::clone(&policy))
+        .with_conscious_gateway(Arc::clone(&conscious_gateway))
         .with_events(event_tx.clone());
+
+        if let Some(ref validator) = post_turn_validator {
+            runner = runner.with_post_turn_validator(Arc::clone(validator));
+        }
 
         // Subscribe to events for streaming output
         let mut event_rx = event_tx.subscribe();
@@ -876,6 +1034,13 @@ NEVER write specialist content yourself. For EVERY user request, your workflow i
                     AgentEvent::Done { total_rounds } => {
                         debug!(rounds = total_rounds, "turn complete");
                         break;
+                    }
+                    AgentEvent::ValidationComplete { verified, claims_passed, claims_failed } => {
+                        if verified {
+                            eprintln!("  [validate] ✓ {claims_passed} claims verified");
+                        } else {
+                            eprintln!("  [validate] ⚠ {claims_passed} passed, {claims_failed} failed");
+                        }
                     }
                     _ => {}
                 }

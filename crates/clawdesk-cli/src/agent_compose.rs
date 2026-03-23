@@ -57,7 +57,7 @@ pub struct AgentSection {
 }
 
 fn default_model() -> String {
-    "claude-sonnet-4-20250514".to_string()
+    "auto".to_string()
 }
 
 /// Agent persona (soul, guidelines).
@@ -447,7 +447,7 @@ pub async fn cmd_agent_add(
             r#"[agent]
 id = "{id}"
 display_name = "{name}"
-model = "claude-sonnet-4-20250514"
+model = "auto"
 
 [agent.persona]
 soul = """

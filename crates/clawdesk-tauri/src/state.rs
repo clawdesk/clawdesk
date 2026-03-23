@@ -205,6 +205,7 @@ pub enum TauriAgentEvent {
     RetryStatus { attempt: usize, max_attempts: usize, reason: String },
     SkillDecision { skill_id: String, included: bool, reason: String, token_cost: usize, budget_remaining: usize },
     InputRequired { question: String, options: Vec<String>, urgent: bool },
+    ValidationComplete { verified: bool, claims_passed: usize, claims_failed: usize },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -719,6 +720,12 @@ pub struct AppState {
     /// to construct one-shot providers for inbound channel messages (Discord, etc.).
     /// Wrapped in Arc so CronAgentExecutor can share the same instance.
     pub channel_provider: Arc<RwLock<Option<ChannelProviderOverride>>>,
+
+    // ── Embedded gateway state (for provider hot-swap) ──
+    /// Reference to the embedded gateway's shared state. When the UI updates a
+    /// provider config, we hot-swap the gateway's ProviderRegistry via ArcSwap
+    /// so CLI clients see the change immediately without restarting.
+    pub gateway_state: RwLock<Option<Arc<clawdesk_gateway::state::GatewayState>>>,
 
     // ── Clipboard (hot cache — persisted to SochDB) ──
     pub clipboard_history: RwLock<Vec<ClipboardEntry>>,
@@ -3561,6 +3568,9 @@ impl AppState {
 
             // ── Channel provider override (hydrated from disk if available) ──
             channel_provider: shared_channel_provider,
+
+            // ── Gateway state (set later when embedded gateway starts) ──
+            gateway_state: RwLock::new(None),
 
             // ── Clipboard (hydrated from SochDB) ──
             clipboard_history: RwLock::new(clipboard_history),

@@ -46,6 +46,7 @@ pub mod config_mvcc;
 pub mod config_rollback;
 pub mod config_validator;
 pub mod connection_mode;
+pub mod degraded_mode;
 pub mod durable_response_store;
 pub mod error;
 pub mod fanout;

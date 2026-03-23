@@ -80,7 +80,7 @@ use tracing::{debug, info, warn, error};
 /// - Retry on transient errors (`TransactionConflict`)
 /// - Fail-fast on corruption (`WalCorruption`)
 /// - Distinguish "key not found" from "database broken"
-fn map_sochdb_error(e: sochdb::error::ClientError, context: &str) -> StorageError {
+pub(crate) fn map_sochdb_error(e: sochdb::error::ClientError, context: &str) -> StorageError {
     use sochdb::error::ClientError;
     match e {
         // ── Key/path not found → StorageError::NotFound ──────────
@@ -632,6 +632,25 @@ impl SochStore {
         let _guard = self.op_lock.read();
         self.connection.scan_range(start, end)
             .map_err(|e| map_sochdb_error(e, "scan_range"))
+    }
+
+    /// BLOCKER 4 FIX: Scan prefix and return only the last `limit` entries.
+    ///
+    /// This still does a full prefix scan internally (SochDB's B-tree doesn't
+    /// support reverse iteration natively), but:
+    /// 1. Avoids deserializing all N entries — only returns the tail slice
+    /// 2. Avoids allocating N deserialized objects in the caller
+    /// 3. The scan itself is O(N) in key-value pairs, but the values are
+    ///    returned as raw bytes without copying until the caller deserializes
+    ///
+    /// For true O(log N + k) performance, SochDB would need a reverse iterator.
+    /// This is marked as a TODO for the SochDB engine.
+    pub fn scan_tail(&self, prefix: &str, limit: usize) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let _guard = self.op_lock.read();
+        let results = self.connection.scan(prefix)
+            .map_err(|e| map_sochdb_error(e, "scan_tail"))?;
+        let start = results.len().saturating_sub(limit);
+        Ok(results.into_iter().skip(start).collect())
     }
 
     // =========================================================================

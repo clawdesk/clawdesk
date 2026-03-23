@@ -211,8 +211,13 @@ impl Tool for ShellTool {
         // ── Background execution ──
         if background {
             let session_id = format!("bg_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x"));
-            let child = cmd.spawn()
+            let mut child = cmd.spawn()
                 .map_err(|e| format!("failed to spawn background process: {e}"))?;
+
+            // Take stdout/stderr handles BEFORE wait — stream output in real-time.
+            let child_stdout = child.stdout.take();
+            let child_stderr = child.stderr.take();
+
             let entry = Arc::new(BgProcess {
                 child: tokio::sync::Mutex::new(Some(child)),
                 stdout_buf: tokio::sync::Mutex::new(String::new()),
@@ -223,7 +228,54 @@ impl Tool for ShellTool {
             });
             BG_PROCESSES.write().await.insert(session_id.clone(), Arc::clone(&entry));
 
-            // Spawn a reader task to collect output
+            // Spawn separate stdout reader task — streams lines into buffer continuously
+            if let Some(stdout) = child_stdout {
+                let entry_out = Arc::clone(&entry);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncBufReadExt, BufReader};
+                    let mut reader = BufReader::new(stdout);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line).await {
+                            Ok(0) => break, // EOF
+                            Ok(_) => {
+                                let mut buf = entry_out.stdout_buf.lock().await;
+                                // Cap buffer at 1 MB to prevent memory exhaustion
+                                if buf.len() < 1_048_576 {
+                                    buf.push_str(&line);
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
+            }
+
+            // Spawn separate stderr reader task
+            if let Some(stderr) = child_stderr {
+                let entry_err = Arc::clone(&entry);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncBufReadExt, BufReader};
+                    let mut reader = BufReader::new(stderr);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line).await {
+                            Ok(0) => break,
+                            Ok(_) => {
+                                let mut buf = entry_err.stderr_buf.lock().await;
+                                if buf.len() < 1_048_576 {
+                                    buf.push_str(&line);
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
+            }
+
+            // Spawn exit-code watcher task
             let entry_clone = Arc::clone(&entry);
             let sid = session_id.clone();
             tokio::spawn(async move {
@@ -232,24 +284,29 @@ impl Tool for ShellTool {
                     let status = child.wait().await;
                     let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
                     *entry_clone.exit_code.lock().await = Some(code);
-                    // Read any remaining output
-                    if let Some(ref mut stdout) = child.stdout {
-                        use tokio::io::AsyncReadExt;
-                        let mut buf = Vec::new();
-                        let _ = stdout.read_to_end(&mut buf).await;
-                        let mut out = entry_clone.stdout_buf.lock().await;
-                        out.push_str(&String::from_utf8_lossy(&buf));
-                    }
-                    if let Some(ref mut stderr) = child.stderr {
-                        use tokio::io::AsyncReadExt;
-                        let mut buf = Vec::new();
-                        let _ = stderr.read_to_end(&mut buf).await;
-                        let mut err = entry_clone.stderr_buf.lock().await;
-                        err.push_str(&String::from_utf8_lossy(&buf));
-                    }
                     info!(session = %sid, code, "background process completed");
                 }
             });
+
+            // Evict completed background processes older than 30 minutes (GAP 6 fix)
+            {
+                let mut procs = BG_PROCESSES.write().await;
+                let cutoff = std::time::Duration::from_secs(30 * 60);
+                let stale: Vec<String> = procs.iter()
+                    .filter(|(_, p)| {
+                        p.started_at.elapsed() > cutoff
+                            && p.exit_code.try_lock().map(|c| c.is_some()).unwrap_or(false)
+                    })
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for key in stale {
+                    procs.remove(&key);
+                }
+                // Cap max concurrent background processes at 20
+                if procs.len() > 20 {
+                    return Err("Too many background processes (max 20). Use bg_kill to stop some first.".to_string());
+                }
+            }
 
             return Ok(format!(
                 "Background process started.\nSession ID: {}\nCommand: {}\n\nUse shell_exec with command \"bg_status {}\" to check progress, or \"bg_kill {}\" to stop it.",
@@ -955,6 +1012,27 @@ impl Tool for FileEditTool {
         // Try exact match first
         let match_count = normalized.matches(&old_normalized).count();
 
+        // Special case: file is empty or near-empty and old_text doesn't match.
+        // LLMs often try file_edit on a freshly-created empty file, expecting it
+        // to insert content. Instead of failing, write new_text as the full content.
+        if match_count == 0 && normalized.trim().is_empty() && !new_normalized.is_empty() {
+            let final_content = if uses_crlf {
+                new_normalized.replace('\n', "\r\n")
+            } else {
+                new_normalized.clone()
+            };
+
+            tokio::fs::write(&resolved, final_content.as_bytes())
+                .await
+                .map_err(|e| format!("failed to write file: {e}"))?;
+
+            let new_lines = new_normalized.lines().count();
+            return Ok(format!(
+                "File '{}' was empty — wrote {} lines of new content.",
+                path_str, new_lines
+            ));
+        }
+
         if match_count == 1 {
             // Exact match — perform replacement
             let new_content = normalized.replacen(&old_normalized, &new_normalized, 1);
@@ -1077,10 +1155,15 @@ impl Tool for FileEditTool {
             ));
         }
 
+        let file_len = normalized.len();
+        let hint = if file_len < 200 {
+            " If you want to replace the entire file content, use file_write instead."
+        } else {
+            " Use file_read to check the current file content first."
+        };
         Err(format!(
-            "old_text not found in '{}'. The text you're trying to replace does not exist in the file. \
-            Use file_read to check the current file content first.",
-            path_str
+            "old_text not found in '{}'.{}",
+            path_str, hint
         ))
     }
 }

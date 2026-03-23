@@ -183,14 +183,34 @@ impl AgentAccuracy {
         }
     }
 
+    /// G11 FIX: Update accuracy with cold-start protection.
+    ///
+    /// Instead of jumping to 1.0 after a single agreement, use a
+    /// Bayesian-inspired warm-up: blend the neutral prior (0.5) with
+    /// observations until we have enough rounds for statistical confidence.
+    /// Minimum 3 rounds before the agent's weight can exceed 0.7.
     pub fn update(&mut self, agreed_with_consensus: bool) {
         let sample = if agreed_with_consensus { 1.0 } else { 0.0 };
         if self.rounds == 0 {
-            self.accuracy = sample;
+            // First observation: blend with prior instead of replacing it
+            self.accuracy = 0.5 * 0.5 + 0.5 * sample; // Anchored to prior
         } else {
             self.accuracy = self.alpha * sample + (1.0 - self.alpha) * self.accuracy;
         }
         self.rounds += 1;
+    }
+
+    /// G11 FIX: Effective weight for voting — applies cold-start damping.
+    /// New agents (< min_rounds rounds) have their weight reduced to prevent
+    /// a Byzantine agent from gaining full weight after a single agreement.
+    pub fn effective_weight(&self, min_rounds: u64) -> f64 {
+        if self.rounds < min_rounds {
+            // Linear ramp: weight grows from 0.3 to 1.0 over min_rounds
+            let ramp = 0.3 + 0.7 * (self.rounds as f64 / min_rounds as f64);
+            self.accuracy * ramp
+        } else {
+            self.accuracy
+        }
     }
 }
 
@@ -209,6 +229,10 @@ pub struct PbftState {
     pub prepares: HashMap<String, PbftMessage>,
     /// Collected COMMIT messages.
     pub commits: HashMap<String, PbftMessage>,
+    /// G10 FIX: View number for leader rotation on failed rounds.
+    pub view: u64,
+    /// G10 FIX: Consecutive failed rounds (triggers view change).
+    pub consecutive_failures: u32,
 }
 
 /// PBFT consensus engine.
@@ -235,12 +259,18 @@ impl PbftConsensus {
                 leader: None,
                 prepares: HashMap::new(),
                 commits: HashMap::new(),
+                view: 0,
+                consecutive_failures: 0,
             },
             history: Vec::new(),
         })
     }
 
     /// Start a new consensus round with a proposal.
+    ///
+    /// G10 FIX: If the previous round failed, increment the view number
+    /// to rotate the leader. The caller should use `suggest_leader()` to
+    /// pick the next leader based on the current view.
     pub fn propose(&mut self, leader: &str, decision: &str) -> Result<u64, ConsensusError> {
         self.state.round += 1;
         self.state.phase = PbftPhase::Prepare;
@@ -251,11 +281,57 @@ impl PbftConsensus {
 
         info!(
             round = self.state.round,
+            view = self.state.view,
             leader,
             "PBFT: new consensus round proposed"
         );
 
         Ok(self.state.round)
+    }
+
+    /// G10 FIX: Trigger a view change — rotates the leader for the next round.
+    /// Called when a round fails (Byzantine leader or timeout).
+    pub fn view_change(&mut self, agent_ids: &[String]) -> Option<String> {
+        self.state.view += 1;
+        self.state.consecutive_failures += 1;
+        self.state.phase = PbftPhase::PrePrepare;
+        self.state.proposal = None;
+        self.state.prepares.clear();
+        self.state.commits.clear();
+
+        if agent_ids.is_empty() {
+            warn!("PBFT view change: no agents available");
+            return None;
+        }
+
+        // Round-robin leader selection based on view number
+        let leader_idx = (self.state.view as usize) % agent_ids.len();
+        let new_leader = agent_ids[leader_idx].clone();
+
+        info!(
+            view = self.state.view,
+            new_leader = %new_leader,
+            consecutive_failures = self.state.consecutive_failures,
+            "PBFT: view change — rotating leader"
+        );
+
+        self.state.leader = Some(new_leader.clone());
+        Some(new_leader)
+    }
+
+    /// G10 FIX: Suggest which agent should lead the next round,
+    /// based on current view number and agent accuracy history.
+    pub fn suggest_leader(&self, agent_ids: &[String]) -> Option<String> {
+        if agent_ids.is_empty() {
+            return None;
+        }
+        let idx = (self.state.view as usize) % agent_ids.len();
+        Some(agent_ids[idx].clone())
+    }
+
+    /// Get the current view number.
+    pub fn view(&self) -> u64 {
+        self.state.view
     }
 
     /// Submit a PREPARE vote for the current round.
@@ -318,10 +394,15 @@ impl PbftConsensus {
                 continue; // Skip low-confidence votes.
             }
 
+            // G11 FIX: Use effective_weight() instead of raw accuracy.
+            // Raw accuracy allows a new agent to reach 0.75 after a single
+            // agreement and get near-full voting weight. effective_weight()
+            // applies a linear ramp that keeps new agents dampened until they
+            // have enough rounds for statistical confidence.
             let accuracy_weight = self
                 .agent_accuracy
                 .get(agent_id)
-                .map(|a| a.accuracy)
+                .map(|a| a.effective_weight(3))
                 .unwrap_or(0.5);
 
             let effective = msg.confidence * accuracy_weight;

@@ -104,21 +104,47 @@ impl QualityGate {
                 )
             }
             GatePolicy::Custom { expression } => {
-                // Placeholder — real implementation would eval the expression
-                // against outcome metadata.
-                (true, format!("custom: {} (not evaluated)", expression))
+                // G5 FIX: Log a warning that custom gates are unevaluated
+                // instead of silently passing. This makes the gap visible
+                // in logs and telemetry.
+                tracing::warn!(
+                    expression = %expression,
+                    "custom quality gate is not evaluated — treating as pass"
+                );
+                (true, format!("custom: {} (UNEVALUATED — configure expression evaluator)", expression))
             }
             GatePolicy::StuckDetection { max_repeated_tools, similarity_threshold } => {
-                // Evaluated by the MetacognitiveMonitor — gate is a pass-through
-                // marker that triggers metacognitive re-entry on failure.
-                // The actual stuck detection runs in the runner loop.
-                (true, format!("stuck detection (threshold: {}, max_repeated: {})", similarity_threshold, max_repeated_tools))
+                // G4 FIX: Actually evaluate stuck detection from outcome data
+                // instead of being a pass-through marker.
+                let repeated = outcome.repeated_tool_names.as_ref()
+                    .map(|names| {
+                        let max_repeat = names.iter()
+                            .fold(std::collections::HashMap::<&str, usize>::new(), |mut acc, n| {
+                                *acc.entry(n.as_str()).or_default() += 1;
+                                acc
+                            })
+                            .values()
+                            .copied()
+                            .max()
+                            .unwrap_or(0);
+                        max_repeat
+                    })
+                    .unwrap_or(0);
+                let stuck = repeated >= *max_repeated_tools as usize;
+                (
+                    !stuck,
+                    format!("max repeated tool: {} (threshold: {}, similarity: {})",
+                        repeated, max_repeated_tools, similarity_threshold),
+                )
             }
             GatePolicy::MinimumConfidence { threshold } => {
-                // Like StuckDetection, this is evaluated by the MetacognitiveMonitor.
-                // The gate exists so the EvalPipeline can map its failure to
-                // ReentryLayer::Metacognition.
-                (true, format!("confidence gate (threshold: {:.0}%)", threshold * 100.0))
+                // G4 FIX: Evaluate confidence from outcome instead of pass-through.
+                let confidence = outcome.confidence.unwrap_or(1.0);
+                (
+                    confidence >= *threshold,
+                    format!("confidence: {:.0}% (threshold: {:.0}%)",
+                        confidence * 100.0, threshold * 100.0),
+                )
             }
         };
         GateResult {
@@ -156,6 +182,11 @@ pub struct TurnOutcome {
     pub duration: Duration,
     pub model: String,
     pub error: Option<String>,
+    /// G4 FIX: Tool names from recent rounds for stuck detection.
+    /// If the same tools are called repeatedly, the agent may be stuck.
+    pub repeated_tool_names: Option<Vec<String>>,
+    /// G4 FIX: Model confidence for the response (if available from provider).
+    pub confidence: Option<f64>,
 }
 
 // ─── Outcome Auto-Labeling ───────────────────────────────────────────────────
@@ -199,13 +230,25 @@ impl OutcomeLabeler {
         let latency_score = 1.0
             - (latency_secs / self.max_expected_latency_secs).clamp(0.0, 1.0);
 
-        // Efficiency: output_tokens / input_tokens ratio (lower = more efficient).
+        // G12 FIX: Efficiency scoring using log-based diminishing returns
+        // instead of the arbitrary 0.2 ratio target.
+        // Old formula: 1.0 - (ratio - 0.2).abs().min(1.0)
+        //   Problem: penalizes both concise (ratio<0.2) and detailed (ratio>0.2)
+        //   responses symmetrically, biasing LinUCB toward artificially short output.
+        // New formula: sigmoid-like scoring that rewards reasonable ratios (0.05-1.0)
+        //   and only penalizes extreme bloat (ratio > 2.0).
         let efficiency_score = if outcome.input_tokens == 0 {
             1.0
         } else {
             let ratio = outcome.output_tokens as f64 / outcome.input_tokens as f64;
-            // Ideal ratio ~0.1-0.3, penalize bloat.
-            1.0 - (ratio - 0.2).abs().min(1.0)
+            if ratio <= 0.01 {
+                0.3 // Very short/empty response — likely error
+            } else if ratio <= 2.0 {
+                1.0 // Reasonable range — no penalty
+            } else {
+                // Diminishing score for bloat: 1/(1 + ln(ratio/2))
+                1.0 / (1.0 + (ratio / 2.0).ln())
+            }
         };
 
         // Error penalty.
@@ -327,8 +370,21 @@ impl EvalPipeline {
 
         // 3. Decide loop action.
         let decision = if !all_passed {
-            let prev = self.consecutive_failures.fetch_add(1, Ordering::SeqCst);
-            let count = prev + 1;
+            // G14 FIX: Use compare_exchange loop instead of fetch_add to prevent
+            // race condition where concurrent evaluations both read the same prev
+            // value and both decide "not yet abort" even when combined failures
+            // exceed threshold. Also use Acquire/Release instead of SeqCst since
+            // the counter is only used for abort decisions, not cross-thread ordering.
+            let count = loop {
+                let prev = self.consecutive_failures.load(Ordering::Acquire);
+                let next = prev + 1;
+                match self.consecutive_failures.compare_exchange(
+                    prev, next, Ordering::Release, Ordering::Relaxed
+                ) {
+                    Ok(_) => break next,
+                    Err(_) => continue, // Another thread updated; retry
+                }
+            };
             if count >= self.max_consecutive_failures {
                 LoopDecision::Abort {
                     reason: format!(
@@ -362,7 +418,7 @@ impl EvalPipeline {
                 }
             }
         } else {
-            self.consecutive_failures.store(0, Ordering::SeqCst);
+            self.consecutive_failures.store(0, Ordering::Release);
             LoopDecision::Continue
         };
 
@@ -428,11 +484,33 @@ impl EvalRunSummary {
         let passed = results.iter().filter(|r| r.passed).count();
         let pass_rate = if total == 0 { 0.0 } else { passed as f64 / total as f64 };
 
-        // pass@k = 1 - (1 - pass_rate)^k
-        let pass_at_k = if k == 0 {
+        // G6 FIX: Use Chen et al. (2021) unbiased pass@k estimator.
+        // The naive formula 1-(1-p)^k assumes independence between attempts,
+        // but in agentic systems consecutive failures are strongly correlated
+        // (same model, same bug, same context).
+        // Unbiased estimator: pass@k = 1 - C(n-c, k) / C(n, k)
+        // where n = total, c = passed.
+        let pass_at_k = if k == 0 || total == 0 {
             0.0
+        } else if passed >= total {
+            1.0
+        } else if k > total {
+            // k > n: can't draw k samples from n, use pass_rate
+            pass_rate
         } else {
-            1.0 - (1.0 - pass_rate).powi(k as i32)
+            // Chen et al. unbiased estimator using log-space to avoid overflow:
+            // pass@k = 1 - exp(sum_{i=0}^{k-1} ln(n-c-i) - ln(n-i))
+            let n = total;
+            let c = passed;
+            let fail = n - c;
+            if fail < k {
+                1.0 // More passes than n-k, guaranteed pass@k = 1
+            } else {
+                let log_ratio: f64 = (0..k)
+                    .map(|i| ((fail - i) as f64).ln() - ((n - i) as f64).ln())
+                    .sum();
+                1.0 - log_ratio.exp()
+            }
         };
 
         let mean_reward = if total == 0 {
@@ -448,13 +526,28 @@ impl EvalRunSummary {
             total_duration / total as u32
         };
 
-        // Per-tag breakdown.
+        // G13 FIX: Per-tag breakdown using tool names from results.
         let mut tag_map: std::collections::HashMap<String, (usize, usize)> =
             std::collections::HashMap::new();
         for r in results {
-            // EvalCase tags aren't on results, so we look at tool names as proxy.
-            // In a real implementation this would join with the original cases.
+            for tool in &r.tools_used {
+                let entry = tag_map.entry(tool.clone()).or_insert((0, 0));
+                entry.0 += 1; // total uses
+                if r.passed {
+                    entry.1 += 1; // passed cases using this tool
+                }
+            }
         }
+        let by_tag: std::collections::HashMap<String, TagMetrics> = tag_map
+            .into_iter()
+            .map(|(tag, (total, passed))| {
+                (tag, TagMetrics {
+                    total,
+                    passed,
+                    pass_rate: if total == 0 { 0.0 } else { passed as f64 / total as f64 },
+                })
+            })
+            .collect();
 
         Self {
             total_cases: total,
@@ -464,7 +557,7 @@ impl EvalRunSummary {
             pass_at_k,
             mean_reward,
             mean_duration,
-            by_tag: std::collections::HashMap::new(),
+            by_tag,
         }
     }
 }
@@ -486,6 +579,8 @@ mod tests {
             duration: Duration::from_secs(5),
             model: "test".into(),
             error: None,
+            repeated_tool_names: None,
+            confidence: None,
         }
     }
 

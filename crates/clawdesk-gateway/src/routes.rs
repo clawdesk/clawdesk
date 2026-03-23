@@ -18,6 +18,63 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 use crate::thread_ownership::AcquireResult;
 
+// ── Security gate adapters ─────────────────────────────────────────────────
+// Bridge clawdesk-security (concrete) → clawdesk-agents (trait), respecting
+// hexagonal dependency inversion. Equivalent to Tauri's adapters in commands.rs.
+
+/// Sandbox policy gate — blocks tools whose required isolation level exceeds
+/// what the platform provides.
+struct GatewaySandboxGateAdapter {
+    engine: Arc<clawdesk_security::sandbox_policy::SandboxPolicyEngine>,
+}
+
+#[async_trait::async_trait]
+impl clawdesk_agents::runner::SandboxGate for GatewaySandboxGateAdapter {
+    fn check_policy(&self, tool_name: &str) -> Result<(), String> {
+        use clawdesk_security::sandbox_policy::SandboxDecision;
+        match self.engine.decide(tool_name) {
+            SandboxDecision::Allow { .. } => Ok(()),
+            SandboxDecision::Block { required, available, tool_name } => {
+                Err(format!(
+                    "tool '{}' requires {} isolation but platform only supports {}",
+                    tool_name, required, available
+                ))
+            }
+        }
+    }
+}
+
+/// Egress gate — per-endpoint network access control with SSRF prevention.
+struct GatewayEgressGateAdapter {
+    policy: Arc<std::sync::RwLock<clawdesk_security::NetworkEgressPolicy>>,
+}
+
+#[async_trait::async_trait]
+impl clawdesk_agents::runner::EgressGate for GatewayEgressGateAdapter {
+    fn check_egress(
+        &self,
+        tool_name: &str,
+        host: &str,
+        port: u16,
+        method: Option<&str>,
+        is_tls: bool,
+    ) -> Result<bool, String> {
+        let policy = self.policy.read().map_err(|e| format!("egress policy lock poisoned: {e}"))?;
+        let http_method = method.and_then(clawdesk_security::HttpMethod::from_str_loose);
+        match policy.evaluate(tool_name, host, port, http_method, is_tls) {
+            clawdesk_security::EgressDecision::Allow { .. } => Ok(true),
+            clawdesk_security::EgressDecision::RequireApproval { reason, .. } => {
+                warn!(tool_name, host, port, %reason, "Egress requires approval (gateway: auto-deny)");
+                Ok(false)
+            }
+            clawdesk_security::EgressDecision::Deny { reason } => {
+                warn!(tool_name, host, port, %reason, "Egress denied");
+                Err(reason)
+            }
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
@@ -106,6 +163,25 @@ pub async fn send_message(
     }
 
     let response = async {
+
+    // ── Security scan on user input (parity with Tauri CascadeScanner) ──
+    let scan = state.scanner.scan(&req.message);
+    if !scan.passed {
+        let critical: Vec<String> = scan
+            .findings
+            .iter()
+            .filter(|f| f.severity == clawdesk_types::security::Severity::Critical
+                     || f.severity == clawdesk_types::security::Severity::High)
+            .map(|f| format!("{}: {}", f.rule, f.description))
+            .collect();
+        if !critical.is_empty() {
+            warn!(findings = ?critical, "Gateway message blocked by security scanner");
+            return Err(ApiError::Forbidden(
+                format!("Message blocked by security scanner: {}", critical.join("; "))
+            ));
+        }
+    }
+
     let session_key = SessionKey::from(session_id.clone());
 
     // Load or create session
@@ -125,7 +201,7 @@ pub async fn send_message(
     // --- Thread-as-Agent: ensure this thread has an AgentCard registered ---
     // Every thread is lazily registered as an A2A-capable agent on first
     // message, making it discoverable for task delegation by other threads.
-    let model_for_agent = session.model.as_deref().unwrap_or("sonnet").to_string();
+    let model_for_agent = session.model.as_deref().unwrap_or("default").to_string();
     let agent_id = format!("thread-{}", &thread_id);
     {
         // Build the card using the public fn and upsert by agent_id key
@@ -182,17 +258,83 @@ pub async fn send_message(
         })
         .collect();
 
-    // Resolve agent persona and model from agent registry FIRST.
-    // Priority: agent_id in request → "default" agent → first available → fallback.
+    // ── Task-Driven Agent Discovery ─────────────────────────────────
+    // Instead of the old static agent_id lookup, we now do task-based
+    // discovery: classify the user's message into domains, then find the
+    // best matching agent from the registry using tags + capabilities.
+    //
+    // Priority chain (most specific → least specific):
+    // 1. Explicit agent_id in request → direct lookup (user override)
+    // 2. Task classification → match against agent tags/descriptions
+    // 3. "default" agent → named fallback
+    // 4. Hardcoded default → last resort
     let (agent_persona, agent_model_override) = {
         let registry = state.agent_registry.load();
-        let snapshot = req.agent_id.as_deref()
-            .and_then(|id| registry.get(id))
-            .or_else(|| registry.get("default"))
-            .or_else(|| registry.values().next());
+
+        // Priority 1: Explicit agent_id (user knows what they want)
+        let explicit = req.agent_id.as_deref()
+            .and_then(|id| registry.get(id));
+
+        let snapshot = if let Some(agent) = explicit {
+            debug!(agent_id = %agent.id, selection = "explicit", "Agent selected by ID");
+            Some(agent)
+        } else if !registry.is_empty() {
+            // Priority 2: Task-based discovery from the user's message
+            let user_text = &req.message;
+
+            let domains = clawdesk_agents::auto_compose::classify_task(user_text);
+            debug!(?domains, "Task domains classified from message");
+
+            // Score each agent by tag overlap with classified domains
+            let domain_tags: Vec<&str> = domains.iter().map(|d| match d {
+                clawdesk_agents::auto_compose::TaskDomain::Coding => "coding",
+                clawdesk_agents::auto_compose::TaskDomain::Research => "research",
+                clawdesk_agents::auto_compose::TaskDomain::Writing => "writing",
+                clawdesk_agents::auto_compose::TaskDomain::DataAnalysis => "data",
+                clawdesk_agents::auto_compose::TaskDomain::Design => "design",
+                clawdesk_agents::auto_compose::TaskDomain::DevOps => "devops",
+                clawdesk_agents::auto_compose::TaskDomain::Security => "security",
+                clawdesk_agents::auto_compose::TaskDomain::Testing => "testing",
+                clawdesk_agents::auto_compose::TaskDomain::General => "general",
+            }).collect();
+
+            // Find best matching agent: score = number of matching domain keywords
+            // in the agent's system_prompt or id. Simple keyword overlap for now;
+            // can be upgraded to embedding-based semantic matching later.
+            let best = registry.values()
+                .filter(|a| a.id != "default") // Don't match "default" by content
+                .max_by_key(|agent| {
+                    let id_lower = agent.id.to_lowercase();
+                    let prompt_lower = agent.system_prompt.to_lowercase();
+                    domain_tags.iter()
+                        .filter(|&&tag| id_lower.contains(tag) || prompt_lower.contains(tag))
+                        .count()
+                })
+                .filter(|agent| {
+                    // Only use if at least one domain tag matches
+                    let id_lower = agent.id.to_lowercase();
+                    let prompt_lower = agent.system_prompt.to_lowercase();
+                    domain_tags.iter().any(|&tag| id_lower.contains(tag) || prompt_lower.contains(tag))
+                });
+
+            if let Some(agent) = best {
+                debug!(agent_id = %agent.id, selection = "task_match", ?domains, "Agent selected by task classification");
+                Some(agent)
+            } else {
+                // Priority 3: Named "default" fallback
+                let default = registry.get("default")
+                    .or_else(|| registry.values().next());
+                if let Some(agent) = default {
+                    debug!(agent_id = %agent.id, selection = "fallback", "Agent selected as fallback");
+                }
+                default
+            }
+        } else {
+            None
+        };
+
         match snapshot {
             Some(agent) => {
-                debug!(agent_id = %agent.id, "Using agent from registry");
                 (agent.system_prompt.clone(), Some(agent.model.clone()))
             }
             None => {
@@ -208,12 +350,13 @@ pub async fn send_message(
     } else if let Some(ref m) = session.model {
         m.as_str()
     } else if let Some(ref m) = agent_model_override {
-        if !m.is_empty() { m.as_str() } else { "sonnet" }
+        if !m.is_empty() { m.as_str() } else { "default" }
     } else {
-        "sonnet"
+        "default"
     };
 
-    // Resolve model alias to full model ID
+    // Resolve model alias to full model ID.
+    // "default" is a sentinel: provider.complete() will use its configured default model.
     let effective_model_id = match effective_model_name {
         "haiku" => "claude-haiku-4-20250514".to_string(),
         "sonnet" => "claude-sonnet-4-20250514".to_string(),
@@ -224,16 +367,33 @@ pub async fn send_message(
 
     // Resolve provider based on the effective model
     let provider_registry = state.providers.load();
-    let provider_key = match effective_model_name {
-        m if m.contains("haiku") || m.contains("sonnet") || m.contains("opus") || m.contains("claude") => "anthropic",
-        m if m.starts_with("gpt") || m.starts_with("o1") || m.starts_with("o3") => "openai",
-        m if m.starts_with("gemini") => "gemini",
-        m if m.contains("local") || m.starts_with("llama") || m.starts_with("deepseek") => "ollama",
-        other => other,
-    };
 
-    let provider = provider_registry
-        .get(provider_key)
+    // First, try to find a provider that explicitly lists this model.
+    // This handles Ollama models (qwen2.5:3b, etc.) and any provider
+    // that reports its available models via Provider::models().
+    let provider = provider_registry.list().iter()
+        .filter_map(|name| provider_registry.get(name))
+        .find(|p| p.models().iter().any(|m| m == effective_model_name))
+        .or_else(|| {
+            // Second, use pattern matching for well-known provider families.
+            let provider_key = match effective_model_name {
+                m if m.contains("haiku") || m.contains("sonnet") || m.contains("opus") || m.contains("claude") => "anthropic",
+                m if m.starts_with("gpt") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") => "openai",
+                m if m.starts_with("gemini") => "gemini",
+                m if m.contains("qwen") || m.starts_with("llama") || m.starts_with("deepseek")
+                     || m.starts_with("mistral") || m.starts_with("phi") || m.starts_with("gemma")
+                     || m.contains(":") => "ollama",
+                m if m.contains("grok") => "local_compatible",
+                _ => "",
+            };
+            if !provider_key.is_empty() {
+                provider_registry.get(provider_key)
+            } else {
+                None
+            }
+        })
+        // Third, try local_compatible (OpenAI-compatible server), then default.
+        .or_else(|| provider_registry.get("local_compatible"))
         .or_else(|| provider_registry.default_provider())
         .ok_or_else(|| {
             ApiError::Internal(format!(
@@ -341,12 +501,44 @@ pub async fn send_message(
         config,
         state.cancel.clone(),
     )
-    .without_sandbox()
+    // Wire sandbox + egress gates (parity with Tauri desktop path).
+    .with_sandbox_gate(Arc::new(GatewaySandboxGateAdapter {
+        engine: Arc::clone(&state.sandbox_engine),
+    }))
+    .with_egress_gate(Arc::new(GatewayEgressGateAdapter {
+        policy: Arc::clone(&state.egress_policy),
+    }))
     .with_hook_manager(std::sync::Arc::clone(&state.hook_manager))
-    .with_session_context(session_id.clone(), agent_id.clone());
+    .with_session_context(session_id.clone(), agent_id.clone())
+    .with_event_bus(Arc::clone(&state.event_bus));
 
     if let Some(sp) = skill_provider {
         builder = builder.with_skill_provider(sp);
+    }
+
+    // Wire cross-session memory recall if memory subsystem is available.
+    if let Some(ref mem) = state.memory {
+        let mem = std::sync::Arc::clone(mem);
+        let recall_fn: clawdesk_agents::MemoryRecallFn = std::sync::Arc::new(move |query: String| {
+            let mem = std::sync::Arc::clone(&mem);
+            Box::pin(async move {
+                match mem.recall(&query, Some(10)).await {
+                    Ok(results) => results
+                        .into_iter()
+                        .filter_map(|r| {
+                            let content = r.content?;
+                            Some(clawdesk_agents::MemoryRecallResult {
+                                content,
+                                relevance: r.score as f64,
+                                source: Some("memory".to_string()),
+                            })
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                }
+            })
+        });
+        builder = builder.with_memory_recall(recall_fn);
     }
 
     let runner = builder.build();

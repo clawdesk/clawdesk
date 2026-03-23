@@ -31,6 +31,7 @@ pub mod openrouter;
 pub mod plugin_provider;
 pub mod profile_rotation;
 pub mod provider_spec;
+pub mod qwen;
 pub mod registry;
 pub mod reliable;
 pub mod router;

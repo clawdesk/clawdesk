@@ -24,6 +24,7 @@ pub mod config;
 pub mod cron;
 pub mod error;
 pub mod failover;
+pub mod i18n;
 pub mod isolation;
 pub mod media;
 pub mod message;

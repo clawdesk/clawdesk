@@ -52,6 +52,13 @@ pub struct StreamCheckpoint {
     pub offset: usize,
     /// Hash of the assembled text at this checkpoint.
     pub hash: u64,
+    /// TASK 4 FIX: Accumulated hash power state p^n mod M.
+    /// Enables O(1) hash resumption from checkpoint instead of O(N)
+    /// full-prefix rehash. Without this, reconnecting from a checkpoint
+    /// requires re-hashing the entire assembled text prefix, costing
+    /// O(kL) total for k reconnections during a generation of length L.
+    /// With this field, resumption is O(1) and total cost is O(L + k).
+    pub hash_power: u64,
 }
 
 /// Server-side delta stream encoder.
@@ -111,6 +118,7 @@ impl DeltaEncoder {
                 last_seq: seq,
                 offset: self.assembled.len(),
                 hash,
+                hash_power: self.rolling_hash.power(),
             };
             self.checkpoints.push_back(cp);
             if self.checkpoints.len() > self.max_checkpoints {
@@ -213,9 +221,15 @@ impl DeltaDecoder {
 
     /// Resume from a checkpoint (for reconnection).
     ///
-    /// Computes rolling hash from the provided text (one-time O(|text|) cost).
+    /// TASK 4 FIX: O(1) hash state restoration via persisted p_power.
+    /// Previous version called RollingHash::from_data() which is O(N)
+    /// on the entire assembled prefix. Now restores hash state from
+    /// the checkpoint's hash + hash_power fields in O(1).
     pub fn from_checkpoint(checkpoint: &StreamCheckpoint, assembled_so_far: String) -> Self {
-        let rolling_hash = RollingHash::from_data(assembled_so_far.as_bytes());
+        let rolling_hash = RollingHash::from_checkpoint_state(
+            checkpoint.hash,
+            checkpoint.hash_power,
+        );
         Self {
             assembled: assembled_so_far,
             last_seq: Some(checkpoint.last_seq),
@@ -316,6 +330,7 @@ impl DeltaDecoder {
             last_seq: seq,
             offset: self.assembled.len(),
             hash: self.current_hash(),
+            hash_power: self.rolling_hash.power(),
         })
     }
 
@@ -362,11 +377,13 @@ const HASH_BASE: u64 = 131;
 #[derive(Debug, Clone)]
 struct RollingHash {
     hash: u64,
+    /// TASK 4 FIX: Track accumulated power p^n mod M for O(1) checkpoint resume.
+    p_power: u64,
 }
 
 impl RollingHash {
     fn new() -> Self {
-        Self { hash: 0 }
+        Self { hash: 0, p_power: 1 }
     }
 
     /// Initialize from existing data (one-time O(|data|) cost).
@@ -374,6 +391,11 @@ impl RollingHash {
         let mut h = Self::new();
         h.append(data);
         h
+    }
+
+    /// TASK 4 FIX: Restore from checkpoint state in O(1).
+    fn from_checkpoint_state(hash: u64, p_power: u64) -> Self {
+        Self { hash, p_power }
     }
 
     /// Append bytes and update the hash in O(|data|).
@@ -386,14 +408,19 @@ impl RollingHash {
         let p_pow = mod_pow(HASH_BASE, data.len() as u64);
         let chunk_hash = hash_bytes(data);
         self.hash = mod_add(mod_mul(self.hash, p_pow), chunk_hash);
+        // TASK 4 FIX: Track accumulated power for checkpoint persistence.
+        self.p_power = mod_mul(self.p_power, p_pow);
     }
 
-    /// Get the current hash value.
     fn value(&self) -> u64 {
         self.hash
     }
 
-    /// Compute hash from scratch (for non-append operations / verification).
+    /// Get accumulated power p^n mod M (for checkpoint).
+    fn power(&self) -> u64 {
+        self.p_power
+    }
+
     fn compute(data: &[u8]) -> u64 {
         hash_bytes(data)
     }

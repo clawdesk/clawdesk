@@ -48,6 +48,13 @@ pub struct AgentCard {
     /// Agent metadata (arbitrary key-value pairs).
     #[serde(default)]
     pub metadata: serde_json::Value,
+    /// TASK 2 FIX: Domain-specific custom tags that don't map to
+    /// the CapabilityId enum. Preserves tags like "hipaa", "ecommerce",
+    /// "app-store" that would otherwise be silently dropped by from_tag().
+    /// The multi-agent coordinator uses these for semantic matching alongside
+    /// the typed CapabilityId lattice.
+    #[serde(default)]
+    pub custom_tags: std::collections::HashSet<String>,
 }
 
 /// Agent endpoint configuration.
@@ -132,6 +139,7 @@ impl AgentCard {
             protocol_versions: vec!["1.0".into()],
             max_concurrent_tasks: Some(10),
             metadata: serde_json::Value::Null,
+            custom_tags: std::collections::HashSet::new(),
         }
     }
 

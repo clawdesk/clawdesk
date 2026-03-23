@@ -28,6 +28,7 @@ clawdesk-channel = { workspace = true }
 clawdesk-providers = { workspace = true }
 clawdesk-agents = { workspace = true }
 clawdesk-sochdb = { workspace = true }
+clawdesk-memory = { workspace = true }
 clawdesk-plugin = { workspace = true }
 clawdesk-cron = { workspace = true, optional = true }
 clawdesk-bus = { workspace = true }

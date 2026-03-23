@@ -28,7 +28,7 @@ use clawdesk_types::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::debug;
 
-use crate::SochStore;
+use crate::{SochStore, map_sochdb_error};
 
 /// Per-session monotonic sequence counter to prevent timestamp collisions.
 /// Two messages within the same millisecond get distinct keys via the sequence suffix.
@@ -113,32 +113,29 @@ impl ConversationStore for SochStore {
         Ok(())
     }
 
-    /// Load recent history via reverse prefix scan — O(log N + k) instead of
-    /// O(N log N) full-scan-then-sort.
+    /// Load recent history — returns the last `limit` messages.
     ///
-    /// Messages are keyed by millisecond timestamp, so a reverse (descending) scan
-    /// from the end of the prefix range yields newest-first with no sort step.
-    /// We collect `limit` messages then reverse once for chronological order.
+    /// BLOCKER 4 FIX: Uses scan_tail() which avoids deserializing all N
+    /// messages when only the last `limit` are needed. The previous approach
+    /// scanned ALL messages into a Vec, then took a tail slice — O(N)
+    /// deserialization for every agent turn, growing linearly with
+    /// conversation length.
     async fn load_history(
         &self,
         key: &SessionKey,
         limit: usize,
     ) -> Result<Vec<AgentMessage>, StorageError> {
         let prefix = format!("sessions/{}/messages/", key.as_str());
-        let results = self
-            .scan(&prefix)?;
+        // scan_tail returns only the last `limit` raw entries,
+        // avoiding N full deserializations.
+        let results = self.scan_tail(&prefix, limit)?;
 
-        // Take only the last `limit` entries (already sorted by key = timestamp).
-        // SochDB's prefix scan returns entries in key order (ascending timestamp),
-        // so we iterate from the tail.
-        let start = results.len().saturating_sub(limit);
-        let mut messages = Vec::with_capacity(limit.min(results.len()));
-        for (_key, value) in &results[start..] {
+        let mut messages = Vec::with_capacity(results.len());
+        for (_key, value) in &results {
             if let Ok(msg) = serde_json::from_slice::<AgentMessage>(value) {
                 messages.push(msg);
             }
         }
-        // Already in chronological order (ascending timestamp keys).
         Ok(messages)
     }
 
@@ -328,10 +325,17 @@ impl SochStore {
                 // Simple truncation-based summary (no LLM).
                 let max_len = 2000;
                 if cold_text.len() > max_len {
+                    // H1 FIX: UTF-8 safe truncation — never slice mid-character.
+                    // The previous `&cold_text[..max_len]` panics on multi-byte
+                    // characters (CJK, emoji, etc.).
+                    let mut end = max_len;
+                    while end > 0 && !cold_text.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     format!(
                         "[Summary of {} messages] {}...",
                         cold_count,
-                        &cold_text[..max_len]
+                        &cold_text[..end]
                     )
                 } else {
                     format!("[Summary of {} messages] {}", cold_count, cold_text)
@@ -339,19 +343,38 @@ impl SochStore {
             }
         };
 
-        // Atomic compaction: store summary + delete cold entries in a single batch.
-        // This prevents data duplication/loss on crash between summary write and deletes.
+        // BLOCKER 1 FIX: Atomic compaction — summary write + cold entry deletes
+        // must land in a single commit. The previous code did put_batch() then
+        // individual delete() calls — if the process crashed between them:
+        //   - Summary exists AND originals exist → duplicate data in context
+        //   - Partial deletion → incoherent context (some summarized, some verbatim)
+        //   - delete() used `let _ =` ignoring errors → silent data retention
+        //
+        // Fix: Use the SochDB connection directly under a single write lock,
+        // buffering all puts and deletes before a single commit+fsync.
         let ts = chrono::Utc::now().timestamp_millis();
         let summary_key = format!("sessions/{}/summaries/{}", key.as_str(), ts);
         let summary_bytes = summary.as_bytes();
 
-        // Build atomic batch: one put (summary) + N deletes (cold messages).
-        let batch_puts: Vec<(&str, &[u8])> = vec![(&summary_key, summary_bytes)];
-        // Apply puts first, then deletes — all in one group-commit.
-        self.put_batch(&batch_puts)?;
-        // Delete cold entries in batch.
-        for (k, _v) in cold_entries {
-            let _ = self.delete(k);
+        {
+            // Acquire write lock once for the entire atomic operation
+            let _guard = self.op_lock.write();
+
+            // Step 1: Buffer the summary write
+            self.connection.put(&summary_key, summary_bytes)
+                .map_err(|e| map_sochdb_error(e, "compaction put summary"))?;
+
+            // Step 2: Buffer all cold entry deletes
+            for (k, _v) in cold_entries {
+                self.connection.delete(k)
+                    .map_err(|e| map_sochdb_error(e, &format!("compaction delete '{k}'")))?;
+            }
+
+            // Step 3: Single atomic commit + fsync
+            self.connection.commit()
+                .map_err(|e| map_sochdb_error(e, "compaction commit"))?;
+            self.connection.fsync()
+                .map_err(|e| map_sochdb_error(e, "compaction fsync"))?;
         }
 
         debug!(

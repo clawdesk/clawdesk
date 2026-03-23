@@ -12,7 +12,7 @@ name = "clawdesk_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["sandbox", "tunnel", "mcp", "extensions", "migrate", "memory", "observability", "discovery", "threads"]
+default = ["sandbox", "tunnel", "mcp", "extensions", "migrate", "memory", "observability", "discovery", "threads", "acp"]
 sandbox = ["dep:clawdesk-sandbox"]
 tunnel = ["dep:clawdesk-tunnel"]
 mcp = ["dep:clawdesk-mcp"]
@@ -22,7 +22,8 @@ memory = ["dep:clawdesk-memory"]
 observability = ["dep:clawdesk-observability"]
 discovery = ["dep:clawdesk-discovery"]
 threads = ["dep:clawdesk-threads"]
-full = ["sandbox", "tunnel", "mcp", "extensions", "migrate", "memory", "observability", "discovery", "threads"]
+acp = ["dep:clawdesk-acp"]
+full = ["sandbox", "tunnel", "mcp", "extensions", "migrate", "memory", "observability", "discovery", "threads", "acp"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -47,7 +48,7 @@ clawdesk-skills = { workspace = true }
 clawdesk-runtime = { workspace = true }
 clawdesk-media = { workspace = true }
 clawdesk-plugin = { workspace = true }
-clawdesk-acp = { workspace = true }
+clawdesk-acp = { workspace = true, optional = true }
 clawdesk-discovery = { workspace = true, optional = true }
 clawdesk-observability = { workspace = true, optional = true }
 clawdesk-infra = { workspace = true }

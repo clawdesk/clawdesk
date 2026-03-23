@@ -168,6 +168,11 @@ pub struct SubscriberMetrics {
     pub dropped: AtomicU64,
     /// Current estimated lag (events in channel).
     pub pending: AtomicU64,
+    /// BLOCKER 2 FIX: Total events consumed by the subscriber.
+    /// Monotonically increasing. pending = delivered - consumed.
+    /// The consumer must call `mark_consumed(1)` or use the
+    /// `ConsumingReceiver` wrapper which does it automatically.
+    pub consumed: AtomicU64,
 }
 
 impl SubscriberMetrics {
@@ -176,6 +181,7 @@ impl SubscriberMetrics {
             delivered: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             pending: AtomicU64::new(0),
+            consumed: AtomicU64::new(0),
         }
     }
 
@@ -282,11 +288,19 @@ impl BackpressureManager {
         match sub.sender.try_send(event) {
             Ok(()) => {
                 sub.metrics.delivered.fetch_add(1, Ordering::Relaxed);
-                sub.metrics.pending.fetch_add(1, Ordering::Relaxed);
-                sub.signal.update(
-                    sub.metrics.pending.load(Ordering::Relaxed),
-                    sub.config.capacity,
-                );
+                // BLOCKER 2 FIX: Compute actual pending from delivered - consumed
+                // instead of the old pending.fetch_add(1) which never decremented.
+                // The old approach caused the backpressure signal to go permanently
+                // Red after capacity×0.8 total deliveries, regardless of consumption.
+                // Now we derive pending = delivered - consumed (both monotonic counters).
+                let delivered = sub.metrics.delivered.load(Ordering::Relaxed);
+                let consumed = sub.metrics.consumed.load(Ordering::Relaxed);
+                let actual_pending = delivered.saturating_sub(consumed);
+                sub.metrics.pending.store(actual_pending, Ordering::Relaxed);
+                sub.signal.update(actual_pending, sub.config.capacity);
+                // Update cached worst signal so worst_signal() is current.
+                drop(sub);
+                self.recompute_worst();
                 true
             }
             Err(mpsc::error::TrySendError::Full(_evt)) => {
@@ -312,7 +326,14 @@ impl BackpressureManager {
                         false
                     }
                     OverflowStrategy::Block => {
-                        // For the non-async try_deliver, fall back to drop
+                        // M2 FIX: Log warning instead of silently dropping.
+                        // try_deliver is non-async and cannot block, so Block
+                        // degrades to DropNewest. Use async deliver() for
+                        // true blocking behavior.
+                        tracing::warn!(
+                            subscriber = subscriber_id,
+                            "Block overflow in non-async try_deliver: dropping (use deliver() for blocking)"
+                        );
                         sub.metrics.dropped.fetch_add(1, Ordering::Relaxed);
                         false
                     }

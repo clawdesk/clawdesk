@@ -48,6 +48,8 @@ pub mod commands_skill_builder;
 pub mod commands_visual_orchestrator;
 pub mod commands_wizard;
 pub mod deep_link;
+#[cfg(dev)]
+pub mod dev_ui_server;
 pub mod engine;
 pub mod enriched_backend;
 pub mod error;
@@ -523,6 +525,13 @@ pub fn run() {
             commands_visual_orchestrator::orchestrator_critical_path,
         ])
         .setup(|app| {
+            // ── Dev UI fallback ─────────────────────────────────
+            // In dev mode, Tauri loads from http://localhost:1420 (Vite).
+            // If Vite isn't running, spawn a minimal static server from
+            // the pre-built dist/ so the UI always renders.
+            #[cfg(dev)]
+            dev_ui_server::maybe_start_fallback_server();
+
             #[cfg(target_os = "macos")]
             {
                 if let Some(window) = app.get_webview_window("main") {
@@ -571,8 +580,34 @@ pub fn run() {
                 // for lock-free reads, while AppState uses RwLock. They operate
                 // independently; the gateway handles external HTTP/WS traffic.
                 let gw_channels = ChannelRegistry::new();
-                let gw_providers = clawdesk_providers::registry::ProviderRegistry::new();
-                let gw_tools = clawdesk_agents::ToolRegistry::new();
+                let mut gw_providers = clawdesk_providers::registry::ProviderRegistry::new();
+                let mut gw_tools = clawdesk_agents::ToolRegistry::new();
+
+                // ── Provider initialization — shared config source ──────────
+                // The gateway MUST have providers registered, otherwise CLI
+                // clients (`clawdesk message send`, `clawdesk pipe`) get
+                // "No LLM provider configured" errors.
+                //
+                // Priority: env vars → channel_provider.json (same as CLI gateway)
+                clawdesk_providers::registry::auto_register_from_env(&mut gw_providers);
+                let cp_path = clawdesk_types::dirs::dot_clawdesk().join("channel_provider.json");
+                clawdesk_providers::registry::register_from_config_file(&mut gw_providers, &cp_path);
+                // Set default: prefer the user-configured provider, then ollama
+                if gw_providers.get("local_compatible").is_some() {
+                    gw_providers.set_default("local_compatible");
+                } else if gw_providers.get("ollama").is_some() {
+                    gw_providers.set_default("ollama");
+                }
+                info!(count = gw_providers.list().len(), "gateway providers registered");
+
+                // ── Tool registration ────────────────────────────────────────
+                // Register builtin tools so gateway agents can execute tools,
+                // not just produce text replies.
+                let workspace_root = clawdesk_types::dirs::dot_clawdesk();
+                clawdesk_agents::builtin_tools::register_builtin_tools(
+                    &mut gw_tools,
+                    Some(workspace_root),
+                );
 
                 // Open an in-memory SochStore for the gateway (the desktop app
                 // owns the on-disk store — the gateway is just the HTTP layer).
@@ -618,6 +653,12 @@ pub fn run() {
                     cancel.clone(),
                     gw_inbound,
                 ));
+
+                // Store gateway state in AppState so UI can hot-swap providers
+                {
+                    let mut gs = state.gateway_state.write().unwrap();
+                    *gs = Some(gw_state.clone());
+                }
 
                 let port: u16 = std::env::var("CLAWDESK_GATEWAY_PORT")
                     .ok()

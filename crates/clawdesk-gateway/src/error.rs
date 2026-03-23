@@ -48,6 +48,10 @@ pub enum ApiError {
     /// Internal server error (escape hatch for migration).
     #[error("{0}")]
     Internal(String),
+
+    /// Request blocked by security policy.
+    #[error("{0}")]
+    Forbidden(String),
 }
 
 /// JSON error body returned in API responses.
@@ -94,6 +98,7 @@ impl ApiError {
             ApiError::NotFound { .. } => StatusCode::NOT_FOUND,
             ApiError::ThreadBusy { .. } => StatusCode::CONFLICT,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
         }
     }
 
@@ -104,6 +109,7 @@ impl ApiError {
             ApiError::NotFound { .. } => "NOT_FOUND",
             ApiError::ThreadBusy { .. } => "THREAD_BUSY",
             ApiError::Internal(_) => "INTERNAL_ERROR",
+            ApiError::Forbidden(_) => "FORBIDDEN",
         }
     }
 

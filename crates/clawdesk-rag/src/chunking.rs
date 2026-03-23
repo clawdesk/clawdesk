@@ -42,7 +42,7 @@ pub fn chunk_text(text: &str, config: &ChunkConfig) -> Vec<TextChunk> {
     let mut start = 0;
 
     while start < text.len() && chunks.len() < config.max_chunks {
-        let end = (start + config.chunk_size).min(text.len());
+        let end = snap_to_char_boundary(text, (start + config.chunk_size).min(text.len()));
         let actual_end = if end < text.len() {
             find_break_point(text, start, end)
         } else {
@@ -60,13 +60,24 @@ pub fn chunk_text(text: &str, config: &ChunkConfig) -> Vec<TextChunk> {
             (actual_end - start).max(1)
         };
         start += advance;
+        start = snap_to_char_boundary(text, start);
     }
 
     chunks
 }
 
+/// Snap a byte offset backward to the nearest char boundary.
+fn snap_to_char_boundary(text: &str, pos: usize) -> usize {
+    let mut p = pos.min(text.len());
+    while p > 0 && !text.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
 fn find_break_point(text: &str, start: usize, target: usize) -> usize {
-    let search_start = if target > start + 100 { target - 100 } else { start };
+    let search_start = snap_to_char_boundary(text, if target > start + 100 { target - 100 } else { start });
+    let target = snap_to_char_boundary(text, target);
     let slice = &text[search_start..target];
     let patterns = [". ", ".\n", "! ", "? ", "\n\n"];
     let mut best = None;

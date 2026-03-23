@@ -57,6 +57,22 @@ fn layer_assignments() -> HashMap<&'static str, u8> {
     m.insert("clawdesk-planner", 5);
     m.insert("clawdesk-consensus", 5);
     m.insert("clawdesk-adapters", 5);
+    m.insert("clawdesk-core", 5); // Orchestration center — depends on gateway+agents+providers
+
+    // Layer 4.5: Cognitive subsystems — depend on agents/memory
+    // These are aspirational modules; some may not be wired into main execution.
+    m.insert("clawdesk-metacognition", 4);
+    m.insert("clawdesk-curiosity", 4);
+    m.insert("clawdesk-worldmodel", 4);
+    m.insert("clawdesk-user-model", 4);
+    m.insert("clawdesk-user-predict", 4);
+    m.insert("clawdesk-selfdiag", 4);
+    m.insert("clawdesk-procedural", 4);
+    m.insert("clawdesk-voice", 4);
+    m.insert("clawdesk-polls", 4);
+    m.insert("clawdesk-agent-config", 4);
+    m.insert("clawdesk-channel-plugins", 4);
+    m.insert("clawdesk-wizard", 6);
 
     // Layer 6: Infrastructure — depend on orchestration
     m.insert("clawdesk-daemon", 6);

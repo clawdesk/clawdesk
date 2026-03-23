@@ -2,6 +2,7 @@
 //! idle detection, log rotation, encrypted backup, and git sync.
 
 pub mod backup;
+pub mod circuit_breaker;
 pub mod clipboard;
 pub mod daemon;
 pub mod dispatch;
@@ -38,5 +39,9 @@ pub use voice_wake::{VoiceWakeRuntime, WakeRuntimeState, PttConfig, AudioStreamL
 pub use notifications::{Notification, NotificationManager, NotificationPriority, NotificationCategory};
 pub use notify_overlay::{OverlayController, OverlayConfig, OverlayNotification, OverlayEvent, OverlayPriority};
 pub use clipboard::{ClipboardManager, ClipboardEntry, ClipboardConfig};
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerRegistry, CircuitState as InfraCircuitState,
+    CircuitStatus, DegradationStrategy, DependencyKind,
+};
 pub use daemon::{DaemonManager, DaemonConfig, DaemonState, HealthStatus};
 pub use task_scope::{TaskScope, spawn_traced};

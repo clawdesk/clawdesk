@@ -234,6 +234,7 @@ pub enum MessageOrigin {
     Signal { phone_number: String },
     Webhook { source: String },
     Mastodon { instance: String, visibility: String },
+    Line { user_id: String, reply_token: Option<String> },
 }
 
 impl MessageOrigin {
@@ -254,6 +255,7 @@ impl MessageOrigin {
             Self::Signal { .. } => ChannelId::Signal,
             Self::Webhook { .. } => ChannelId::Webhook,
             Self::Mastodon { .. } => ChannelId::Mastodon,
+            Self::Line { .. } => ChannelId::Line,
         }
     }
 
@@ -274,6 +276,7 @@ impl MessageOrigin {
             Self::Signal { phone_number, .. } => phone_number.clone(),
             Self::Webhook { source, .. } => source.clone(),
             Self::Mastodon { instance, .. } => instance.clone(),
+            Self::Line { user_id, .. } => user_id.clone(),
         }
     }
 }

@@ -40,6 +40,14 @@ pub(crate) struct LoopState {
     pub loop_guard: LoopGuard,
     pub initial_msg_count: usize,
     pub overflow_retries: u8,
+    /// G3 FIX: Track tool call success/failure counts per round
+    /// for accurate metacognitive snapshot reporting.
+    pub last_round_total_tools: usize,
+    pub last_round_failed_tools: usize,
+    /// G3b FIX: Store actual tool names from ToolResult.name instead of
+    /// re-extracting from JSON-structured Tool-role messages (which yields
+    /// JSON fragments like `{"tool_call_id":` instead of tool names).
+    pub last_round_tool_names: Vec<String>,
 }
 
 /// Result of streaming from the LLM provider.

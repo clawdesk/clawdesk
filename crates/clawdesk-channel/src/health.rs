@@ -70,7 +70,7 @@ impl Default for HealthThresholds {
 }
 
 /// Number of `ChannelId` variants. Must be kept in sync with the enum.
-const NUM_CHANNELS: usize = 14;
+const NUM_CHANNELS: usize = 15;
 
 /// Map a `ChannelId` to a fixed array index.
 fn channel_index(id: ChannelId) -> usize {
@@ -89,6 +89,7 @@ fn channel_index(id: ChannelId) -> usize {
         ChannelId::Signal => 11,
         ChannelId::Webhook => 12,
         ChannelId::Mastodon => 13,
+        ChannelId::Line => 14,
     }
 }
 
@@ -108,6 +109,7 @@ const ALL_CHANNELS: [ChannelId; NUM_CHANNELS] = [
     ChannelId::Signal,
     ChannelId::Webhook,
     ChannelId::Mastodon,
+    ChannelId::Line,
 ];
 
 /// Monitors health of all registered channels.

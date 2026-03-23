@@ -62,7 +62,7 @@ pub fn bundled_templates() -> Vec<PersonaTemplate> {
             default_allow_tools: &["browser", "canvas", "file_read", "screenshot", "web_search"],
             default_deny_tools: &["exec", "file_write", "apply_patch", "bash"],
             default_skills: &["design/wireframe", "design/accessibility", "design/component-spec"],
-            default_model: "claude-sonnet-4-20250514",
+            default_model: "auto",
         },
         PersonaTemplate {
             id: "fullstack-dev",
@@ -82,7 +82,7 @@ pub fn bundled_templates() -> Vec<PersonaTemplate> {
             default_allow_tools: &["file_read", "file_write", "exec", "apply_patch", "web_search", "browser"],
             default_deny_tools: &[],
             default_skills: &[],
-            default_model: "claude-sonnet-4-20250514",
+            default_model: "auto",
         },
         PersonaTemplate {
             id: "web-researcher",
@@ -102,7 +102,7 @@ pub fn bundled_templates() -> Vec<PersonaTemplate> {
             default_allow_tools: &["browser", "web_search", "file_read"],
             default_deny_tools: &["exec", "file_write", "apply_patch", "bash"],
             default_skills: &[],
-            default_model: "claude-sonnet-4-20250514",
+            default_model: "auto",
         },
         PersonaTemplate {
             id: "code-reviewer",
@@ -121,7 +121,7 @@ pub fn bundled_templates() -> Vec<PersonaTemplate> {
             default_allow_tools: &["file_read", "web_search", "browser"],
             default_deny_tools: &["exec", "file_write", "apply_patch", "bash"],
             default_skills: &[],
-            default_model: "claude-sonnet-4-20250514",
+            default_model: "auto",
         },
         PersonaTemplate {
             id: "technical-writer",
@@ -140,7 +140,7 @@ pub fn bundled_templates() -> Vec<PersonaTemplate> {
             default_allow_tools: &["file_read", "file_write", "web_search", "browser"],
             default_deny_tools: &["exec", "bash"],
             default_skills: &[],
-            default_model: "claude-sonnet-4-20250514",
+            default_model: "auto",
         },
         PersonaTemplate {
             id: "data-analyst",
@@ -160,7 +160,7 @@ pub fn bundled_templates() -> Vec<PersonaTemplate> {
             default_allow_tools: &["file_read", "exec", "web_search"],
             default_deny_tools: &["apply_patch"],
             default_skills: &[],
-            default_model: "claude-sonnet-4-20250514",
+            default_model: "auto",
         },
         PersonaTemplate {
             id: "devops-engineer",
@@ -179,7 +179,7 @@ pub fn bundled_templates() -> Vec<PersonaTemplate> {
             default_allow_tools: &["file_read", "file_write", "exec", "web_search", "bash"],
             default_deny_tools: &[],
             default_skills: &[],
-            default_model: "claude-sonnet-4-20250514",
+            default_model: "auto",
         },
         PersonaTemplate {
             id: "security-auditor",
@@ -198,7 +198,7 @@ pub fn bundled_templates() -> Vec<PersonaTemplate> {
             default_allow_tools: &["file_read", "web_search", "browser"],
             default_deny_tools: &["exec", "file_write", "apply_patch", "bash"],
             default_skills: &[],
-            default_model: "claude-sonnet-4-20250514",
+            default_model: "auto",
         },
         PersonaTemplate {
             id: "product-manager",
@@ -217,7 +217,7 @@ pub fn bundled_templates() -> Vec<PersonaTemplate> {
             default_allow_tools: &["web_search", "browser", "file_read"],
             default_deny_tools: &["exec", "file_write", "apply_patch", "bash"],
             default_skills: &[],
-            default_model: "claude-sonnet-4-20250514",
+            default_model: "auto",
         },
         PersonaTemplate {
             id: "qa-engineer",
@@ -236,7 +236,7 @@ pub fn bundled_templates() -> Vec<PersonaTemplate> {
             default_allow_tools: &["file_read", "file_write", "exec", "browser", "web_search"],
             default_deny_tools: &[],
             default_skills: &[],
-            default_model: "claude-sonnet-4-20250514",
+            default_model: "auto",
         },
     ]
 }

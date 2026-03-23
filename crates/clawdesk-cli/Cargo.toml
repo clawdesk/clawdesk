@@ -12,16 +12,23 @@ name = "clawdesk"
 path = "src/main.rs"
 
 [features]
-default = ["tui", "browser", "mcp", "rag", "local-models"]
+default = ["tui", "browser", "mcp", "rag", "local-models", "gateway", "plugins", "cron", "daemon"]
 tui = ["dep:clawdesk-tui"]
 browser = ["dep:clawdesk-browser"]
 mcp = ["dep:clawdesk-mcp"]
 rag = ["dep:clawdesk-rag"]
 local-models = ["dep:clawdesk-local-models"]
+# Control-plane features — included by default but strippable
+gateway = ["dep:clawdesk-gateway"]
+plugins = ["dep:clawdesk-plugin", "dep:clawdesk-skills"]
+cron = ["dep:clawdesk-cron"]
+daemon = ["dep:clawdesk-daemon"]
 # Build all optional features
-full = ["tui", "browser", "mcp", "rag", "local-models"]
-# Minimal build: core agent loop + providers only
-minimal = []
+full = ["tui", "browser", "mcp", "rag", "local-models", "gateway", "plugins", "cron", "daemon"]
+# Headless build: no TUI, no browser, no MCP, no RAG, no local models.
+# Still links the core control plane (gateway, plugins, cron, daemon).
+# TODO: cfg-gate control-plane refs in main.rs for a truly stripped build.
+headless = ["gateway", "plugins", "cron", "daemon"]
 
 [dependencies]
 clawdesk-types = { workspace = true }
@@ -32,15 +39,16 @@ clawdesk-channel = { workspace = true }
 clawdesk-channels = { workspace = true }
 clawdesk-providers = { workspace = true }
 clawdesk-agents = { workspace = true }
-clawdesk-gateway = { workspace = true }
-clawdesk-plugin = { workspace = true }
-clawdesk-skills = { workspace = true }
-clawdesk-cron = { workspace = true }
-clawdesk-daemon = { workspace = true }
+clawdesk-gateway = { workspace = true, optional = true }
+clawdesk-plugin = { workspace = true, optional = true }
+clawdesk-skills = { workspace = true, optional = true }
+clawdesk-cron = { workspace = true, optional = true }
+clawdesk-daemon = { workspace = true, optional = true }
 clawdesk-runtime = { workspace = true }
 clawdesk-bus = { workspace = true }
 clawdesk-security = { workspace = true }
 clawdesk-wizard = { workspace = true }
+clawdesk-conscious = { workspace = true }
 clawdesk-tui = { workspace = true, optional = true }
 clawdesk-browser = { workspace = true, optional = true }
 clawdesk-mcp = { workspace = true, optional = true }

@@ -148,7 +148,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            default_model: "claude-sonnet-4-20250514".to_string(),
+            default_model: "auto".to_string(),
             max_tool_iterations: 10,
             timeout_seconds: 120,
             enable_streaming: true,

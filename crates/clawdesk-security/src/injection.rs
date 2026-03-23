@@ -99,8 +99,15 @@ impl InjectionScanner {
 
     /// Scan an input string for potential prompt injection attacks.
     pub fn scan(&self, input: &str, source: InputSource) -> ScanResult {
+        // G8 FIX: UTF-8 safe truncation — never slice mid-character.
+        // The previous `&input[..max_scan_bytes]` panics on multi-byte chars.
         let truncated = if input.len() > self.config.max_scan_bytes {
-            &input[..self.config.max_scan_bytes]
+            // Find the last valid UTF-8 boundary at or before max_scan_bytes
+            let mut end = self.config.max_scan_bytes;
+            while end > 0 && !input.is_char_boundary(end) {
+                end -= 1;
+            }
+            &input[..end]
         } else {
             input
         };
@@ -124,11 +131,15 @@ impl InjectionScanner {
         // Combine scores (max of all findings, with source multiplier)
         let max_score = findings.iter().map(|f| f.score).fold(0.0f64, f64::max);
 
-        // Indirect injection (tool output) is weighted higher
+        // G9 FIX: Increased ToolOutput multiplier from 1.3 to 1.5 since indirect
+        // injection via tool output is the primary threat vector in agentic systems.
+        // At 1.3x, a score of 0.5 becomes 0.65 (below block_threshold 0.7),
+        // meaning most tool output injections only FLAG, never BLOCK.
+        // At 1.5x, a score of 0.5 becomes 0.75 which correctly triggers BLOCK.
         let source_multiplier = match source {
             InputSource::User => 1.0,
-            InputSource::ToolOutput => 1.3,
-            InputSource::WebContent => 1.5,
+            InputSource::ToolOutput => 1.5,
+            InputSource::WebContent => 1.8,
         };
 
         let risk_score = (max_score * source_multiplier).min(1.0);

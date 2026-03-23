@@ -35,6 +35,8 @@ pub enum ChannelId {
     Webhook,
     /// Mastodon / Fediverse (ActivityPub)
     Mastodon,
+    /// Line Messaging Platform
+    Line,
 }
 
 impl fmt::Display for ChannelId {
@@ -54,6 +56,7 @@ impl fmt::Display for ChannelId {
             Self::Signal => write!(f, "signal"),
             Self::Webhook => write!(f, "webhook"),
             Self::Mastodon => write!(f, "mastodon"),
+            Self::Line => write!(f, "line"),
         }
     }
 }

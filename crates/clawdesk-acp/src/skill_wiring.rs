@@ -49,6 +49,12 @@ pub fn sync_skills_to_card(card: &mut AgentCard, skills: &[SkillSnapshot]) {
         for tag in &skill.tags {
             if let Some(cap) = CapabilityId::from_tag(tag) {
                 capabilities.insert(cap);
+            } else {
+                // TASK 2 FIX: Preserve unrecognized tags as custom_tags
+                // instead of silently dropping them. Domain-specific tags
+                // like "hipaa", "ecommerce", "app-store" are now discoverable
+                // by the multi-agent coordinator's matching logic.
+                card.custom_tags.insert(tag.clone());
             }
         }
     }

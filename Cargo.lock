@@ -1251,14 +1251,22 @@ dependencies = [
  "clawdesk-browser",
  "clawdesk-bus",
  "clawdesk-canvas",
+ "clawdesk-conscious",
+ "clawdesk-consensus",
+ "clawdesk-curiosity",
  "clawdesk-domain",
  "clawdesk-media",
  "clawdesk-metacognition",
  "clawdesk-plugin",
+ "clawdesk-procedural",
  "clawdesk-providers",
  "clawdesk-security",
+ "clawdesk-selfdiag",
  "clawdesk-storage",
  "clawdesk-types",
+ "clawdesk-user-model",
+ "clawdesk-user-predict",
+ "clawdesk-worldmodel",
  "dashmap 5.5.3",
  "libc",
  "regex",
@@ -1440,6 +1448,7 @@ dependencies = [
  "clawdesk-bus",
  "clawdesk-channel",
  "clawdesk-channels",
+ "clawdesk-conscious",
  "clawdesk-cron",
  "clawdesk-daemon",
  "clawdesk-domain",
@@ -1469,6 +1478,25 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "clawdesk-conscious"
+version = "0.1.7"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clawdesk-consensus",
+ "clawdesk-metacognition",
+ "clawdesk-types",
+ "dashmap 5.5.3",
+ "rustc-hash 2.1.1",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.8.2",
+ "tracing",
  "uuid",
 ]
 
@@ -1631,6 +1659,7 @@ dependencies = [
  "clawdesk-cron",
  "clawdesk-domain",
  "clawdesk-media",
+ "clawdesk-memory",
  "clawdesk-planner",
  "clawdesk-plugin",
  "clawdesk-providers",
@@ -1962,6 +1991,7 @@ name = "clawdesk-security"
 version = "0.1.7"
 dependencies = [
  "aho-corasick",
+ "arc-swap",
  "async-trait",
  "base64ct",
  "chrono",
